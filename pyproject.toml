@@ -1,0 +1,39 @@
+[project]
+name = "slideviz"
+version = "0.1.0"
+description = "Interactive visualization of whole-slide liver histology and derived spatial readouts"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [
+    { name = "Michelle Elias", email = "elias.michelle@web.de" },
+    { name = "Matthias König", email = "koenigmx@hu-berlin.de" },
+]
+keywords = ["whole-slide-imaging", "histology", "napari", "microscopy", "liver"]
+classifiers = [
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Visualization",
+]
+
+dependencies = [
+    "dask>=2026.7.1",
+    "napari[pyqt6]>=0.8.0",
+    "numpy>=2.0",
+    "pylibczirw>=6.1.0",
+    "tifffile>=2026.7.31",
+]
+
+[project.scripts]
+slideviz-view = "slideviz.view:main"
+
+[project.urls]
+Repository = "https://github.com/matthiaskoenig/slideviz"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = []
