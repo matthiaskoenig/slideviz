@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Editor / OS
+.vscode/
+.idea/
+*.code-workspace
+.DS_Store
+CLAUDE.md
+.claude/settings.local.json
+
+# Data and derived artifacts
+data/
+*.czi
+*.tif
+*.tiff
+*.ndpi
+*.svs
+*.qptiff
+*.zarr/
+*.npy
+*.png
+*.jpg
