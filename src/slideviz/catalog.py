@@ -1,15 +1,24 @@
 """Index JSON sidecars into a queryable SQLite database.
 
     from slideviz.catalog import build, query
-    build(Path("/path/to/data"), Path("slides.db"))
-    query(db, "SELECT file FROM slides WHERE dose_mg_per_kg > 200")
+    build(Path("/path/to/data"))
+    query("SELECT file FROM slides WHERE dose_mg_per_kg > 200")
+
+The index lives in ~/.cache/slideviz/slides.db.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
+
+
+def default_db() -> Path:
+    """Location of the index, honouring XDG_CACHE_HOME."""
+    cache = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+    return cache / "slideviz" / "slides.db"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS slides (
@@ -45,8 +54,10 @@ def read_sidecars(directory: Path) -> list[dict]:
     return records
 
 
-def build(directory: Path, db_path: Path) -> int:
+def build(directory: Path, db_path: Path | None = None) -> int:
     """Rebuild the index from the sidecars in a directory. Returns row count."""
+    db_path = db_path or default_db()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
     records = read_sidecars(directory)
 
     with sqlite3.connect(db_path) as conn:
@@ -62,9 +73,9 @@ def build(directory: Path, db_path: Path) -> int:
     return len(records)
 
 
-def query(db_path: Path, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
+def query(sql: str, params: tuple = (), db_path: Path | None = None) -> list[sqlite3.Row]:
     """Run a query and return the rows, accessible by column name."""
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(db_path or default_db()) as conn:
         conn.row_factory = sqlite3.Row
         return conn.execute(sql, params).fetchall()
 
