@@ -7,6 +7,8 @@ from pathlib import Path
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
+    QFormLayout,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -19,10 +21,12 @@ from qtpy.QtWidgets import (
 from slideviz.catalog import query, slide_path
 from slideviz.czi import read_pyramid
 
-LIST_SQL = """
-SELECT * FROM slides
-ORDER BY species, substance, dose_mg_per_kg, animal_id, stain
-"""
+ORDER_SQL = "ORDER BY species, substance, dose_mg_per_kg, animal_id, stain"
+
+# Filter label to the column it restricts
+FILTERS = {"Species": "species", "Stain": "stain", "Dose": "dose_mg_per_kg"}
+
+ANY = "All"
 
 
 class SlideList(QWidget):
@@ -32,6 +36,14 @@ class SlideList(QWidget):
         """Build the list, the buttons and the status line, then fill the list."""
         super().__init__()
         self.viewer = viewer
+
+        self.boxes = {}
+        filters = QFormLayout()
+        for label, column in FILTERS.items():
+            box = QComboBox()
+            box.currentTextChanged.connect(self.refresh)  # re-query on every change
+            self.boxes[column] = box
+            filters.addRow(label, box)
 
         self.list = QListWidget()
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -51,21 +63,49 @@ class SlideList(QWidget):
             buttons.addWidget(button)
 
         layout = QVBoxLayout(self)  # passing self installs it as this widget's layout
+        layout.addLayout(filters)
         layout.addWidget(self.list)
         layout.addLayout(buttons)
         layout.addWidget(self.status)
 
+        self._fill_boxes()
         self.refresh()
 
+    def _fill_boxes(self) -> None:
+        """Offer the values the index actually holds, so new species appear on their own."""
+        for column, box in self.boxes.items():
+            values = query(f"SELECT DISTINCT {column} FROM slides ORDER BY 1")
+            box.blockSignals(True)  # filling would otherwise fire refresh once per item
+            box.clear()
+            box.addItem(ANY)
+            box.addItems([str(row[0]) for row in values])
+            box.blockSignals(False)
+
+    def _where(self) -> tuple[str, tuple]:
+        """Build the WHERE clause from the active filters, and the values it needs."""
+        clauses, params = [], []
+        for column, box in self.boxes.items():
+            if box.currentText() != ANY:
+                clauses.append(f"{column} = ?")
+                params.append(box.currentText())
+        return ("WHERE " + " AND ".join(clauses) if clauses else "", tuple(params))
+
     def refresh(self) -> None:
-        """Reload the list from the index."""
+        """Reload the list from the index, honouring the filters."""
         self.list.clear()
-        rows = query(LIST_SQL)
+        where, params = self._where()
+        rows = query(f"SELECT * FROM slides {where} {ORDER_SQL}", params)
         for row in rows:
             item = QListWidgetItem(self._label(row))
             item.setData(Qt.ItemDataRole.UserRole, str(slide_path(row)))  # hidden path
             self.list.addItem(item)
-        self.status.setText(f"{len(rows)} slides")
+        self.status.setText(self._count())
+
+    def _count(self) -> str:
+        """Slides listed, and the total when a filter is hiding some."""
+        total = query("SELECT COUNT(*) FROM slides")[0][0]
+        shown = self.list.count()
+        return f"{shown} slides" if shown == total else f"{shown} of {total} slides"
 
     @staticmethod
     def _label(row) -> str:
@@ -109,4 +149,4 @@ class SlideList(QWidget):
     def _clear(self) -> None:
         """Empty the viewer and reset the status line to the slide count."""
         self.viewer.layers.clear()
-        self.status.setText(f"{self.list.count()} slides")
+        self.status.setText(self._count())
