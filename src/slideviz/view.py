@@ -15,8 +15,10 @@ APAP_DIR = Path("/home/michelle/Projects/image-analysis/APAP")
 
 
 def main() -> None:
+    """Index the data directory, then open napari with the slide list docked."""
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,  # keeps docstring layout
     )
     parser.add_argument("--data", type=Path, default=APAP_DIR,
                         help="directory of slides and their sidecars")
@@ -25,10 +27,10 @@ def main() -> None:
     if not args.data.is_dir():
         parser.error(f"not a directory: {args.data}")
 
-    count = build(args.data)
+    count = build(args.data)  # rebuild first, so the list matches what is on disk
     print(f"indexed {count} slides from {args.data}")
 
-    import napari  # slow: pulls in Qt
+    import napari  # imported here, pulling in Qt is slow
 
     from slideviz.widget import SlideList
 
