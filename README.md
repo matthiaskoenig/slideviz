@@ -12,6 +12,15 @@ uv sync
 
 Python 3.12: napari, VisPy and pylibCZIrw have no wheels for newer versions yet.
 
+## Use
+
+```bash
+uv run slideviz-view                                    # browse slides in napari
+uv run slideviz-index <dir>                             # rebuild the index
+uv run slideviz-index --sql "SELECT * FROM slides"      # query it
+uv run python scripts/probe_slide.py <file|dir>         # report what is in a slide file
+```
+
 ## Data layout
 
 ```

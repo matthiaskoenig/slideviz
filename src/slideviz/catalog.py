@@ -1,5 +1,8 @@
 """Index JSON sidecars into a queryable SQLite database.
 
+    uv run slideviz-index /path/to/data
+    uv run slideviz-index --sql "SELECT file FROM slides WHERE dose_mg_per_kg > 200"
+
     from slideviz.catalog import build, query
     build(Path("/path/to/data"))
     query("SELECT file FROM slides WHERE dose_mg_per_kg > 200")
@@ -83,3 +86,46 @@ def query(sql: str, params: tuple = (), db_path: Path | None = None) -> list[sql
 def slide_path(row: sqlite3.Row) -> Path:
     """Full path to the image a row describes."""
     return Path(row["directory"]) / row["file"]
+
+
+SUMMARY_SQL = """
+SELECT species, substance, dose_mg_per_kg, stain, COUNT(*) AS n
+FROM slides GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4
+"""
+
+
+def main() -> None:
+    """Rebuild the index from the command line."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("directory", type=Path, nargs="?",
+                        help="directory of slides and their sidecars")
+    parser.add_argument("--db", type=Path, default=None,
+                        help=f"index location (default {default_db()})")
+    parser.add_argument("--sql", help="run a query against the index and print the rows")
+    args = parser.parse_args()
+
+    if args.sql:
+        for row in query(args.sql, db_path=args.db):
+            print("  ".join(str(v) for v in row))
+        return
+
+    if args.directory is None:
+        parser.error("give a directory to index, or --sql to query")
+    if not args.directory.is_dir():
+        parser.error(f"not a directory: {args.directory}")
+
+    db = args.db or default_db()
+    count = build(args.directory, db)
+    print(f"indexed {count} slides into {db}")
+
+    for row in query(SUMMARY_SQL, db_path=db):
+        print(f"  {row['species']} {row['substance']} "
+              f"{row['dose_mg_per_kg']:>3} mg/kg {row['stain']:<7} {row['n']}")
+
+
+if __name__ == "__main__":
+    main()
