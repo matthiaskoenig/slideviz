@@ -108,7 +108,7 @@ def probe_tiff(path: Path) -> None:
             print(f"    [{i}] {series.shape} {series.dtype} axes={series.axes} "
                   f"pyramid levels={len(levels)}")
 
-        # Tiled means the image is stored in squares, not full-width rows
+        # Tiled means the image is stored in squares
         page = tif.pages[0]
         print(f"  compression {page.compression.name}")
         print(f"  tiled       {page.is_tiled}"

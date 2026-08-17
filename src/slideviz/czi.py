@@ -57,8 +57,7 @@ def _read_tile(
     smaller than the tile it has to fill; the remainder is padded white.
     """
     with pyczi.open_czi(path) as czi:
-        # zoom does the downsampling inside the reader, coarse level
-        # never touches full-resolution pixels
+        # zoom downsamples inside the reader
         tile = czi.read(
             plane={"T": 0, "Z": 0, "C": 0},
             roi=(x, y, w, h),
