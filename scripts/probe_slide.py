@@ -1,6 +1,7 @@
 """Report what is inside a slide file, without decoding any image data.
 
-    uv run python scripts/probe_slide.py /path/to/dir      # every slide in it, e.g. uv run python scripts/probe_slide.py /home/michelle/Projects/image-analysis/APAP
+    uv run python scripts/probe_slide.py slide.czi         # one file
+    uv run python scripts/probe_slide.py /path/to/dir      # every slide in it
 """
 
 from __future__ import annotations

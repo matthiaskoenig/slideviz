@@ -1923,6 +1923,8 @@ dependencies = [
     { name = "dask" },
     { name = "napari", extra = ["pyqt6"] },
     { name = "numpy" },
+    { name = "platformdirs" },
+    { name = "pydantic-settings" },
     { name = "pylibczirw" },
     { name = "tifffile" },
 ]
@@ -1932,6 +1934,8 @@ requires-dist = [
     { name = "dask", specifier = ">=2026.7.1" },
     { name = "napari", extras = ["pyqt6"], specifier = ">=0.8.0" },
     { name = "numpy", specifier = ">=2.0" },
+    { name = "platformdirs", specifier = ">=4.11.2" },
+    { name = "pydantic-settings", specifier = ">=2.15.0" },
     { name = "pylibczirw", specifier = ">=6.1.0" },
     { name = "tifffile", specifier = ">=2026.7.31" },
 ]

@@ -10,6 +10,9 @@ __pycache__/
 .mypy_cache/
 .ipynb_checkpoints/
 
+# Local configuration
+.env
+
 # Editor / OS
 .vscode/
 .idea/

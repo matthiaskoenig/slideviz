@@ -21,6 +21,8 @@ dependencies = [
     "dask>=2026.7.1",
     "napari[pyqt6]>=0.8.0",
     "numpy>=2.0",
+    "platformdirs>=4.11.2",
+    "pydantic-settings>=2.15.0",
     "pylibczirw>=6.1.0",
     "tifffile>=2026.7.31",
 ]

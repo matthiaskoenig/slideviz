@@ -10,8 +10,7 @@ import argparse
 from pathlib import Path
 
 from slideviz.catalog import build
-
-APAP_DIR = Path("/home/michelle/Projects/image-analysis/APAP")
+from slideviz.settings import settings
 
 
 def main() -> None:
@@ -20,10 +19,12 @@ def main() -> None:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,  # keeps docstring layout
     )
-    parser.add_argument("--data", type=Path, default=APAP_DIR,
+    parser.add_argument("--data", type=Path, default=settings.data,  # --data still wins
                         help="directory of slides and their sidecars")
     args = parser.parse_args()
 
+    if args.data is None:
+        parser.error("no data directory: pass --data or set SLIDEVIZ_DATA")
     if not args.data.is_dir():
         parser.error(f"not a directory: {args.data}")
 

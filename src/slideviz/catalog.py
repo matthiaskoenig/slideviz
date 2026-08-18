@@ -7,50 +7,31 @@
     build(Path("/path/to/data"))
     query("SELECT file FROM slides WHERE dose_mg_per_kg > 200")
 
-The index lives in ~/.cache/slideviz/slides.db.
+The index lives in the user cache directory, or wherever SLIDEVIZ_DB points.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 from pathlib import Path
 
+from pydantic import ValidationError
+
+from slideviz.schema import COLUMNS, Slide, create_table_sql
+from slideviz.settings import settings
+
 
 def default_db() -> Path:
-    """Location of the index, honouring XDG_CACHE_HOME."""
-    cache = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-    return cache / "slideviz" / "slides.db"
+    """Location of the index, from settings so SLIDEVIZ_DB can move it."""
+    return settings.db
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS slides (
-    file            TEXT NOT NULL,
-    directory       TEXT NOT NULL,
-    original_name   TEXT,
-    species         TEXT NOT NULL,
-    substance       TEXT NOT NULL,
-    dose_mg_per_kg  INTEGER NOT NULL,
-    animal_id       TEXT NOT NULL,
-    stain           TEXT NOT NULL,
-    modality        TEXT NOT NULL,
-    serial_block    TEXT NOT NULL,
-    scene           INTEGER NOT NULL DEFAULT 0,
-    -- same filename under two roots is two slides, and a scene is one tissue piece
-    PRIMARY KEY (directory, file, scene)
-);
+
+SCHEMA = f"""
+{create_table_sql()}
 CREATE INDEX IF NOT EXISTS idx_block ON slides(serial_block);
 CREATE INDEX IF NOT EXISTS idx_dose ON slides(dose_mg_per_kg);
 """
-
-# Indexed for querying
-COLUMNS = [
-    "file", "directory", "original_name", "species", "substance",
-    "dose_mg_per_kg", "animal_id", "stain", "modality", "serial_block", "scene",
-]
-
-# Columns a sidecar must fill; the rest are optional or filled in on read
-REQUIRED = [c for c in COLUMNS if c not in ("directory", "original_name", "scene")]
 
 
 def split_scenes(data: dict) -> list[dict]:
@@ -83,13 +64,17 @@ def _drop_if_stale(conn: sqlite3.Connection) -> None:
 
 
 def check(records: list[dict]) -> None:
-    """Raise on the first record missing a required field, naming file and field."""
+    """Validate every record against the Slide model, naming the file and the field."""
     for record in records:
-        missing = [c for c in REQUIRED if record.get(c) is None]
-        if missing:
-            # without this the insert fails as a bare IntegrityError, naming neither
-            name = record.get("file", "<sidecar with no file field>")
-            raise ValueError(f"{name}: missing {', '.join(missing)}")
+        name = record.get("file", "<sidecar with no file field>")
+        try:
+            Slide(**record)
+        # without this the insert fails as a bare IntegrityError, naming neither
+        except ValidationError as exc:
+            problems = "; ".join(
+                f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()
+            )
+            raise ValueError(f"{name}: {problems}") from exc
 
 
 def build(directory: Path, db_path: Path | None = None) -> int:
@@ -140,12 +125,20 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("directory", type=Path, nargs="?",
-                        help="directory of slides and their sidecars")
+    parser.add_argument("directory", type=Path, nargs="?", default=settings.data,
+                        help="directory of slides and their sidecars (default SLIDEVIZ_DATA)")
     parser.add_argument("--db", type=Path, default=None,
                         help=f"index location (default {default_db()})")
     parser.add_argument("--sql", help="run a query against the index and print the rows")
+    parser.add_argument("--check", action="store_true",
+                        help="validate the sidecars without building the index")
+    parser.add_argument("--schema", action="store_true",
+                        help="print the sidecar JSON Schema and exit")
     args = parser.parse_args()
+
+    if args.schema:  # generated, so it cannot drift from the model
+        print(json.dumps(Slide.model_json_schema(), indent=2))
+        return
 
     if args.sql:
         for row in query(args.sql, db_path=args.db):
@@ -156,6 +149,12 @@ def main() -> None:
         parser.error("give a directory to index, or --sql to query")
     if not args.directory.is_dir():
         parser.error(f"not a directory: {args.directory}")
+
+    if args.check:  # the day a new batch arrives, before it goes near the index
+        records = read_sidecars(args.directory)
+        check(records)
+        print(f"{len(records)} records valid")
+        return
 
     db = args.db or default_db()
     count = build(args.directory, db)
