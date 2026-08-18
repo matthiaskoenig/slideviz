@@ -35,7 +35,9 @@ CREATE TABLE IF NOT EXISTS slides (
     stain           TEXT NOT NULL,
     modality        TEXT NOT NULL,
     serial_block    TEXT NOT NULL,
-    PRIMARY KEY (directory, file)  -- same filename under two roots is two slides
+    scene           INTEGER NOT NULL DEFAULT 0,
+    -- same filename under two roots is two slides, and a scene is one tissue piece
+    PRIMARY KEY (directory, file, scene)
 );
 CREATE INDEX IF NOT EXISTS idx_block ON slides(serial_block);
 CREATE INDEX IF NOT EXISTS idx_dose ON slides(dose_mg_per_kg);
@@ -44,11 +46,20 @@ CREATE INDEX IF NOT EXISTS idx_dose ON slides(dose_mg_per_kg);
 # Indexed for querying
 COLUMNS = [
     "file", "directory", "original_name", "species", "substance",
-    "dose_mg_per_kg", "animal_id", "stain", "modality", "serial_block",
+    "dose_mg_per_kg", "animal_id", "stain", "modality", "serial_block", "scene",
 ]
 
-# Columns a sidecar must fill; original_name is optional
-REQUIRED = [c for c in COLUMNS if c not in ("directory", "original_name")]
+# Columns a sidecar must fill; the rest are optional or filled in on read
+REQUIRED = [c for c in COLUMNS if c not in ("directory", "original_name", "scene")]
+
+
+def split_scenes(data: dict) -> list[dict]:
+    """One record per scene, or a single scene-0 record when the sidecar lists none."""
+    scenes = data.pop("scenes", None)
+    if not scenes:
+        return [{**data, "scene": 0}]
+    # entries override the shared fields, so what is common is written once
+    return [{**data, "scene": i, **scene} for i, scene in enumerate(scenes)]
 
 
 def read_sidecars(directory: Path) -> list[dict]:
@@ -60,7 +71,7 @@ def read_sidecars(directory: Path) -> list[dict]:
         data["directory"] = str(root)  # the indexed root, so rows stay comparable
         # relative to the root, so a nested layout keeps its subdirectories
         data["file"] = str(path.relative_to(root).with_name(data["file"]))
-        records.append(data)
+        records += split_scenes(data)  # a multi-scene sidecar becomes several rows
     return records
 
 
