@@ -21,10 +21,15 @@ from qtpy.QtWidgets import (
 from slideviz.catalog import query, slide_path
 from slideviz.reader import open_slide
 
-ORDER_SQL = "ORDER BY species, substance, dose_mg_per_kg, animal_id, stain"
+# n_scenes rides along per row, so list can label scenes without opening any file
+SELECT_SQL = "SELECT *, COUNT(*) OVER (PARTITION BY directory, file) AS n_scenes FROM slides"
+ORDER_SQL = "ORDER BY species, substance, dose_mg_per_kg, animal_id, stain, scene"
 
 # Filter label to the column it restricts
 FILTERS = {"Species": "species", "Stain": "stain", "Dose": "dose_mg_per_kg"}
+
+# The column's type, so a filter value is compared as what the column stores
+FILTER_TYPES = {"species": str, "stain": str, "dose_mg_per_kg": int}
 
 ANY = "All"
 
@@ -87,17 +92,19 @@ class SlideList(QWidget):
         for column, box in self.boxes.items():
             if box.currentText() != ANY:
                 clauses.append(f"{column} = ?")
-                params.append(box.currentText())
+                # cast, rather than leaving an integer column to SQLite's type affinity
+                params.append(FILTER_TYPES[column](box.currentText()))
         return ("WHERE " + " AND ".join(clauses) if clauses else "", tuple(params))
 
     def refresh(self) -> None:
         """Reload the list from the index, honouring the filters."""
         self.list.clear()
         where, params = self._where()
-        rows = query(f"SELECT * FROM slides {where} {ORDER_SQL}", params)
+        rows = query(f"{SELECT_SQL} {where} {ORDER_SQL}", params)
         for row in rows:
             item = QListWidgetItem(self._label(row))
-            item.setData(Qt.ItemDataRole.UserRole, str(slide_path(row)))  # hidden path
+            # path and scene ride on the item, so loading needs no second query
+            item.setData(Qt.ItemDataRole.UserRole, (str(slide_path(row)), row["scene"]))
             self.list.addItem(item)
         self.status.setText(self._count())
 
@@ -110,23 +117,29 @@ class SlideList(QWidget):
     @staticmethod
     def _label(row) -> str:
         """One list entry, grouped so the two stains of an animal sit together."""
+        # only multi-scene slides say which scene, so single-scene entries are unchanged
+        scene = f"  scene {row['scene']}" if row["n_scenes"] > 1 else ""
         return (
             f"{row['substance']} {row['dose_mg_per_kg']:>3} mg/kg  "  # padded to align
-            f"{row['animal_id']:<3} {row['stain']}"
+            f"{row['animal_id']:<3} {row['stain']}{scene}"
         )
 
-    def _selected(self) -> Path | None:
-        """Path of the highlighted entry, or None when nothing is selected."""
+    def _selected(self) -> tuple[Path, int] | None:
+        """Path and scene of the highlighted entry, or None when nothing is selected."""
         item = self.list.currentItem()
-        return Path(item.data(Qt.ItemDataRole.UserRole)) if item else None
+        if not item:
+            return None
+        path, scene = item.data(Qt.ItemDataRole.UserRole)
+        return Path(path), scene
 
-    def _load(self, path: Path) -> None:
-        """Add one slide to the viewer as a multiscale layer (or report why not)."""
+    def _load(self, path: Path, scene: int = 0) -> None:
+        """Add one scene to the viewer as a multiscale layer (or report why not)."""
         try:
-            info, levels = open_slide(path)  # lazy, pixels arrive when napari draws
+            info, levels = open_slide(path, scene)  # lazy, pixels arrive when napari draws
+            name = f"{path.stem} s{scene}" if info.n_scenes > 1 else path.stem
             self.viewer.add_image(
                 levels,
-                name=path.stem,
+                name=name,
                 rgb=True,
                 multiscale=True,  # levels is a pyramid, napari picks one per zoom
                 scale=(info.pixel_size_um, info.pixel_size_um),
@@ -137,20 +150,24 @@ class SlideList(QWidget):
             self.status.setText(f"{path.name}: {type(exc).__name__}: {exc}")
             return
 
-        self.status.setText(f"{path.stem}  {info.width}x{info.height} px")
+        self.status.setText(f"{name}  {info.width}x{info.height} px")
 
     def _replace(self) -> None:
         """Drop the open layers and show the selected slide on its own."""
-        path = self._selected()
-        if path:
+        selected = self._selected()
+        if selected:
             self.viewer.layers.clear()
-            self._load(path)
+            self._load(*selected)
 
     def _add(self) -> None:
         """Show the selected slide alongside the ones already open."""
-        path = self._selected()
-        if path:
-            self._load(path)
+        selected = self._selected()
+        if selected:
+            before = len(self.viewer.layers)
+            self._load(*selected)
+            if len(self.viewer.layers) > before:  # nothing to say about a failed load
+                # sections are separately mounted, so stacking is not alignment
+                self.status.setText(f"{self.status.text()}  (overlaid, not registered)")
 
     def _clear(self) -> None:
         """Empty the viewer and reset the status line to the slide count."""
