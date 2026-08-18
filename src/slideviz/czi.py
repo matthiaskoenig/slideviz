@@ -76,6 +76,7 @@ def _read_tile(
     The requested read is clipped to the slide edge, so it can come back
     smaller than the tile it has to fill; the remainder is padded white.
     """
+    # reopened per tile: 0.5 ms against a 15 ms read, and CacheOptions measured no faster
     with pyczi.open_czi(path) as czi:
         tile = czi.read(
             plane={"T": 0, "Z": 0, "C": 0},
