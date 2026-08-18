@@ -126,7 +126,9 @@ def slide_path(row: sqlite3.Row) -> Path:
 
 
 SUMMARY_SQL = """
-SELECT species, substance, dose_mg_per_kg, stain, COUNT(*) AS n
+SELECT species, substance, dose_mg_per_kg, stain,
+       COUNT(DISTINCT directory || file) AS n,  -- slides, not rows, so scenes do not inflate it
+       COUNT(*) AS n_scenes
 FROM slides GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4
 """
 
@@ -157,11 +159,15 @@ def main() -> None:
 
     db = args.db or default_db()
     count = build(args.directory, db)
-    print(f"indexed {count} slides into {db}")
+    files = query("SELECT COUNT(DISTINCT directory || file) FROM slides", db_path=db)[0][0]
+    scenes = "" if count == files else f" ({count} scenes)"  # they differ only on multi-scene data
+    print(f"indexed {files} slides{scenes} into {db}")
 
     for row in query(SUMMARY_SQL, db_path=db):
+        # scene count only where it differs, so single-scene groups read as before
+        scenes = "" if row["n_scenes"] == row["n"] else f"  ({row['n_scenes']} scenes)"
         print(f"  {row['species']} {row['substance']} "
-              f"{row['dose_mg_per_kg']:>3} mg/kg {row['stain']:<7} {row['n']}")
+              f"{row['dose_mg_per_kg']:>3} mg/kg {row['stain']:<7} {row['n']}{scenes}")
 
 
 if __name__ == "__main__":

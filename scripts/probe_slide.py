@@ -71,13 +71,20 @@ def probe_czi(path: Path) -> None:
         x0, x1 = box["X"]
         y0, y1 = box["Y"]
         w, h = x1 - x0, y1 - y0
-        print(f"  size        {w} x {h} px  ({w * h / 1e9:.2f} Gpx)")
+        label = "size" if len(scenes) == 1 else "union size"  # union spans the gap between scenes
+        print(f"  {label:<11} {w} x {h} px  ({w * h / 1e9:.2f} Gpx)")
         if x0 < 0 or y0 < 0:
             print(f"  origin      ({x0}, {y0})")
 
+        # What a scene-aware reader loads, which on a multi-scene file is less than the union
+        pixels = sum(r.w * r.h for r in scenes.values())
+        if len(scenes) > 1:
+            print(f"  scene px    {pixels / 1e9:.2f} Gpx  ({100 * (1 - pixels / (w * h)):.0f}% of "
+                  f"the union is empty stage)")
+
         # Compressed on disk against decompressed in RAM
         print(f"  on disk     {path.stat().st_size / 1e6:.0f} MB")
-        print(f"  RGB in RAM  {w * h * 3 / 1e9:.1f} GB")
+        print(f"  RGB in RAM  {pixels * 3 / 1e9:.1f} GB")
 
         # Pixel size: under Scaling in metadata, in metres
         try:
