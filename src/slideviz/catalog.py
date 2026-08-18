@@ -25,15 +25,17 @@ def default_db() -> Path:
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS slides (
-    file            TEXT PRIMARY KEY,
+    file            TEXT NOT NULL,
     directory       TEXT NOT NULL,
+    original_name   TEXT,
     species         TEXT NOT NULL,
     substance       TEXT NOT NULL,
     dose_mg_per_kg  INTEGER NOT NULL,
     animal_id       TEXT NOT NULL,
     stain           TEXT NOT NULL,
     modality        TEXT NOT NULL,
-    serial_block    TEXT NOT NULL
+    serial_block    TEXT NOT NULL,
+    PRIMARY KEY (directory, file)  -- same filename under two roots is two slides
 );
 CREATE INDEX IF NOT EXISTS idx_block ON slides(serial_block);
 CREATE INDEX IF NOT EXISTS idx_dose ON slides(dose_mg_per_kg);
@@ -41,20 +43,42 @@ CREATE INDEX IF NOT EXISTS idx_dose ON slides(dose_mg_per_kg);
 
 # Indexed for querying
 COLUMNS = [
-    "file", "directory", "species", "substance",
+    "file", "directory", "original_name", "species", "substance",
     "dose_mg_per_kg", "animal_id", "stain", "modality", "serial_block",
 ]
 
+# Columns a sidecar must fill; original_name is optional
+REQUIRED = [c for c in COLUMNS if c not in ("directory", "original_name")]
+
 
 def read_sidecars(directory: Path) -> list[dict]:
-    """Load every sidecar in a directory."""
+    """Load every sidecar under a directory, including nested ones."""
+    root = directory.resolve()
     records = []
-    for path in sorted(directory.glob("*.json")):
+    for path in sorted(root.rglob("*.json")):
         data = json.loads(path.read_text())
-        # Record where the sidecar was found
-        data["directory"] = str(directory.resolve())
+        data["directory"] = str(root)  # the indexed root, so rows stay comparable
+        # relative to the root, so a nested layout keeps its subdirectories
+        data["file"] = str(path.relative_to(root).with_name(data["file"]))
         records.append(data)
     return records
+
+
+def _drop_if_stale(conn: sqlite3.Connection) -> None:
+    """Drop the table when its columns no longer match COLUMNS."""
+    existing = [r[1] for r in conn.execute("PRAGMA table_info(slides)")]
+    if existing and existing != COLUMNS:
+        conn.execute("DROP TABLE slides")
+
+
+def check(records: list[dict]) -> None:
+    """Raise on the first record missing a required field, naming file and field."""
+    for record in records:
+        missing = [c for c in REQUIRED if record.get(c) is None]
+        if missing:
+            # without this the insert fails as a bare IntegrityError, naming neither
+            name = record.get("file", "<sidecar with no file field>")
+            raise ValueError(f"{name}: missing {', '.join(missing)}")
 
 
 def build(directory: Path, db_path: Path | None = None) -> int:
@@ -62,8 +86,10 @@ def build(directory: Path, db_path: Path | None = None) -> int:
     db_path = db_path or default_db()
     db_path.parent.mkdir(parents=True, exist_ok=True)
     records = read_sidecars(directory)
+    check(records)  # fail before touching the database, so the index is not half-baked
 
     with sqlite3.connect(db_path) as conn:
+        _drop_if_stale(conn)  # the index is derived, so an old schema is rebuilt
         conn.executescript(SCHEMA)
         # Clear this directory's rows, then reinsert from the sidecars
         conn.execute("DELETE FROM slides WHERE directory = ?", (str(directory.resolve()),))
