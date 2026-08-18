@@ -19,7 +19,7 @@ from qtpy.QtWidgets import (
 )
 
 from slideviz.catalog import query, slide_path
-from slideviz.czi import read_pyramid
+from slideviz.reader import open_slide
 
 ORDER_SQL = "ORDER BY species, substance, dose_mg_per_kg, animal_id, stain"
 
@@ -121,16 +121,22 @@ class SlideList(QWidget):
         return Path(item.data(Qt.ItemDataRole.UserRole)) if item else None
 
     def _load(self, path: Path) -> None:
-        """Add one slide to the viewer as a multiscale layer."""
-        info, levels = read_pyramid(path)  # lazy, pixels arrive when napari draws
-        self.viewer.add_image(
-            levels,
-            name=path.stem,
-            rgb=True,
-            multiscale=True,  # levels is a pyramid, napari picks one per zoom
-            scale=(info.pixel_size_um, info.pixel_size_um),
-            units="um",  # makes the scale bar read in micrometres
-        )
+        """Add one slide to the viewer as a multiscale layer (or report why not)."""
+        try:
+            info, levels = open_slide(path)  # lazy, pixels arrive when napari draws
+            self.viewer.add_image(
+                levels,
+                name=path.stem,
+                rgb=True,
+                multiscale=True,  # levels is a pyramid, napari picks one per zoom
+                scale=(info.pixel_size_um, info.pixel_size_um),
+                units="um",  # makes the scale bar read in micrometres
+            )
+        # unreadable file, unsupported suffix, shape napari rejects; report, stay alive
+        except (RuntimeError, ValueError, OSError, KeyError) as exc:
+            self.status.setText(f"{path.name}: {type(exc).__name__}: {exc}")
+            return
+
         self.status.setText(f"{path.stem}  {info.width}x{info.height} px")
 
     def _replace(self) -> None:
