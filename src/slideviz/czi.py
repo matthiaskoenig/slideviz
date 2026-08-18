@@ -50,7 +50,7 @@ def _pixel_size_um(czi) -> float:
 def read_info(path: Path, scene: int = 0) -> SlideInfo:
     """Read one scene's geometry and scale without decoding any image data."""
     with pyczi.open_czi(str(path)) as czi:
-        # per scene: that is the union, mostly empty on multi-scene files
+        # per scene, not the union across them, which is mostly empty stage
         scenes = czi.scenes_bounding_rectangle
         if scene not in scenes:
             raise ValueError(f"{path.name} has no scene {scene}, only {sorted(scenes)}")
