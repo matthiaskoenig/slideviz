@@ -31,4 +31,4 @@ def open_slide(path: Path, scene: int = 0) -> tuple[SlideInfo, list[da.Array]]:
     if suffix not in BACKENDS:
         known = ", ".join(sorted(BACKENDS))
         raise ValueError(f"no reader for '{suffix}': {path.name}. Known formats: {known}")
-    return BACKENDS[suffix](path)
+    return BACKENDS[suffix](path, scene)

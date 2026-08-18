@@ -6,6 +6,8 @@ napari can consume directly as a multiscale image.
 
 from __future__ import annotations
 
+import math
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,30 +23,48 @@ TILE = 2048
 @dataclass(frozen=True)
 class SlideInfo:
     path: Path
-    x0: int  # stage-relative origin, usually negative
+    scene: int
+    n_scenes: int
+    # stage-relative origin, usually negative; provenance only, registration places layers
+    x0: int
     y0: int
     width: int
     height: int
     pixel_size_um: float
 
 
-def read_info(path: Path) -> SlideInfo:
-    """Read geometry and scale without decoding any image data."""
-    with pyczi.open_czi(str(path)) as czi:
-        box = czi.total_bounding_box
-        x0, x1 = box["X"]  # half-open, so the extent is x1 - x0
-        y0, y1 = box["Y"]
+def _pixel_size_um(czi) -> float:
+    """Pixel size in micrometres, warning if the two axes disagree."""
+    distances = czi.metadata["ImageDocument"]["Metadata"]["Scaling"]["Items"]["Distance"]
+    sizes = {d["@Id"]: float(d["Value"]) for d in distances if d["@Id"] in ("X", "Y")}
 
-        distances = czi.metadata["ImageDocument"]["Metadata"]["Scaling"]["Items"]["Distance"]
-        pixel_size_m = next(float(d["Value"]) for d in distances if d["@Id"] == "X")
+    x, y = sizes["X"], sizes.get("Y", sizes["X"])
+    if not math.isclose(x, y, rel_tol=1e-6):  # anisotropic, one number cannot describe both
+        warnings.warn(
+            f"anisotropic pixels, X={x * 1e6:.4f} um Y={y * 1e6:.4f} um; using X",
+            stacklevel=2,
+        )
+    return x * 1e6  # Zeiss stores it in metres
+
+
+def read_info(path: Path, scene: int = 0) -> SlideInfo:
+    """Read one scene's geometry and scale without decoding any image data."""
+    with pyczi.open_czi(str(path)) as czi:
+        # per scene: that is the union, mostly empty on multi-scene files
+        scenes = czi.scenes_bounding_rectangle
+        if scene not in scenes:
+            raise ValueError(f"{path.name} has no scene {scene}, only {sorted(scenes)}")
+        rect = scenes[scene]
 
         return SlideInfo(
             path=path,
-            x0=x0,
-            y0=y0,
-            width=x1 - x0,
-            height=y1 - y0,
-            pixel_size_um=pixel_size_m * 1e6,  # Zeiss stores it in metres
+            scene=scene,
+            n_scenes=len(scenes),
+            x0=rect.x,
+            y0=rect.y,
+            width=rect.w,
+            height=rect.h,
+            pixel_size_um=_pixel_size_um(czi),
         )
 
 
@@ -110,7 +130,17 @@ def read_level(info: SlideInfo, downsample: int) -> da.Array:
     return da.concatenate(rows, axis=0)  # rows into the level, stacked
 
 
-def read_pyramid(path: Path, n_levels: int = 5) -> tuple[SlideInfo, list[da.Array]]:
-    """Return (info, zoom levels) with level 0 at full resolution."""
-    info = read_info(path)
-    return info, [read_level(info, 2**i) for i in range(n_levels)]  # 1, 2, 4, 8, 16
+def count_levels(width: int, height: int) -> int:
+    """Levels needed for the top one to fit in a single tile."""
+    levels = 1
+    while max(width, height) / 2 ** (levels - 1) > TILE:  # halve until the overview is one tile
+        levels += 1
+    return levels
+
+
+def read_pyramid(path: Path, scene: int = 0) -> tuple[SlideInfo, list[da.Array]]:
+    """Return (info, zoom levels) for one scene, with level 0 at full resolution."""
+    info = read_info(path, scene)
+    # derived, not a constant: a bigger slide gets the extra levels it needs
+    n_levels = count_levels(info.width, info.height)
+    return info, [read_level(info, 2**i) for i in range(n_levels)]
