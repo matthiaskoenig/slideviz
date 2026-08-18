@@ -34,6 +34,13 @@ FILTER_TYPES = {"species": str, "stain": str, "dose_mg_per_kg": int}
 ANY = "All"
 
 
+def _column(name: str) -> str:
+    """Check a column name before it goes into SQL, where it cannot be a parameter."""
+    if name not in FILTERS.values():
+        raise ValueError(f"not a filter column: {name}")
+    return name
+
+
 class SlideList(QWidget):
     """Slide picker docked into the napari window."""
 
@@ -73,17 +80,23 @@ class SlideList(QWidget):
         layout.addLayout(buttons)
         layout.addWidget(self.status)
 
-        self._fill_boxes()
-        self.refresh()
+        self.reload()
 
     def _fill_boxes(self) -> None:
-        """Offer the values the index actually holds, so new species appear on their own."""
+        """Offer the values the index actually holds, so new species appear on their own.
+
+        Keeps each selection across a refill, so a reindex mid-session does not
+        silently reset the filters.
+        """
         for column, box in self.boxes.items():
-            values = query(f"SELECT DISTINCT {column} FROM slides ORDER BY 1")
+            values = query(f"SELECT DISTINCT {_column(column)} FROM slides ORDER BY 1")
+            previous = box.currentText()
             box.blockSignals(True)  # filling would otherwise fire refresh once per item
             box.clear()
             box.addItem(ANY)
             box.addItems([str(row[0]) for row in values])
+            kept = box.findText(previous)  # -1 when the value is gone from the index
+            box.setCurrentIndex(max(kept, 0))
             box.blockSignals(False)
 
     def _where(self) -> tuple[str, tuple]:
@@ -91,10 +104,19 @@ class SlideList(QWidget):
         clauses, params = [], []
         for column, box in self.boxes.items():
             if box.currentText() != ANY:
-                clauses.append(f"{column} = ?")
+                clauses.append(f"{_column(column)} = ?")
                 # cast, rather than leaving an integer column to SQLite's type affinity
                 params.append(FILTER_TYPES[column](box.currentText()))
         return ("WHERE " + " AND ".join(clauses) if clauses else "", tuple(params))
+
+    def reload(self) -> None:
+        """Pick up a reindex: rebuild the dropdowns, then the list.
+
+        refresh() alone keeps stale dropdowns, because they are filled once at
+        construction and a new species would never appear in them.
+        """
+        self._fill_boxes()
+        self.refresh()
 
     def refresh(self) -> None:
         """Reload the list from the index, honouring the filters."""
@@ -120,7 +142,8 @@ class SlideList(QWidget):
         # only multi-scene slides say which scene, so single-scene entries are unchanged
         scene = f"  scene {row['scene']}" if row["n_scenes"] > 1 else ""
         return (
-            f"{row['substance']} {row['dose_mg_per_kg']:>3} mg/kg  "  # padded to align
+            f"{row['species']:<6} {row['substance']} "  # species first
+            f"{row['dose_mg_per_kg']:>3} mg/kg  "
             f"{row['animal_id']:<3} {row['stain']}{scene}"
         )
 
