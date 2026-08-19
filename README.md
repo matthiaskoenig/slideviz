@@ -1,4 +1,4 @@
-# slideviz
+# SlideViz
 
 Visualization for whole-slide liver histology.
 
