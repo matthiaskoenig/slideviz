@@ -6,8 +6,8 @@ napari can consume directly as a multiscale image.
 
 from __future__ import annotations
 
+import logging
 import math
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,6 +15,8 @@ import dask
 import dask.array as da
 import numpy as np
 import pylibCZIrw.czi as pyczi
+
+log = logging.getLogger(__name__)
 
 # Tile edge in level-0 pixels. ~12 MB per tile as RGB.
 TILE = 2048
@@ -40,10 +42,7 @@ def _pixel_size_um(czi) -> float:
 
     x, y = sizes["X"], sizes.get("Y", sizes["X"])
     if not math.isclose(x, y, rel_tol=1e-6):  # anisotropic, one number cannot describe both
-        warnings.warn(
-            f"anisotropic pixels, X={x * 1e6:.4f} um Y={y * 1e6:.4f} um; using X",
-            stacklevel=2,
-        )
+        log.warning("anisotropic pixels, X=%.4f um Y=%.4f um; using X", x * 1e6, y * 1e6)
     return x * 1e6  # Zeiss stores it in metres
 
 

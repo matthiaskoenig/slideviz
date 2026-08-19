@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from qtpy.QtCore import Qt
@@ -32,6 +33,8 @@ FILTERS = {"Species": "species", "Stain": "stain", "Dose": "dose_mg_per_kg"}
 FILTER_TYPES = {"species": str, "stain": str, "dose_mg_per_kg": int}
 
 ANY = "All"
+
+log = logging.getLogger(__name__)
 
 
 def _column(name: str) -> str:
@@ -170,6 +173,7 @@ class SlideList(QWidget):
             )
         # unreadable file, unsupported suffix, shape napari rejects; report, stay alive
         except (RuntimeError, ValueError, OSError, KeyError) as exc:
+            log.exception("could not load %s", path)  # status line is transient, the log is not
             self.status.setText(f"{path.name}: {type(exc).__name__}: {exc}")
             return
 

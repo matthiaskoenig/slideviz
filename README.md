@@ -21,9 +21,6 @@ directory.
 
 ```bash
 uv run slideviz-view                                    # browse slides in napari
+uv run slideviz-view --no-reindex                       # skip the rebuild, open what is indexed
 uv run slideviz-index <dir>                             # rebuild the index
-uv run slideviz-index --check <dir>                     # validate sidecars, build nothing
-uv run slideviz-index --schema                          # the sidecar JSON Schema
-uv run slideviz-index --sql "SELECT * FROM slides"      # query it
-uv run python scripts/probe_slide.py <file|dir>         # report what is in a slide file
 ```
