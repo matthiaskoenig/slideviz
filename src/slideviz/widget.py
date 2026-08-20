@@ -47,10 +47,15 @@ def _column(name: str) -> str:
 class SlideList(QWidget):
     """Slide picker docked into the napari window."""
 
-    def __init__(self, viewer) -> None:
-        """Build the list, the buttons and the status line, then fill the list."""
+    def __init__(self, viewer, directory: Path | None = None) -> None:
+        """Build the list, the buttons and the status line, then fill the list.
+
+        A directory limits the list to that collection, so one index can hold
+        several without them appearing as one. None lists everything indexed.
+        """
         super().__init__()
         self.viewer = viewer
+        self.directory = str(directory.resolve()) if directory else None
 
         self.boxes = {}
         filters = QFormLayout()
@@ -91,8 +96,14 @@ class SlideList(QWidget):
         Keeps each selection across a refill, so a reindex mid-session does not
         silently reset the filters.
         """
+        scope, params = self._scope()
+        where = f"WHERE {scope[0]}" if scope else ""
         for column, box in self.boxes.items():
-            values = query(f"SELECT DISTINCT {_column(column)} FROM slides ORDER BY 1")
+            # scoped too, or a filter would offer values no listed slide has
+            values = query(
+                f"SELECT DISTINCT {_column(column)} FROM slides {where} ORDER BY 1",
+                tuple(params),
+            )
             previous = box.currentText()
             box.blockSignals(True)  # filling would otherwise fire refresh once per item
             box.clear()
@@ -102,9 +113,15 @@ class SlideList(QWidget):
             box.setCurrentIndex(max(kept, 0))
             box.blockSignals(False)
 
+    def _scope(self) -> tuple[list[str], list]:
+        """The collection clause, empty when the widget lists every directory."""
+        if self.directory is None:
+            return [], []
+        return ["directory = ?"], [self.directory]
+
     def _where(self) -> tuple[str, tuple]:
-        """Build the WHERE clause from the active filters, and the values it needs."""
-        clauses, params = [], []
+        """Build the WHERE clause from the collection and the active filters."""
+        clauses, params = self._scope()
         for column, box in self.boxes.items():
             if box.currentText() != ANY:
                 clauses.append(f"{_column(column)} = ?")
@@ -135,7 +152,10 @@ class SlideList(QWidget):
 
     def _count(self) -> str:
         """Slides listed, and the total when a filter is hiding some."""
-        total = query("SELECT COUNT(*) FROM slides")[0][0]
+        scope, params = self._scope()
+        where = f"WHERE {scope[0]}" if scope else ""
+        # the collection's total, not the index's, so the count matches the list
+        total = query(f"SELECT COUNT(*) FROM slides {where}", tuple(params))[0][0]
         shown = self.list.count()
         return f"{shown} slides" if shown == total else f"{shown} of {total} slides"
 

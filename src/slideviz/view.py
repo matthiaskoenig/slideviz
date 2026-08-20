@@ -49,7 +49,9 @@ def main() -> None:
     from slideviz.widget import SlideList
 
     viewer = napari.Viewer(title="slideviz")
-    viewer.window.add_dock_widget(SlideList(viewer), name="Slides", area="right")
+    # --no-reindex has no directory to scope by, so the list falls back to the whole index
+    widget = SlideList(viewer, None if args.no_reindex else args.data)
+    viewer.window.add_dock_widget(widget, name="Slides", area="right")
     viewer.scale_bar.visible = True
     napari.run()
 
