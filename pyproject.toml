@@ -25,6 +25,7 @@ dependencies = [
     "pydantic-settings>=2.15.0",
     "pylibczirw>=6.1.0",
     "tifffile>=2026.7.31",
+    "zarr>=3.3.0",
 ]
 
 [project.scripts]
