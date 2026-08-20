@@ -24,6 +24,7 @@ dependencies = [
     "platformdirs>=4.11.2",
     "pydantic-settings>=2.15.0",
     "pylibczirw>=6.1.0",
+    "scikit-image>=0.25",
     "tifffile>=2026.7.31",
     "zarr>=3.3.0",
 ]

@@ -1988,6 +1988,7 @@ dependencies = [
     { name = "platformdirs" },
     { name = "pydantic-settings" },
     { name = "pylibczirw" },
+    { name = "scikit-image" },
     { name = "tifffile" },
     { name = "zarr" },
 ]
@@ -2000,6 +2001,7 @@ requires-dist = [
     { name = "platformdirs", specifier = ">=4.11.2" },
     { name = "pydantic-settings", specifier = ">=2.15.0" },
     { name = "pylibczirw", specifier = ">=6.1.0" },
+    { name = "scikit-image", specifier = ">=0.25" },
     { name = "tifffile", specifier = ">=2026.7.31" },
     { name = "zarr", specifier = ">=3.3.0" },
 ]
