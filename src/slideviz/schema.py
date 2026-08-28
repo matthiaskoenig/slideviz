@@ -38,6 +38,19 @@ class Scene(BaseModel):
     scene: int | None = None  # None means take the position in the list
 
 
+class Registration(BaseModel):
+    """How this slide maps onto another one. The reference slide carries none."""
+
+    model_config = ConfigDict(extra="allow")
+
+    reference: str  # serial_block partner this was aligned to, the parent artifact
+    matrix: list[list[float]]  # 3x3, x/y at full resolution, onto the reference's grid
+    slide_shape_rc: list[int]  # the resolution the matrix is expressed in
+    method: str  # software and settings, an evaluation criterion
+    error_um: float | None = None  # residual after registering, in physical units
+    registered: str | None = None  # date, as ISO
+
+
 class Slide(BaseModel):
     """One sidecar. Multi-scene files carry a scenes list and index one row per entry."""
 
@@ -53,6 +66,7 @@ class Slide(BaseModel):
     serial_block: str
     original_name: str | None = None
     scenes: list[Scene] | None = None
+    registration: Registration | None = None
 
     # acquisition provenance, read from the vendor file (the OME conversion does not carry these, so they would otherwise be lost)
     acquired: str | None = None
@@ -73,14 +87,17 @@ class Slide(BaseModel):
 # SQLite type per python type, so the DDL follows the model
 SQL_TYPES = {int: "INTEGER", float: "REAL", str: "TEXT"}
 
-# Columns the index holds: the model's fields, minus the nested scenes list
-COLUMNS = [name for name in Slide.model_fields if name != "scenes"]
+# Nested models are their own shape and do not flatten into a table column
+NESTED = ["scenes", "registration"]
+
+# Columns the index holds: the model's fields, minus the nested ones
+COLUMNS = [name for name in Slide.model_fields if name not in NESTED]
 
 # What a sidecar must carry. directory and scene are added during indexing.
 REQUIRED = [
     name
     for name, field in Slide.model_fields.items()
-    if field.is_required() and name != "scenes"
+    if field.is_required() and name not in NESTED
 ]
 
 # Filled in by the indexer rather than the sidecar, but never null in the table
