@@ -11,13 +11,16 @@ class Species(StrEnum):
     """Common name, matching the filename prefix rather than the binomial."""
 
     MOUSE = "mouse"
+    RAT = "rat"
     PIG = "pig"
     HUMAN = "human"
 
 
 class Stain(StrEnum):
     HE = "he"
-    CYP2E1 = "cyp2e1"
+    CYP2E1 = "cyp2e1"  # mouse pericentral zonation marker
+    CYP1A2 = "cyp1a2"  # the rat analogue of CYP2E1
+    HMGB1 = "hmgb1"  # nuclear-integrity loss, reads out necrosis
 
 
 class Modality(StrEnum):
@@ -51,13 +54,24 @@ class Slide(BaseModel):
     original_name: str | None = None
     scenes: list[Scene] | None = None
 
+    # acquisition provenance, read from the vendor file (the OME conversion does not carry these, so they would otherwise be lost)
+    acquired: str | None = None
+    scanner_software: str | None = None
+    scanner_version: str | None = None
+    objective: str | None = None
+    magnification: int | None = None
+    numerical_aperture: float | None = None
+    camera: str | None = None
+    source_compression: str | None = None
+    source_path: str | None = None
+
     # filled in while indexing, not written by hand
     directory: str | None = None
     scene: int = 0
 
 
-# SQLite type per python type, so the DDL follows the model instead of restating it
-SQL_TYPES = {int: "INTEGER", str: "TEXT"}
+# SQLite type per python type, so the DDL follows the model
+SQL_TYPES = {int: "INTEGER", float: "REAL", str: "TEXT"}
 
 # Columns the index holds: the model's fields, minus the nested scenes list
 COLUMNS = [name for name in Slide.model_fields if name != "scenes"]
