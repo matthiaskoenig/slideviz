@@ -42,3 +42,10 @@ uv run slideviz-index --schema                       # the sidecar JSON Schema
 | `SLIDEVIZ_DB` | Where the index is written | `~/.cache/slideviz/slides.db` |
 
 The index is derived from the sidecars and rebuilt on every start.
+
+## Python version
+
+The project runs on **3.13**. 3.14 is blocked by
+[pylibCZIrw](https://pypi.org/project/pylibczirw/#files), the `.czi` reader,
+which ships no cp314 wheel (its metadata claims 3.14 support, so resolution
+succeeds and only the install fails, on a source build needing CMake).
