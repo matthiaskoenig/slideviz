@@ -20,6 +20,7 @@ classifiers = [
 
 dependencies = [
     "dask>=2026.7.1",
+    "imagecodecs>=2026.8.16",
     "napari[pyqt6]>=0.8.0",
     "numpy>=2.0",
     "platformdirs>=4.11.2",
