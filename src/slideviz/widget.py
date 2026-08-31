@@ -234,9 +234,11 @@ class SlideList(QWidget):
             if len(errors) < len(moving):
                 quality += ", some not registered"
 
+        dose = row["dose_mg_per_kg"]
         return (
             f"{row['species']:<6} {row['substance']} "  # species first
-            f"{row['dose_mg_per_kg']:>3} mg/kg  "
+            # xxx where the dose is not known yet, matching the placeholder in the filename
+            f"{dose if dose is not None else 'xxx':>3} mg/kg  "
             f"{row['animal_id']:<3} "
             f"{row['n_slides']} stains  [{quality}]"
         )

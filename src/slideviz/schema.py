@@ -59,12 +59,13 @@ class Slide(BaseModel):
     file: str
     species: Species
     substance: str
-    dose_mg_per_kg: int
+    dose_mg_per_kg: int | None = None  # the rat filenames carry no dose
     animal_id: str
     stain: Stain
     modality: Modality
     serial_block: str
     original_name: str | None = None
+    excluded: str | None = None # why this slide excluded, e.g. an antibody negative control
     scenes: list[Scene] | None = None
     registration: Registration | None = None
 
@@ -88,7 +89,7 @@ class Slide(BaseModel):
 SQL_TYPES = {int: "INTEGER", float: "REAL", str: "TEXT"}
 
 # Nested models are their own shape and do not flatten into a table column
-NESTED = ["scenes", "registration"]
+NESTED = ["scenes", "registration", "excluded"]
 
 # Columns the index holds: the model's fields, minus the nested ones
 COLUMNS = [name for name in Slide.model_fields if name not in NESTED]

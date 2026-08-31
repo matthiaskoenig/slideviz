@@ -53,6 +53,11 @@ def read_sidecars(directory: Path) -> list[dict]:
     records = []
     for path in sorted(root.rglob("*.json")):
         data = json.loads(path.read_text())
+        # a slide the lab marked as a control or a failure is kept on disk for its
+        # provenance but must never reach an analysis as if it were a readout
+        if data.get("excluded"):
+            log.info("skipping %s (%s)", path.name, data["excluded"])
+            continue
         data["directory"] = str(root)  # the indexed root, so rows stay comparable
         # relative to the root, so a nested layout keeps its subdirectories
         data["file"] = str(path.relative_to(root).with_name(data["file"]))
@@ -171,8 +176,10 @@ def main() -> None:
     for row in query(SUMMARY_SQL, db_path=db):
         # scene count only where it differs, so single-scene groups read as before
         scenes = "" if row["n_scenes"] == row["n"] else f"  ({row['n_scenes']} scenes)"
-        log.info("  %s %s %3d mg/kg %-7s %d%s", row["species"], row["substance"],
-                 row["dose_mg_per_kg"], row["stain"], row["n"], scenes)
+        # xxx where the dose is not known yet, matching the placeholder in the filename
+        dose = row["dose_mg_per_kg"]
+        log.info("  %s %s %3s mg/kg %-7s %d%s", row["species"], row["substance"],
+                 dose if dose is not None else "xxx", row["stain"], row["n"], scenes)
 
 
 if __name__ == "__main__":
