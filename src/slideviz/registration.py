@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
 
 from slideviz.schema import Registration
-
 
 SWAP_XY = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
 
@@ -36,7 +35,8 @@ def from_valis_run(run_dir: Path, error_um: float | None = None) -> dict[str, Re
             slide_shape_rc=entry["slide_shape_rc"],
             method="valis-1.2.0 rigid, GradientOD",
             error_um=error_um,
-            registered=date.today().isoformat(),
+            # UTC, so a provenance date does not depend on where it was recorded
+            registered=datetime.now(UTC).date().isoformat(),
         )
     return found
 
