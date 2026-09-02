@@ -12,7 +12,7 @@ Separate venv: `valis-wsi` needs `numpy<2`, slideviz needs `numpy>=2`.
 
 Via the entry point in the parent project:
 
-    uv run python scripts/register.py 375mg_m1
+    uv run python registration/register.py 375mg_m1
 
 Directly:
 
@@ -27,7 +27,7 @@ colour features. `--rigid-only` skips the non-rigid stage, which OOMs on 16 GB R
 Into `<out_dir>` (in practice `valis_runs/out_<block>/`):
 `transforms.json` (3x3 affine per slide, maps moving to reference in x=col,
 y=row pixels), `registration_error.csv`, and QC overlaps in `slides/overlaps/`.
-`scripts/register.py` reads `transforms.json` back and writes the matrix into
+`registration/register.py` reads `transforms.json` back and writes the matrix into
 the slide sidecars.
 
 The matrix is fitted by pushing a point grid through `warp_xy` and solving least

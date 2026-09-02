@@ -37,7 +37,7 @@ uv run slideviz-index --schema                       # the sidecar JSON Schema
 ## Registration
 
     cd registration && uv sync                       
-    uv run python scripts/register.py 375mg_m1
+    uv run python registration/register.py 375mg_m1
 
 Converts the block's slides to OME-TIFF, runs VALIS, checks the error against a
 500 µm limit, writes the transform into the sidecars, and reports where the TIFFs
@@ -52,7 +52,7 @@ copies the matrix into the sidecars. See
 
 | Script | Env | Role |
 |---|---|---|
-| `scripts/register.py` | slideviz | entry point |
+| `registration/register.py` | slideviz | entry point |
 | `registration/valis_register.py` | registration | the VALIS call |
 
 ## Configuration

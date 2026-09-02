@@ -174,7 +174,7 @@ def main() -> None:
                       if not p.name.startswith(".")}
     print(f"processor: {processor.__name__} on {len(processor_dict)} slides")
 
-    rigid, non_rigid, error_df = registrar.register(processor_dict=processor_dict)
+    _rigid, _non_rigid, error_df = registrar.register(processor_dict=processor_dict)
 
     save_transforms(registrar, args.out_dir / "transforms.json")
 
