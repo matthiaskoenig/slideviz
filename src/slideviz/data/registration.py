@@ -35,6 +35,8 @@ def from_valis_run(run_dir: Path, error_um: float | None = None) -> dict[str, Re
             slide_shape_rc=entry["slide_shape_rc"],
             method="valis-1.2.0 rigid, GradientOD",
             error_um=error_um,
+            # how exactly the affine fit the full warp, so a non-affine chain shows up
+            residual_px=entry.get("residual_px"),
             # UTC, so a provenance date does not depend on where it was recorded
             registered=datetime.now(UTC).date().isoformat(),
         )
