@@ -1,14 +1,6 @@
-"""Run VALIS on a directory of serial sections. Called by scripts/register.py.
+"""Register serial sections with VALIS and save transforms/QC outputs.
 
-Writes transforms and QC images to the destination directory. Nothing is warped
-to full resolution here; that is a separate, expensive step.
-
-    python valis_register.py <slide_dir> <out_dir> [--reference NAME]
-
-The reference slide keeps its own coordinate frame and every other slide is
-registered to it. For an H&E / marker pair the H&E is the natural reference: it
-is the morphology image and the segmentation target, so keeping its pixel grid
-means the analysis frame is the one the labels were drawn in.
+Usage: python valis_register.py <slide_dir> <out_dir> [--reference NAME]
 """
 
 from __future__ import annotations
