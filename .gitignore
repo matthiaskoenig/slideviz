@@ -33,3 +33,5 @@ data/
 *.npy
 *.png
 *.jpg
+# the registration project has its own environment
+registration/.venv/

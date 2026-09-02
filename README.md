@@ -34,6 +34,27 @@ uv run slideviz-index --sql "SELECT file FROM slides WHERE dose_mg_per_kg > 200"
 uv run slideviz-index --schema                       # the sidecar JSON Schema
 ```
 
+## Registration
+
+    cd registration && uv sync                       
+    uv run python scripts/register.py 375mg_m1
+
+Converts the block's slides to OME-TIFF, runs VALIS, checks the error against a
+500 µm limit, writes the transform into the sidecars, and reports where the TIFFs
+can be archived. Above the limit nothing is written.
+
+Registration is a separate uv project with its own venv: `valis-wsi` needs
+`numpy<2`, this project needs `numpy>=2`. They meet through `transforms.json` on
+disk: `valis_register.py` writes it to the run's output directory
+(`valis_runs/out_<block>/transforms.json`), `slideviz.registration` reads it and
+copies the matrix into the sidecars. See
+[`registration/README.md`](registration/README.md).
+
+| Script | Env | Role |
+|---|---|---|
+| `scripts/register.py` | slideviz | entry point |
+| `registration/valis_register.py` | registration | the VALIS call |
+
 ## Configuration
 
 | Variable | Meaning | Default |

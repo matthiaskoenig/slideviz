@@ -1,0 +1,9 @@
+[project]
+name = "slideviz-registration"
+version = "0.1.0"
+description = "VALIS registration of serial sections, run in its own environment"
+requires-python = ">=3.12"
+dependencies = [
+    "pyvips[binary]>=3.1.1",
+    "valis-wsi>=1.2.0",
+]
