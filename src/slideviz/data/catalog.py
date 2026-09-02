@@ -3,7 +3,7 @@
     uv run slideviz-index /path/to/data
     uv run slideviz-index --sql "SELECT file FROM slides WHERE dose_mg_per_kg > 200"
 
-    from slideviz.catalog import build, query
+    from slideviz.data.catalog import build, query
     build(Path("/path/to/data"))
     query("SELECT file FROM slides WHERE dose_mg_per_kg > 200")
 
@@ -20,7 +20,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from slideviz.log import setup
-from slideviz.schema import COLUMNS, Slide, create_table_sql
+from slideviz.data.schema import COLUMNS, Slide, create_table_sql
 from slideviz.settings import settings
 
 log = logging.getLogger(__name__)

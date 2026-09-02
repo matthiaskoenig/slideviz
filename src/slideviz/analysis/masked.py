@@ -5,7 +5,7 @@ from __future__ import annotations
 import dask.array as da
 import numpy as np
 
-from slideviz.tissue import mask_from_level, pick_level
+from slideviz.analysis.tissue import mask_from_level, pick_level
 
 OPAQUE = 255
 

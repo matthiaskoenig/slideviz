@@ -21,11 +21,11 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from slideviz.catalog import query, slide_path
-from slideviz.masked import to_rgba
-from slideviz.reader import open_slide
-from slideviz.registration import napari_affine
-from slideviz.schema import Registration, Slide
+from slideviz.data.catalog import query, slide_path
+from slideviz.analysis.masked import to_rgba
+from slideviz.io.reader import open_slide
+from slideviz.data.registration import napari_affine
+from slideviz.data.schema import Registration, Slide
 
 # n_scenes rides along per row, so list can label scenes without opening any file
 SELECT_SQL = "SELECT *, COUNT(*) OVER (PARTITION BY directory, file) AS n_scenes FROM slides"

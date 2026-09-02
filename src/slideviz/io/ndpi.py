@@ -17,7 +17,7 @@ import numpy as np
 import tifffile
 import zarr
 
-from slideviz.czi import SlideInfo
+from slideviz.io.czi import SlideInfo
 
 log = logging.getLogger(__name__)
 

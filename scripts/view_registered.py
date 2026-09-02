@@ -11,9 +11,9 @@ from pathlib import Path
 
 import napari
 
-from slideviz.reader import open_slide
-from slideviz.registration import napari_affine
-from slideviz.schema import Slide
+from slideviz.data.registration import napari_affine
+from slideviz.data.schema import Slide
+from slideviz.io.reader import open_slide
 
 
 def add(viewer, path: Path, colormap: str, affine=None) -> None:

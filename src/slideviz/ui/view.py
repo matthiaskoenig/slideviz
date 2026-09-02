@@ -10,7 +10,7 @@ import argparse
 import logging
 from pathlib import Path
 
-from slideviz.catalog import build, default_db
+from slideviz.data.catalog import build, default_db
 from slideviz.log import setup
 from slideviz.settings import settings
 
@@ -46,7 +46,7 @@ def main() -> None:
 
     import napari  # imported here, pulling in Qt is slow
 
-    from slideviz.widget import SlideList
+    from slideviz.ui.widget import SlideList
 
     viewer = napari.Viewer(title="slideviz")
     # --no-reindex has no directory to scope by, so the list falls back to the whole index

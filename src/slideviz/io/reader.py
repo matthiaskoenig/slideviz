@@ -10,9 +10,9 @@ from pathlib import Path
 
 import dask.array as da
 
-from slideviz.czi import SlideInfo, read_pyramid
-from slideviz.ndpi import read_pyramid as read_ndpi_pyramid
-from slideviz.zarr import read_pyramid as read_zarr_pyramid
+from slideviz.io.czi import SlideInfo, read_pyramid
+from slideviz.io.ndpi import read_pyramid as read_ndpi_pyramid
+from slideviz.io.ome_zarr import read_pyramid as read_zarr_pyramid
 
 # Suffix to the function that reads it; one entry per supported format
 BACKENDS = {

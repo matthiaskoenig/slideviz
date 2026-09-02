@@ -19,7 +19,7 @@ from skimage.filters import threshold_otsu
 from skimage.measure import label
 from skimage.morphology import closing, disk, remove_small_holes, remove_small_objects
 
-from slideviz.reader import open_slide
+from slideviz.io.reader import open_slide
 
 log = logging.getLogger(__name__)
 

@@ -46,7 +46,7 @@ can be archived. Above the limit nothing is written.
 Registration is a separate uv project with its own venv: `valis-wsi` needs
 `numpy<2`, this project needs `numpy>=2`. They meet through `transforms.json` on
 disk: `valis_register.py` writes it to the run's output directory
-(`valis_runs/out_<block>/transforms.json`), `slideviz.registration` reads it and
+(`valis_runs/out_<block>/transforms.json`), `slideviz.data.registration` reads it and
 copies the matrix into the sidecars. See
 [`registration/README.md`](registration/README.md).
 

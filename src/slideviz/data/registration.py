@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from slideviz.schema import Registration
+from slideviz.data.schema import Registration
 
 SWAP_XY = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
 

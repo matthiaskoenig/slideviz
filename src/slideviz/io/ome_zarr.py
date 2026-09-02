@@ -12,7 +12,7 @@ from pathlib import Path
 
 import dask.array as da
 
-from slideviz.czi import SlideInfo
+from slideviz.io.czi import SlideInfo
 
 log = logging.getLogger(__name__)
 
