@@ -1,0 +1,9 @@
+[project]
+name = "slideviz-web"
+version = "0.1.0"
+description = "Static Vitessce viewer for the APAP OME-Zarr slides"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "vitessce[all]>=3.9.4",
+]

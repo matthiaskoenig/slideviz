@@ -55,12 +55,25 @@ copies the matrix into the sidecars. See
 | `registration/register.py` | slideviz | entry point |
 | `registration/valis_register.py` | registration | the VALIS call |
 
+## Browser viewer
+
+    cd web && uv run python build_config.py
+
+Builds a static [Vitessce](https://vitessce.io) page for the converted OME-Zarr
+slides, served as plain static files behind Caddy. Setup, deployment and the
+current limits are in [`web/README.md`](web/README.md).
+
+Also a separate uv project: `vitessce[all]` pins `ome-zarr==0.15.0`, which caps
+`dask<=2026.1.1`, and this project needs `dask>=2026.7.1`. `build_config.py`
+never imports slideviz; it reads the sidecars by path.
+
 ## Configuration
 
 | Variable | Meaning | Default |
 |---|---|---|
 | `SLIDEVIZ_DATA` | Directory of slides and their sidecars | none, must be set |
 | `SLIDEVIZ_DB` | Where the index is written | `~/.cache/slideviz/slides.db` |
+| `SLIDEVIZ_ZARR_DIR` | Sidecars the `web/` build reads | the mouse `APAP_zarr` path |
 
 The index is derived from the sidecars and rebuilt on every start.
 
