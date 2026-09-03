@@ -111,13 +111,26 @@ def main() -> None:
         help="rotation and translation only; serial sections are the same size",
     )
     parser.add_argument(
+        "--smooth",
+        type=float,
+        default=None,
+        help="blur by this sigma before the gradient, to suppress cell-level texture "
+             "the detector cannot tell apart",
+    )
+    parser.add_argument(
+        "--detector",
+        default=None,
+        help="feature detector class from valis.feature_detectors, e.g. DiskFD; the "
+             "default descriptors are not distinctive on repetitive liver texture",
+    )
+    parser.add_argument(
         "--check-reflections",
         action="store_true",
         help="re-match on flipped images; BROKEN upstream, see patch_lightglue_dtype",
     )
     args = parser.parse_args()
 
-    from gradient import GradientOD
+    from gradient import GradientOD, SmoothGradientOD
     from staircase import NoStaircase
     from valis import registration
     from valis.preprocessing import OD
@@ -127,7 +140,8 @@ def main() -> None:
     if args.single_matcher:
         from valis import feature_detectors, feature_matcher
 
-        single = feature_matcher.Matcher(feature_detector=feature_detectors.VggFD())
+        detector = getattr(feature_detectors, args.detector or "VggFD")
+        single = feature_matcher.Matcher(feature_detector=detector())
         matchers = {"matcher": single, "matcher_for_sorting": single}
 
     # Lock scale for same-size serial sections; pair with reflection checks to avoid flips.
@@ -154,6 +168,8 @@ def main() -> None:
         align_to_reference=bool(args.reference),
         max_processed_image_dim_px=args.max_dim,
         max_non_rigid_registration_dim_px=args.max_dim,
+        # Keep cached unprocessed images at the requested size instead of VALIS's inferred size.
+        max_image_dim_px=args.max_dim,
         # non-rigid re-expands the image, so it is the stage that runs out of memory
         non_rigid_registrar_cls=None if args.rigid_only else registration.DEFAULT_NON_RIGID_CLASS,
     )
@@ -162,7 +178,10 @@ def main() -> None:
         # VALIS cleanup requires this dict even in rigid-only mode.
         registrar.non_rigid_reg_kwargs = {}
 
-    if args.gradient:
+    if args.smooth:
+        SmoothGradientOD.sigma = args.smooth
+        processor = SmoothGradientOD
+    elif args.gradient:
         processor = GradientOD
     elif args.keep_staircase:
         processor = OD
