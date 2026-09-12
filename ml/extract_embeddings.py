@@ -127,10 +127,10 @@ def main() -> None:
         for batch, label, member, usable in loader:
             out = encoder(batch.to(args.device, dtype=DTYPE, non_blocking=True))
             keep = usable.numpy()
-            skipped += [m for m, ok in zip(member, keep) if not ok]
+            skipped += [m for m, ok in zip(member, keep, strict=True) if not ok]
             embeddings.append(out.float().cpu().numpy()[keep])
             labels.append(label.numpy()[keep])
-            names += [m for m, ok in zip(member, keep) if ok]
+            names += [m for m, ok in zip(member, keep, strict=True) if ok]
             seen += len(label)
             if seen % (args.batch * 20) == 0 or seen >= total:
                 rate = seen / (time.time() - start)

@@ -127,14 +127,15 @@ def main() -> None:
         "class_weight": weight,
         "seed": args.seed,
         "test_fraction": args.test_fraction,
-        "n_train": int(len(train_y)),
-        "n_test": int(len(test_y)),
+        "n_train": len(train_y),
+        "n_test": len(test_y),
         "accuracy": round(float(accuracy), 4),
         "balanced_accuracy": round(float(balanced), 4),
         "macro_f1": round(float(macro_f1), 4),
         "per_class_f1": {
             c: round(float(v), 4)
-            for c, v in zip(classes, f1_score(test_y, predicted, average=None, zero_division=0))
+            for c, v in zip(classes, f1_score(test_y, predicted, average=None, zero_division=0),
+                            strict=True)
         },
         "confusion_matrix": matrix.tolist(),
         "classes": classes,
