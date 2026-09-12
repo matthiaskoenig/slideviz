@@ -1,0 +1,13 @@
+[project]
+name = "slideviz-ml"
+version = "0.1.0"
+description = "Frozen pathology encoders and linear heads, run in their own environment"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.0",
+    "pillow>=11.0",
+    "scikit-learn>=1.6",
+    "timm>=1.0.20",
+    "torch>=2.6",
+    "torchvision>=0.21",
+]
