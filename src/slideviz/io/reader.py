@@ -12,6 +12,7 @@ import dask.array as da
 
 from slideviz.io.czi import SlideInfo, read_pyramid
 from slideviz.io.ndpi import read_pyramid as read_ndpi_pyramid
+from slideviz.io.ome_tiff import read_pyramid as read_ome_tiff_pyramid
 from slideviz.io.ome_zarr import read_pyramid as read_zarr_pyramid
 
 # Suffix to the function that reads it; one entry per supported format
@@ -19,6 +20,7 @@ BACKENDS = {
     ".czi": read_pyramid,
     ".zarr": read_zarr_pyramid,
     ".ndpi": read_ndpi_pyramid,
+    ".ome.tiff": read_ome_tiff_pyramid,
 }
 
 
