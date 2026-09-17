@@ -138,6 +138,18 @@ def main() -> None:
     mean_f1 = float(np.mean([f["f1"] for f in folds]))
     print(f"{'mean':<12}{'':>8}{'':>7}{mean_balanced:>9.4f}{mean_f1:>8.4f}")
 
+    # a control slide has no positive tiles, so its F1 is 0 by definition and its
+    # balanced accuracy is a near-1 for predicting nothing; both distort an average
+    scored = [f for f in folds if f["test_positive"]]
+    if len(scored) != len(folds):
+        mean_balanced_scored = float(np.mean([f["balanced_accuracy"] for f in scored]))
+        mean_f1_scored = float(np.mean([f["f1"] for f in scored]))
+        print(
+            f"{'mean, positive folds only':<12}{'':>8}"
+            f"{mean_balanced_scored:>16.4f}{mean_f1_scored:>8.4f}"
+            f"   ({len(scored)} of {len(folds)})"
+        )
+
     print("\n=== necrotic area per slide, the project's actual readout ===")
     print(f"{'animal':<12}{'annotated':>11}{'predicted':>11}{'error':>9}")
     for f in folds:
@@ -161,6 +173,13 @@ def main() -> None:
         "folds": folds,
         "mean_balanced_accuracy": round(mean_balanced, 4),
         "mean_f1": round(mean_f1, 4),
+        "n_folds_with_positives": len([f for f in folds if f["test_positive"]]),
+        "mean_balanced_accuracy_positive_folds": round(
+            float(np.mean([f["balanced_accuracy"] for f in folds if f["test_positive"]])), 4
+        ),
+        "mean_f1_positive_folds": round(
+            float(np.mean([f["f1"] for f in folds if f["test_positive"]])), 4
+        ),
         "n_animals": len(meta["animals"]),
         "caveat": "three animals, so each fold trains on two; a fold is one slide, not a cohort",
     }
