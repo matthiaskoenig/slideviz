@@ -60,21 +60,30 @@ def export_slide(
     overview: dict,
     out_dir: Path,
     scene: int = 0,
+    rewrite: bool = False,
 ) -> list[Row]:
-    """Write every tissue tile of one slide as a PNG, with its annotated fraction."""
+    """Write every tissue tile of one slide as a PNG, with its annotated fraction.
+
+    The pixels depend only on the slide and the grid, so tiles already on disk are
+    reused. Annotating changes the label, which lives in the manifest, not the image.
+    `rewrite` forces them out again, for when the grid parameters themselves change.
+    """
     grid = build_grid(slide_path, scene)
     labels = label_grid(grid, polygons, overview)
-    _, levels = open_slide(slide_path, scene)
 
     slide = slide_path.name.split(".")[0]
     animal, dose = animal_of(slide), dose_of(slide)
     tile_dir = out_dir / "tiles" / animal
     tile_dir.mkdir(parents=True, exist_ok=True)
 
+    names = [f"{animal}_r{c.row:04d}_c{c.col:04d}.png" for c in labels.tiles]
+    cached = not rewrite and all((tile_dir / n).exists() for n in names)
+    levels = None if cached else open_slide(slide_path, scene)[1]
+
     rows = []
-    for coverage, tile in zip(labels.tiles, grid.tiles, strict=True):
-        name = f"{animal}_r{coverage.row:04d}_c{coverage.col:04d}.png"
-        Image.fromarray(read_tile(levels, tile)).save(tile_dir / name)
+    for coverage, tile, name in zip(labels.tiles, grid.tiles, names, strict=True):
+        if levels is not None:
+            Image.fromarray(read_tile(levels, tile)).save(tile_dir / name)
         rows.append(
             Row(
                 tile=f"{animal}/{name}",
@@ -92,7 +101,13 @@ def export_slide(
             )
         )
 
-    log.info("%s: %d tiles written to %s", slide, len(rows), tile_dir)
+    log.info(
+        "%s: %d tiles %s %s",
+        slide,
+        len(rows),
+        "reused from" if cached else "written to",
+        tile_dir,
+    )
     return rows
 
 
@@ -114,6 +129,7 @@ def export_annotated(
     overview_dir: Path,
     out_dir: Path,
     confirmed_empty: Path | None = None,
+    rewrite: bool = False,
 ) -> dict:
     """Write tiles for every slide in the annotation export, plus one manifest."""
     export = json.loads(annotations.read_text())
@@ -145,7 +161,7 @@ def export_annotated(
             )
         polygons = [cvat_polygons(p["points"]) for p in record["polygons"]]
         rows += export_slide(
-            slide_dir / f"{slide}.ome.tiff", polygons, overview, out_dir
+            slide_dir / f"{slide}.ome.tiff", polygons, overview, out_dir, rewrite=rewrite
         )
 
     necrosis = np.array([r.necrosis for r in rows])
