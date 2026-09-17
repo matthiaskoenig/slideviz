@@ -96,12 +96,42 @@ def export_slide(
     return rows
 
 
+def read_confirmed_empty(path: Path | None) -> list[str]:
+    """Slides someone looked at and confirmed hold no necrosis.
+
+    An unannotated slide and a slide with nothing to draw are identical in the CVAT
+    export, so only slides named in this file count as negative. Everything else that
+    carries no polygons is simply not yet drawn, and stays out of the training data.
+    """
+    if path is None or not path.exists():
+        return []
+    return list(json.loads(path.read_text())["slides"])
+
+
 def export_annotated(
-    annotations: Path, slide_dir: Path, overview_dir: Path, out_dir: Path
+    annotations: Path,
+    slide_dir: Path,
+    overview_dir: Path,
+    out_dir: Path,
+    confirmed_empty: Path | None = None,
 ) -> dict:
     """Write tiles for every slide in the annotation export, plus one manifest."""
     export = json.loads(annotations.read_text())
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    empty = read_confirmed_empty(confirmed_empty)
+    for key in empty:
+        if key in export:
+            raise ValueError(f"{key} is listed as confirmed empty but carries polygons")
+        stem = key.removesuffix(".png")
+        overview = read_overview(overview_dir / f"{stem}.json")
+        export[key] = {
+            "width": overview["width"],
+            "height": overview["height"],
+            "polygons": [],
+        }
+    if empty:
+        log.info("%d slides confirmed empty, used as negatives: %s", len(empty), ", ".join(empty))
 
     rows: list[Row] = []
     for key, record in export.items():
@@ -127,6 +157,7 @@ def export_annotated(
         "animals": sorted({r.animal for r in rows}),
         "label": "necrosis",
         "label_is_fraction": True,  # a threshold is the training stage's choice, not this one
+        "confirmed_empty": empty,  # negative because someone looked, not because nobody drew
         "necrotic_over_half": int((necrosis > 0.5).sum()),
         "clean": int((necrosis == 0).sum()),
         "boundary_0.1_to_0.9": int(((necrosis > 0.1) & (necrosis < 0.9)).sum()),
