@@ -101,6 +101,7 @@ def main() -> None:
                         help="coverage above which a tile counts as necrotic")
     parser.add_argument("--drop-boundary", action="store_true",
                         help="train and test only on tiles below 0.1 or above 0.9")
+    parser.add_argument("--tag", default="", help="names this run in the output file")
     args = parser.parse_args()
 
     out = args.out or args.cache
@@ -148,6 +149,7 @@ def main() -> None:
 
     results = {
         "written": datetime.now(UTC).isoformat(timespec="seconds"),
+        "tag": args.tag,
         "cache": str(args.cache),
         "encoder": meta["model"],
         "embedding_dim": meta["embedding_dim"],
@@ -162,7 +164,10 @@ def main() -> None:
         "n_animals": len(meta["animals"]),
         "caveat": "three animals, so each fold trains on two; a fold is one slide, not a cohort",
     }
-    name = "necrosis_results_no_boundary.json" if args.drop_boundary else "necrosis_results.json"
+    # the tag keeps one run from overwriting another, so results accumulate
+    suffix = "_no_boundary" if args.drop_boundary else ""
+    tag = f"_{args.tag}" if args.tag else ""
+    name = f"necrosis_results{tag}{suffix}.json"
     (out / name).write_text(json.dumps(results, indent=2) + "\n")
     print(f"\n=== wrote {out / name} ===")
 
