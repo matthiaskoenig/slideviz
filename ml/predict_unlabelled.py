@@ -25,14 +25,15 @@ CLASS_WEIGHT = "balanced"
 
 
 def main() -> None:
-    """Fit on every annotated animal and predict one unlabelled slide."""
+    """Fit on every annotated animal and predict the unlabelled slides."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cache", type=Path, required=True, help="the annotated cache")
     parser.add_argument("--target-cache", type=Path, required=True,
                         help="embeddings for the unlabelled slide")
     parser.add_argument("--target-tiles", type=Path, required=True,
                         help="the unlabelled slide's tile manifest")
-    parser.add_argument("--animal", required=True, help="which animal in the target")
+    parser.add_argument("--animal", default=None,
+                        help="one animal; omit to predict every animal in the target")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--positive", type=float, default=POSITIVE)
     args = parser.parse_args()
@@ -46,27 +47,37 @@ def main() -> None:
 
     target_x = np.asarray(np.load(args.target_cache / "embeddings.npy", mmap_mode="r"))
     target_animals = np.array((args.target_cache / "animals.txt").read_text().split())
-    keep = target_animals == args.animal
-    if not keep.any():
-        raise ValueError(f"{args.animal} is not in {args.target_cache}")
-
     manifest = json.loads((args.target_tiles / "manifest.json").read_text())
-    rows = [r for r in manifest["tiles"] if r["animal"] == args.animal]
-    if len(rows) != int(keep.sum()):
-        raise ValueError(f"{len(rows)} manifest rows against {int(keep.sum())} embeddings")
 
+    wanted = [args.animal] if args.animal else sorted(set(target_animals))
+    missing = [a for a in wanted if a not in set(target_animals)]
+    if missing:
+        raise ValueError(f"not in {args.target_cache}: {', '.join(missing)}")
+
+    # one fit serves every slide, since the training set does not change between them
     print(f"=== fit on {len(train_y):,} annotated tiles from {len(meta['animals'])} animals ===")
-    scaler = StandardScaler().fit(train_x)  # every annotated animal trains this one
+    scaler = StandardScaler().fit(train_x)
     head = LogisticRegression(max_iter=MAX_ITER, class_weight=CLASS_WEIGHT)
     head.fit(scaler.transform(train_x), train_y)
 
+    for animal in wanted:
+        write_one(animal, head, scaler, target_x, target_animals, manifest, meta, args)
+
+
+def write_one(animal, head, scaler, target_x, target_animals, manifest, meta, args) -> None:
+    """Score one unlabelled slide and write its map."""
+    keep = target_animals == animal
+    rows = [r for r in manifest["tiles"] if r["animal"] == animal]
+    if len(rows) != int(keep.sum()):
+        raise ValueError(f"{len(rows)} manifest rows against {int(keep.sum())} embeddings")
+
     scores = head.predict_proba(scaler.transform(target_x[keep]))[:, 1]
     flagged = scores >= 0.5
-    print(f"=== {args.animal}: {len(rows):,} tiles, {flagged.mean():.1%} flagged ===")
+    print(f"  {animal:<11} {len(rows):>6,} tiles, {flagged.mean():>6.1%} flagged")
 
     record = {
         "written": datetime.now(UTC).isoformat(timespec="seconds"),
-        "animal": args.animal,
+        "animal": animal,
         "slide": rows[0]["slide"],
         "encoder": meta["model"],
         "trained_on": meta["animals"],
@@ -88,9 +99,8 @@ def main() -> None:
             for r, s in zip(rows, scores, strict=True)
         ],
     }
-    path = args.out / f"{args.animal}_unlabelled_predictions.json"
+    path = args.out / f"{animal}_unlabelled_predictions.json"
     path.write_text(json.dumps(record, indent=2) + "\n")
-    print(f"=== wrote {path} ===")
 
 
 if __name__ == "__main__":
