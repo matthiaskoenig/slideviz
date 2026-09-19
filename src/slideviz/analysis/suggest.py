@@ -11,7 +11,8 @@ import logging
 from pathlib import Path
 
 import numpy as np
-from skimage.measure import approximate_polygon, find_contours
+from scipy.ndimage import binary_fill_holes
+from skimage.measure import approximate_polygon, find_contours, label
 from skimage.morphology import closing, disk, remove_small_holes
 
 log = logging.getLogger(__name__)
@@ -33,11 +34,13 @@ def flagged_mask(rows: list[dict], scores: np.ndarray, threshold: float) -> np.n
     return mask
 
 
-def clean_mask(mask: np.ndarray, min_tiles: int = MIN_TILES) -> np.ndarray:
-    """Close one-tile gaps and drop specks, so tracing gives regions not confetti."""
-    closed = closing(mask, disk(1))
+def clean_mask(
+    mask: np.ndarray, min_tiles: int = MIN_TILES, bridge: bool = False
+) -> np.ndarray:
+    """Fill small holes, optionally closing gaps between lesions."""
+    cleaned = closing(mask, disk(1)) if bridge else mask
     # max_size removes holes of that size or smaller, so one less keeps min_tiles intact
-    return remove_small_holes(closed, max_size=min_tiles - 1)
+    return remove_small_holes(cleaned, max_size=min_tiles - 1)
 
 
 def mask_to_polygons(
@@ -45,15 +48,23 @@ def mask_to_polygons(
 ) -> list[np.ndarray]:
     """Outlines of every flagged region, in tile coordinates."""
     polygons = []
-    for contour in find_contours(mask.astype(float), 0.5):
-        simplified = approximate_polygon(contour, tolerance=tolerance)
-        if len(simplified) < 4:
-            continue  # fewer than four points is not a region
-        # shoelace area in tile units, so the threshold means "this many tiles"
-        y, x = simplified[:, 0], simplified[:, 1]
-        area = abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1))) / 2
-        if area >= min_tiles:
-            polygons.append(simplified)
+    # Process regions separately to avoid tracing holes as healthy-tissue polygons.
+    labelled = label(mask)
+    for index in range(1, labelled.max() + 1):
+        region = labelled == index
+        if region.sum() < min_tiles:
+            continue
+        # filling first drops the interior contours, leaving only this region's outline
+        contours = find_contours(binary_fill_holes(region).astype(float), 0.5)
+        for contour in contours:
+            simplified = approximate_polygon(contour, tolerance=tolerance)
+            if len(simplified) < 4:
+                continue  # fewer than four points is not a region
+            # shoelace area in tile units, so the threshold means "this many tiles"
+            y, x = simplified[:, 0], simplified[:, 1]
+            area = abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1))) / 2
+            if area >= min_tiles:
+                polygons.append(simplified)
     return polygons
 
 
