@@ -22,10 +22,12 @@ from qtpy.QtWidgets import (
 )
 
 from slideviz.analysis.masked import to_rgba
+from slideviz.analysis.prediction import add_prediction_layers, tile_um_of
 from slideviz.data.catalog import query, slide_path
 from slideviz.data.registration import napari_affine
 from slideviz.data.schema import Registration, Slide
 from slideviz.io.reader import open_slide
+from slideviz.settings import settings
 
 # n_scenes rides along per row, so list can label scenes without opening any file
 SELECT_SQL = "SELECT *, COUNT(*) OVER (PARTITION BY directory, file) AS n_scenes FROM slides"
@@ -48,9 +50,21 @@ REFERENCE_STAIN = "he"
 # where a layer keeps its unmasked pyramid, so the background toggle can swap data
 SOURCE_LEVELS = "slideviz_levels"
 
+# a block's name carries this prefix, a prediction file's animal does not
+BLOCK_PREFIX = "apap_"
+
 # one colour per stain, so an overlay reads as two channels instead of two pictures
 STAIN_COLOURS = {"he": "green", "cyp2e1": "magenta", "cyp1a2": "magenta", "hmgb1": "cyan"}
 FALLBACK_COLOUR = "yellow"
+
+# how a stain is written in the layer list, where the index's lowercase key reads badly
+STAIN_NAMES = {"he": "H&E", "cyp2e1": "CYP2E1", "cyp1a2": "CYP1A2", "hmgb1": "HMGB1"}
+
+# separates the parts of a layer name: animal, then what it shows, then which kind
+NAME_SEPARATOR = " · "
+
+# what a prediction file is about, when it does not say; steatosis is the planned second
+DEFAULT_LABEL = "necrosis"
 
 # Filter label to the column it restricts
 FILTERS = {"Species": "species", "Stain": "stain", "Dose": "dose_mg_per_kg"}
@@ -70,14 +84,20 @@ def _column(name: str) -> str:
     return name
 
 
+def layer_name(animal: str, what: str, kind: str | None = None) -> str:
+    """Return a layer name containing the animal, content, and optional kind."""
+    parts = [animal, what] + ([kind] if kind else [])
+    return NAME_SEPARATOR.join(parts)
+
+
 class SlideList(QWidget):
     """Slide picker docked into the napari window."""
 
     def __init__(self, viewer, directory: Path | None = None) -> None:
-        """Build the list, the buttons and the status line, then fill the list.
+        """Build and populate the slide picker.
 
-        A directory limits the list to that collection, so one index can hold
-        several without them appearing as one. None lists everything indexed.
+        If provided, ``directory`` limits slides to that collection; otherwise,
+        all indexed slides are shown.
         """
         super().__init__()
         self.viewer = viewer
@@ -256,7 +276,10 @@ class SlideList(QWidget):
         registration = self._registration(row)
         try:
             info, levels = open_slide(path, scene)  # lazy, pixels arrive when napari draws
-            name = f"{path.stem} s{scene}" if info.n_scenes > 1 else path.stem
+            stain = STAIN_NAMES.get(row["stain"], row["stain"].upper())
+            # a scene number only means something on the files that hold more than one
+            what = f"{stain} s{scene}" if info.n_scenes > 1 else stain
+            name = layer_name(row["serial_block"].removeprefix(BLOCK_PREFIX), what)
             affine = None
             if registration is not None:
                 affine = napari_affine(registration, reference_um or info.pixel_size_um)
@@ -297,6 +320,43 @@ class SlideList(QWidget):
                 continue
             layer.data = self._levels_for(levels)
 
+    @staticmethod
+    def _prediction_file(block: str) -> Path | None:
+        """The model output for one block, when a prediction directory is configured."""
+        if settings.predictions is None:
+            return None
+        animal = block.removeprefix(BLOCK_PREFIX)
+        # an unannotated slide writes its own name, so try both
+        for suffix in ("_predictions.json", "_unlabelled_predictions.json"):
+            path = settings.predictions / f"{animal}{suffix}"
+            if path.exists():
+                return path
+        return None
+
+    def _load_predictions(self, block: str, reference_um: float) -> int:
+        """Add annotated and predicted tile maps in the reference stain's frame."""
+        path = self._prediction_file(block)
+        if path is None:
+            return 0
+        animal = block.removeprefix(BLOCK_PREFIX)
+        try:
+            record = json.loads(path.read_text())
+            label = record.get("label", DEFAULT_LABEL)
+            level_um = reference_um * 2 ** record["level"]
+            layers = add_prediction_layers(
+                self.viewer,
+                path,
+                tile_um_of(path, level_um),
+                annotated_name=layer_name(animal, label, "annotated"),
+                predicted_name=layer_name(animal, label, "predicted"),
+            )
+        # a truncated or half-written prediction file should not take the viewer down
+        except (OSError, ValueError, KeyError) as exc:
+            log.exception("could not load predictions from %s", path)
+            self.status.setText(f"{path.name}: {type(exc).__name__}: {exc}")
+            return 0
+        return len(layers)
+
     def _load_block(self, directory: str, block: str) -> None:
         """Add every stain of one block, aligned onto the reference where possible."""
         slides = self._block_slides(directory, block)
@@ -314,8 +374,11 @@ class SlideList(QWidget):
             elif self._registration(row) is None:
                 unaligned.append(row["stain"])
 
+        maps = self._load_predictions(block, reference_um) if reference_um else 0
+
         note = f"  (overlaid, not registered: {', '.join(unaligned)})" if unaligned else ""
-        self.status.setText(f"{block}  {loaded} layers{note}")
+        maps_note = "  + necrosis maps" if maps else ""
+        self.status.setText(f"{block}  {loaded} layers{maps_note}{note}")
 
     def _replace(self) -> None:
         """Drop the open layers and show the selected block on its own."""

@@ -72,9 +72,9 @@ def to_overview(
     polygon: np.ndarray, size_px: int, level_um_per_px: float, overview_um_per_px: float
 ) -> list[float]:
     """One tile-space polygon as the flat x,y list CVAT stores, in overview pixels."""
-    # tile index to level pixels, then level pixels to overview pixels
+    # Shift contours by half a tile to align them with the covered tile area.
     scale = size_px * level_um_per_px / overview_um_per_px
-    points = polygon * scale
+    points = (polygon + 0.5) * scale
     return [float(v) for point in points for v in (point[1], point[0])]  # CVAT wants x,y
 
 

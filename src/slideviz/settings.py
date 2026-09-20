@@ -21,6 +21,8 @@ class Settings(BaseSettings):
 
     data: Path | None = None  # no default: a path baked in here only works on one machine
     db: Path = Path(user_cache_dir("slideviz")) / "slides.db"
+    # per-slide model output, added as layers when a block that has some is opened
+    predictions: Path | None = None
 
 
 settings = Settings()

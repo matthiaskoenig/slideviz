@@ -1,9 +1,6 @@
-"""Per-tile predictions painted back onto the slide, as a layer napari can show.
+"""Utilities for displaying per-tile predictions in napari.
 
-A prediction is one number per tile, so the map is the tile grid rather than the slide:
-one pixel per tile, held at tile resolution and stretched to slide coordinates by the
-layer's scale. The viewer places every layer in micrometres, so the scale is the tile
-size in micrometres and the map lands on the tissue without resampling anything.
+Maps use one pixel per tile and are scaled to slide coordinates in micrometres.
 """
 
 from __future__ import annotations
@@ -40,28 +37,51 @@ def read_predictions(path: Path) -> tuple[list[dict], np.ndarray, np.ndarray]:
     )
 
 
-def add_prediction_layers(viewer, path: Path, tile_um: float, name: str = "necrosis") -> None:
-    """Add the predicted and annotated tile maps to an open viewer, in micrometres."""
+def tile_um_of(path: Path, level_um_per_px: float) -> float:
+    """Return the tile width in micrometres from the grid's pixel size."""
+    record = json.loads(path.read_text())
+    return record["size_px"] * level_um_per_px
+
+
+def add_prediction_layers(
+    viewer,
+    path: Path,
+    tile_um: float,
+    annotated_name: str = "annotated",
+    predicted_name: str = "predicted",
+    visible: bool = False,
+) -> list:
+    """Add predicted and annotated tile maps to an open viewer in micrometres.
+
+    Maps use absolute tile row and column indices and the reference stain's frame.
+    """
     rows, predicted, annotated = read_predictions(path)
     # tiles are square and spaced by their own size, so one tile is one pixel at this scale
     scale = (tile_um, tile_um)
-    viewer.add_image(
-        tile_map(rows, annotated),
-        name=f"{name} annotated",
-        scale=scale,
-        units="um",
-        colormap="green",
-        opacity=0.5,
-        blending="translucent",
-    )
-    viewer.add_image(
-        tile_map(rows, predicted),
-        name=f"{name} predicted",
-        scale=scale,
-        units="um",
-        colormap="magenta",
-        opacity=0.5,
-        blending="translucent",
-        contrast_limits=(0.0, 1.0),
-    )
+    # Offset by half a tile because napari centres pixels on their indices.
+    offset = (tile_um / 2, tile_um / 2)
+    common = {
+        "scale": scale,
+        "translate": offset,
+        "units": "um",
+        "opacity": 0.5,
+        "blending": "additive",  # so the two maps show through each other
+        "contrast_limits": (0.0, 1.0),
+        "visible": visible,
+    }
+    layers = [
+        viewer.add_image(
+            tile_map(rows, annotated, fill=0.0),
+            name=annotated_name,
+            colormap="green",
+            **common,
+        ),
+        viewer.add_image(
+            tile_map(rows, predicted, fill=0.0),
+            name=predicted_name,
+            colormap="magenta",
+            **common,
+        ),
+    ]
     log.info("%d tiles as %.0f um pixels", len(rows), tile_um)
+    return layers
