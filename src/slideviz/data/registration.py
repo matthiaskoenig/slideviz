@@ -20,8 +20,16 @@ def napari_affine(registration: Registration, pixel_size_um: float = 1.0) -> np.
     return matrix
 
 
-def from_valis_run(run_dir: Path, error_um: float | None = None) -> dict[str, Registration]:
-    """Read a VALIS run's transforms.json, keyed by slide stem."""
+VALIS_METHOD = "valis-1.2.0 rigid, GradientOD"
+
+
+def from_valis_run(
+    run_dir: Path, error_um: float | None = None, method: str = VALIS_METHOD
+) -> dict[str, Registration]:
+    """Read a run's transforms.json, keyed by slide stem.
+
+    `method` records what produced it, since outline_register.py writes this file too.
+    """
     data = json.loads((run_dir / "transforms.json").read_text())
     reference = Path(data["reference"]).name.split(".")[0]
 
@@ -33,12 +41,11 @@ def from_valis_run(run_dir: Path, error_um: float | None = None) -> dict[str, Re
             reference=reference,
             matrix=entry["matrix"],
             slide_shape_rc=entry["slide_shape_rc"],
-            method="valis-1.2.0 rigid, GradientOD",
+            method=method,
             error_um=error_um,
-            # how exactly the affine fit the full warp, so a non-affine chain shows up
+            # how exactly the affine fit the full warp
             residual_px=entry.get("residual_px"),
-            # UTC, so a provenance date does not depend on where it was recorded
-            registered=datetime.now(UTC).date().isoformat(),
+            registered=datetime.now(UTC).date().isoformat(),  # UTC, for provenance
         )
     return found
 
@@ -49,7 +56,8 @@ def write_to_sidecars(
     """Merge registrations into the sidecars of `slide_dir`, matching on file stem."""
     changed = 0
     for name, registration in registrations.items():
-        matches = [p for p in slide_dir.glob("*.json") if p.stem == name]
+        # <name>.ome.json keeps the .ome in its stem, so cut at the first dot
+        matches = [p for p in slide_dir.glob("*.json") if p.name.split(".")[0] == name]
         if not matches:
             print(f"  ! no sidecar for {name}")
             continue

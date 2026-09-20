@@ -1,18 +1,15 @@
 """Register one serial block. The entry point.
 
-Converts Zarr to OME-TIFF (VALIS cannot read the bf2raw layout), runs
-registration/valis_register.py as a subprocess, checks the error against
-ERROR_LIMIT_UM, writes the transform into the sidecars, and reports where the
-TIFFs can be archived. Above the limit nothing is written.
+Converts Zarr to OME-TIFF, runs valis_register.py or outline_register.py as a
+subprocess, checks the error against ERROR_LIMIT_UM, writes the transform into the
+sidecars. Above the limit nothing is written. Stops after one block.
 
-Stops after one block, so a bad registration is seen before the next starts.
-
-Runs in the slideviz venv, not this folder's. Call it from the repo root, since
-`uv run` inside registration/ picks the VALIS venv, which has no slideviz and
-fails at the sidecar step after the whole run has finished.
+Call it from the repo root, so `uv run` picks the slideviz venv that the sidecar
+step needs.
 
     uv run python registration/register.py 375mg_m1
     uv run python registration/register.py 500mg_m4 --retry    # lock scale, check flips
+    uv run python registration/register.py 089mg_m3 --from-outline
 """
 
 from __future__ import annotations
@@ -28,30 +25,28 @@ ZARR_DIR = IMAGES / "APAP_zarr"
 TIFF_DIR = IMAGES / "APAP_tiff"
 CZI_DIR = Path("/home/michelle/Projects/image-analysis/images/mouse/APAP")
 RUN_DIR = Path("/home/michelle/Projects/image-analysis/valis_runs")
-# VALIS pins numpy<2 and slideviz needs numpy>=2, so registration/ is a separate
-# uv project with its own venv. They meet through transforms.json on disk.
+# a separate uv project: VALIS pins numpy<2, slideviz needs numpy>=2. They meet
+# through transforms.json on disk.
 VALIS_PROJECT = Path(__file__).resolve().parent
 TMPDIR = Path("/home/michelle/tmp")
 
-STAINS = ("he", "cyp2e1")  # he is the reference: the morphology and segmentation frame
+STAINS = ("he", "cyp2e1")  # he is the reference, the morphology frame
 
-# a good pair lands near 25 µm and a failed one near 875, so anything in between is
-# a bad registration rather than a merely imprecise one
-ERROR_LIMIT_UM = 500.0
+ERROR_LIMIT_UM = 500.0  # a good pair lands near 25 µm, a failed one near 875
 
-# A wrong fit can still look good by error alone; the scale on failed blocks was
-# 0.813, 1.353 and 1.586, far from the block's true 0.96–1.01.
+# failed blocks came back at 0.813, 1.353 and 1.586, against a true 0.96 to 1.01
 SCALE_TOLERANCE = 0.10
 
-# a similarity transform is isotropic, so any stretch is a sign the fit went wrong
-SHEAR_TOLERANCE = 1.05
+SHEAR_TOLERANCE = 1.05  # a similarity transform is isotropic
+
+OUTLINE_METHOD = "outline rigid + gradient NCC refine (slideviz)"
 
 
 def check_geometry(matrix, allow_reflection: bool = False) -> str | None:
     """Why this transform is implausible for two sections off one block, or None.
 
-    Guards what the error value cannot: a wrong fit can be self-consistent and
-    report a low error while mapping the slide to the wrong size or handedness.
+    Catches a self-consistent fit that reports a low error while mapping the slide
+    to the wrong size or handedness.
     """
     import numpy as np
 
@@ -61,8 +56,7 @@ def check_geometry(matrix, allow_reflection: bool = False) -> str | None:
     if abs(determinant) < 1e-12:
         return "singular, so it maps the slide onto a line"
 
-    # a mirrored section cannot be undone by rotation, so it is a mounting error
-    # rather than a registration this script should record
+    # a mirrored section is a mounting error, beyond what rotation can undo
     if determinant < 0 and not allow_reflection:
         return f"reflection (det {determinant:+.3f}), so a section may be mounted face down"
 
@@ -80,14 +74,14 @@ def check_geometry(matrix, allow_reflection: bool = False) -> str | None:
 def run(command: list[str], **kwargs) -> None:
     """Run a command, showing it first, and stop the script if it fails."""
     print(f"\n$ {' '.join(str(c) for c in command)}\n", flush=True)
-    # check=False, since the exit code is reported here rather than as a traceback
+    # check=False, so the exit code is reported here
     result = subprocess.run(command, check=False, **kwargs)
     if result.returncode != 0:
         sys.exit(f"failed with exit {result.returncode}")
 
 
 def to_tiff(block: str, stain: str) -> Path:
-    """The OME-TIFF for one slide, converted from its Zarr if it is not there yet."""
+    """The OME-TIFF for one slide, converting from its Zarr when missing."""
     name = f"mouse_apap_{block}_{stain}"
     tiff = TIFF_DIR / f"{name}.ome.tiff"
     if tiff.exists():
@@ -99,8 +93,7 @@ def to_tiff(block: str, stain: str) -> Path:
         sys.exit(f"no zarr for {name}")
 
     start = time.time()
-    # LZW because JPEG_2000 is silently broken in raw2ometiff 0.10.0 and writes
-    # uncompressed output
+    # LZW: JPEG_2000 is silently broken in raw2ometiff 0.10.0, writing uncompressed
     run(["raw2ometiff", str(zarr), str(tiff), "--compression=LZW", "--max_workers=2"])
     size = tiff.stat().st_size / 1e9
     print(f"{tiff.name}: {size:.1f} GB in {time.time() - start:.0f} s")
@@ -108,6 +101,7 @@ def to_tiff(block: str, stain: str) -> Path:
 
 
 def main() -> None:
+    """Convert, register, check and write the transform for one block."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("block", help="serial block, e.g. 375mg_m1")
     parser.add_argument("--keep-tiff", action="store_true",
@@ -126,10 +120,12 @@ def main() -> None:
     parser.add_argument("--max-dim", type=int, default=None,
                         help="longest edge used for matching; raise it when features "
                              "are abundant but not distinctive")
+    parser.add_argument("--from-outline", action="store_true",
+                        help="align on the tissue outline, for a pair whose "
+                             "features do not match")
     args = parser.parse_args()
 
-    # the sidecar write at the end needs slideviz; check now rather than after
-    # VALIS has run for an hour
+    # the sidecar write needs slideviz; check now, before an hour of VALIS
     try:
         import slideviz  # noqa: F401
     except ModuleNotFoundError:
@@ -155,14 +151,13 @@ def main() -> None:
             link.unlink()
         link.symlink_to(tiff)
 
-    out = RUN_DIR / f"out_{args.block}{args.out_suffix}"  # sibling of the input, never its parent
+    out = RUN_DIR / f"out_{args.block}{args.out_suffix}"  # a sibling of the input
     out.mkdir(exist_ok=True)
 
     # Failed pairs can fit a clean but wrong similarity transform. Locking scale
     # keeps the block at the correct size, which is ~1.0 for paired sections.
     extra = ["--fixed-scale", "--check-reflections"] if args.retry else []
-    # rematch dies in an SVD that does not converge on these pairs, so any run that
-    # is already a retry uses one matcher and skips that pass
+    # rematch dies in an SVD on these pairs, so a retry uses one matcher and skips it
     if args.single_matcher or args.detector or args.smooth:
         extra += ["--single-matcher"]
     if args.detector:
@@ -173,10 +168,11 @@ def main() -> None:
         extra += ["--max-dim", str(args.max_dim)]
 
     print(f"\n=== {args.block}: registering ===")
+    script = "outline_register.py" if args.from_outline else "valis_register.py"
+    settings = [] if args.from_outline else ["--rigid-only", "--gradient", *extra]
     run(
-        ["uv", "run", "python", "valis_register.py", str(slides), str(out),
-         "--reference", f"mouse_apap_{args.block}_he.ome.tiff",
-         "--rigid-only", "--gradient", *extra],
+        ["uv", "run", "python", script, str(slides), str(out),
+         "--reference", f"mouse_apap_{args.block}_he.ome.tiff", *settings],
         cwd=VALIS_PROJECT,
         env={**__import__("os").environ, "TMPDIR": str(TMPDIR)},
     )
@@ -190,23 +186,31 @@ def main() -> None:
         if rows:
             error_um = float(rows[0]["rigid_D"])
 
+    # the outline path reports a correlation under its own name; rigid_D measures
+    # matched keypoints, which is the stage that fails on these blocks
+    if args.from_outline:
+        error_um = None
+
     # a poor fit is worse than none; do not write a wrong transform
     reasons = []
-    if error_um is None:
-        # no error table means the run crashed, so do not write the transform
+    if error_um is None and not args.from_outline:
+        # a missing error table means the run crashed
         reasons.append("no error reported, so the run did not finish")
-    elif error_um > ERROR_LIMIT_UM:
+    elif error_um is not None and error_um > ERROR_LIMIT_UM:
         reasons.append(f"rigid error {error_um:.0f} µm is above the {ERROR_LIMIT_UM:.0f} µm limit")
 
     print(f"\n=== {args.block}: reading the transform ===")
-    from slideviz.data.registration import from_valis_run, write_to_sidecars
+    from slideviz.data.registration import (
+        VALIS_METHOD, from_valis_run, write_to_sidecars,
+    )
 
     registrations = {}
     if not (out / "transforms.json").exists():
         # VALIS writes this last, so its absence means the run died partway
         reasons.append("no transforms.json, so registration did not complete")
     else:
-        registrations = from_valis_run(out, error_um=error_um)
+        method = OUTLINE_METHOD if args.from_outline else VALIS_METHOD
+        registrations = from_valis_run(out, error_um=error_um, method=method)
         for name, registration in registrations.items():
             implausible = check_geometry(registration.matrix, allow_reflection=args.retry)
             if implausible:
@@ -221,8 +225,10 @@ def main() -> None:
         sys.exit(1)
 
     print(f"\n=== {args.block}: writing the transform to the sidecars ===")
-    for directory in (ZARR_DIR, CZI_DIR):
-        write_to_sidecars(registrations, directory, write=True)
+    # every directory that holds sidecars for this block
+    for directory in (ZARR_DIR, TIFF_DIR, CZI_DIR):
+        if directory.exists():
+            write_to_sidecars(registrations, directory, write=True)
 
     print(f"\n=== {args.block}: done ===")
     print(f"  rigid error: {error_um:.1f} µm" if error_um else "  no error reported")
