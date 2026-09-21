@@ -216,9 +216,13 @@ def register_block(block: str, args) -> dict:
 
     for route in routes:
         from_outline = route == "outline"
-        suffix = args.out_suffix + ("_outline" if from_outline and route != routes[0] else "")
+        suffix = args.out_suffix + ("_outline" if from_outline else "")
         out = RUN_DIR / f"out_{block}{suffix}"  # a sibling of the input
         out.mkdir(exist_ok=True)
+
+        # an earlier run's transforms.json would read as this one's result
+        for stale in ("transforms.json", "registration_error.csv", "outline_error.csv"):
+            (out / stale).unlink(missing_ok=True)
 
         print(f"\n=== {block}: registering ({route}) ===")
         registrations, reasons, error_um = run_one(
