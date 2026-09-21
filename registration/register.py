@@ -31,6 +31,7 @@ VALIS_PROJECT = Path(__file__).resolve().parent
 TMPDIR = Path("/home/michelle/tmp")
 
 STAINS = ("he", "cyp2e1")  # he is the reference, the morphology frame
+STAIN_NAMES = {"he": "HE", "cyp2e1": "Cyp2e1"}  # as the wet lab writes them
 
 ERROR_LIMIT_UM = 500.0  # a good pair lands near 25 µm, a failed one near 875
 
@@ -80,6 +81,20 @@ def run(command: list[str], **kwargs) -> None:
         sys.exit(f"failed with exit {result.returncode}")
 
 
+def attempt(command: list[str], **kwargs) -> int:
+    """Run a command, showing it first, and return its exit code."""
+    print(f"\n$ {' '.join(str(c) for c in command)}\n", flush=True)
+    return subprocess.run(command, check=False, **kwargs).returncode
+
+
+def all_blocks() -> set[str]:
+    """Every block with both stains available as OME-TIFF."""
+    stems = {p.name.split(".")[0] for p in TIFF_DIR.glob("mouse_apap_*_he.ome.tiff")}
+    blocks = {s.removeprefix("mouse_apap_").removesuffix("_he") for s in stems}
+    return {b for b in blocks
+            if (TIFF_DIR / f"mouse_apap_{b}_cyp2e1.ome.tiff").exists()}
+
+
 def to_tiff(block: str, stain: str) -> Path:
     """The OME-TIFF for one slide, converting from its Zarr when missing."""
     name = f"mouse_apap_{block}_{stain}"
@@ -100,10 +115,140 @@ def to_tiff(block: str, stain: str) -> Path:
     return tiff
 
 
+def ensure_sidecar(block: str, stain: str) -> None:
+    """Create a missing sidecar for one slide, from its block's H&E sidecar."""
+    import json
+
+    tiff = TIFF_DIR / f"mouse_apap_{block}_{stain}.ome.tiff"
+    sidecar = TIFF_DIR / f"mouse_apap_{block}_{stain}.ome.json"
+    reference = TIFF_DIR / f"mouse_apap_{block}_he.ome.json"
+    if sidecar.exists() or not tiff.exists() or not reference.exists():
+        return
+
+    data = json.loads(reference.read_text())
+    data["file"] = tiff.name
+    data["stain"] = stain
+    # the wet lab's name differs only in the stain, and the quoting is theirs
+    data["original_name"] = data["original_name"].replace(" HE'", f" {STAIN_NAMES[stain]}'")
+    sidecar.write_text(json.dumps(data, indent=2) + "\n")
+    print(f"  created {sidecar.name}")
+
+
+def run_one(block: str, out: Path, slides: Path, from_outline: bool,
+            extra: list[str], allow_reflection: bool) -> tuple[dict, list[str], float | None]:
+    """Run one registration and read back its transform, gates and error."""
+    from slideviz.data.registration import VALIS_METHOD, from_valis_run
+
+    script = "outline_register.py" if from_outline else "valis_register.py"
+    settings = [] if from_outline else ["--rigid-only", "--gradient", *extra]
+    attempt(
+        ["uv", "run", "python", script, str(slides), str(out),
+         "--reference", f"mouse_apap_{block}_he.ome.tiff", *settings],
+        cwd=VALIS_PROJECT,
+        env={**__import__("os").environ, "TMPDIR": str(TMPDIR)},
+    )
+
+    error_um = None
+    summary = out / "registration_error.csv"
+    if summary.exists() and not from_outline:
+        import csv
+
+        rows = [r for r in csv.DictReader(summary.open()) if r.get("rigid_D")]
+        if rows:
+            error_um = float(rows[0]["rigid_D"])
+
+    reasons = []
+    if error_um is None and not from_outline:
+        # a missing error table means the run crashed
+        reasons.append("no error reported, so the run did not finish")
+    elif error_um is not None and error_um > ERROR_LIMIT_UM:
+        reasons.append(f"rigid error {error_um:.0f} µm is above the {ERROR_LIMIT_UM:.0f} µm limit")
+
+    registrations = {}
+    if not (out / "transforms.json").exists():
+        # VALIS writes this last, so its absence means the run died partway
+        reasons.append("no transforms.json, so registration did not complete")
+    else:
+        method = OUTLINE_METHOD if from_outline else VALIS_METHOD
+        registrations = from_valis_run(out, error_um=error_um, method=method)
+        for name, registration in registrations.items():
+            implausible = check_geometry(registration.matrix, allow_reflection=allow_reflection)
+            if implausible:
+                reasons.append(f"{name}: {implausible}")
+
+    return registrations, reasons, error_um
+
+
+def register_block(block: str, args) -> dict:
+    """Register one block, falling back to the outline path when VALIS fails.
+
+    Returns a row for the batch report: block, method, error_um, reasons.
+    """
+    print(f"\n=== {block}: to OME-TIFF ===")
+    tiffs = [to_tiff(block, stain) for stain in STAINS]
+    for stain in STAINS:
+        ensure_sidecar(block, stain)
+
+    # VALIS takes a directory, so give it one holding just this block
+    slides = RUN_DIR / f"pair_{block}" / "slides"
+    slides.mkdir(parents=True, exist_ok=True)
+    for tiff in tiffs:
+        link = slides / tiff.name
+        # exists() follows the link, so a link left by an earlier run pointing at a
+        # path that has since moved reads as absent and then fails to be created
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to(tiff)
+
+    extra = ["--fixed-scale", "--check-reflections"] if args.retry else []
+    if args.single_matcher or args.detector or args.smooth:
+        extra += ["--single-matcher"]
+    if args.detector:
+        extra += ["--detector", args.detector]
+    if args.smooth:
+        extra += ["--smooth", str(args.smooth)]
+    if args.max_dim:
+        extra += ["--max-dim", str(args.max_dim)]
+
+    routes = ["outline"] if args.from_outline else ["valis", "outline"]
+    if args.no_fallback:
+        routes = routes[:1]
+
+    for route in routes:
+        from_outline = route == "outline"
+        suffix = args.out_suffix + ("_outline" if from_outline and route != routes[0] else "")
+        out = RUN_DIR / f"out_{block}{suffix}"  # a sibling of the input
+        out.mkdir(exist_ok=True)
+
+        print(f"\n=== {block}: registering ({route}) ===")
+        registrations, reasons, error_um = run_one(
+            block, out, slides, from_outline, extra, args.retry,
+        )
+
+        if not reasons:
+            print(f"\n=== {block}: writing the transform to the sidecars ===")
+            from slideviz.data.registration import write_to_sidecars
+
+            # every directory that holds sidecars for this block
+            for directory in (ZARR_DIR, TIFF_DIR, CZI_DIR):
+                if directory.exists():
+                    write_to_sidecars(registrations, directory, write=True)
+            print(f"  error: {error_um:.1f} µm" if error_um else "  error: a correlation, see outline_error.csv")
+            return {"block": block, "route": route, "error_um": error_um, "reasons": []}
+
+        print(f"\n=== {block}: {route} FAILED ===")
+        for reason in reasons:
+            print(f"  {reason}")
+        if route != routes[-1]:
+            print(f"  falling back to the outline path")
+
+    return {"block": block, "route": "none", "error_um": None, "reasons": reasons}
+
+
 def main() -> None:
-    """Convert, register, check and write the transform for one block."""
+    """Convert, register, check and write the transform for one block or many."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("block", help="serial block, e.g. 375mg_m1")
+    parser.add_argument("block", nargs="+", help="serial blocks, e.g. 375mg_m1, or 'all'")
     parser.add_argument("--keep-tiff", action="store_true",
                         help="do not print the archive reminder")
     parser.add_argument("--retry", action="store_true",
@@ -121,8 +266,9 @@ def main() -> None:
                         help="longest edge used for matching; raise it when features "
                              "are abundant but not distinctive")
     parser.add_argument("--from-outline", action="store_true",
-                        help="align on the tissue outline, for a pair whose "
-                             "features do not match")
+                        help="align on the tissue outline, skipping VALIS")
+    parser.add_argument("--no-fallback", action="store_true",
+                        help="stop when VALIS fails, leaving the outline path unrun")
     args = parser.parse_args()
 
     # the sidecar write needs slideviz; check now, before an hour of VALIS
@@ -137,108 +283,19 @@ def main() -> None:
     TIFF_DIR.mkdir(exist_ok=True)
     TMPDIR.mkdir(exist_ok=True)
 
-    print(f"=== {args.block}: to OME-TIFF ===")
-    tiffs = [to_tiff(args.block, stain) for stain in STAINS]
+    blocks = sorted(all_blocks()) if args.block == ["all"] else args.block
+    rows = [register_block(block, args) for block in blocks]
 
-    # VALIS takes a directory, so give it one holding just this block
-    slides = RUN_DIR / f"pair_{args.block}" / "slides"
-    slides.mkdir(parents=True, exist_ok=True)
-    for tiff in tiffs:
-        link = slides / tiff.name
-        # exists() follows the link, so a link left by an earlier run pointing at a
-        # path that has since moved reads as absent and then fails to be created
-        if link.is_symlink() or link.exists():
-            link.unlink()
-        link.symlink_to(tiff)
+    if len(rows) > 1:
+        print("\n=== summary ===")
+        print(f"{'block':12s} {'route':8s} {'error':>10s}  reasons")
+        for row in rows:
+            error = f"{row['error_um']:.1f} µm" if row["error_um"] else "-"
+            print(f"{row['block']:12s} {row['route']:8s} {error:>10s}  "
+                  f"{'; '.join(row['reasons'])}")
 
-    out = RUN_DIR / f"out_{args.block}{args.out_suffix}"  # a sibling of the input
-    out.mkdir(exist_ok=True)
-
-    # Failed pairs can fit a clean but wrong similarity transform. Locking scale
-    # keeps the block at the correct size, which is ~1.0 for paired sections.
-    extra = ["--fixed-scale", "--check-reflections"] if args.retry else []
-    # rematch dies in an SVD on these pairs, so a retry uses one matcher and skips it
-    if args.single_matcher or args.detector or args.smooth:
-        extra += ["--single-matcher"]
-    if args.detector:
-        extra += ["--detector", args.detector]
-    if args.smooth:
-        extra += ["--smooth", str(args.smooth)]
-    if args.max_dim:
-        extra += ["--max-dim", str(args.max_dim)]
-
-    print(f"\n=== {args.block}: registering ===")
-    script = "outline_register.py" if args.from_outline else "valis_register.py"
-    settings = [] if args.from_outline else ["--rigid-only", "--gradient", *extra]
-    run(
-        ["uv", "run", "python", script, str(slides), str(out),
-         "--reference", f"mouse_apap_{args.block}_he.ome.tiff", *settings],
-        cwd=VALIS_PROJECT,
-        env={**__import__("os").environ, "TMPDIR": str(TMPDIR)},
-    )
-
-    error_um = None
-    summary = out / "registration_error.csv"
-    if summary.exists():
-        import csv
-
-        rows = [r for r in csv.DictReader(summary.open()) if r.get("rigid_D")]
-        if rows:
-            error_um = float(rows[0]["rigid_D"])
-
-    # the outline path reports a correlation under its own name; rigid_D measures
-    # matched keypoints, which is the stage that fails on these blocks
-    if args.from_outline:
-        error_um = None
-
-    # a poor fit is worse than none; do not write a wrong transform
-    reasons = []
-    if error_um is None and not args.from_outline:
-        # a missing error table means the run crashed
-        reasons.append("no error reported, so the run did not finish")
-    elif error_um is not None and error_um > ERROR_LIMIT_UM:
-        reasons.append(f"rigid error {error_um:.0f} µm is above the {ERROR_LIMIT_UM:.0f} µm limit")
-
-    print(f"\n=== {args.block}: reading the transform ===")
-    from slideviz.data.registration import (
-        VALIS_METHOD, from_valis_run, write_to_sidecars,
-    )
-
-    registrations = {}
-    if not (out / "transforms.json").exists():
-        # VALIS writes this last, so its absence means the run died partway
-        reasons.append("no transforms.json, so registration did not complete")
-    else:
-        method = OUTLINE_METHOD if args.from_outline else VALIS_METHOD
-        registrations = from_valis_run(out, error_um=error_um, method=method)
-        for name, registration in registrations.items():
-            implausible = check_geometry(registration.matrix, allow_reflection=args.retry)
-            if implausible:
-                reasons.append(f"{name}: {implausible}")
-
-    if reasons:
-        print(f"\n=== {args.block}: REGISTRATION FAILED ===")
-        for reason in reasons:
-            print(f"  {reason}")
-        print("  nothing written to the sidecars; the transform would be wrong")
-        print(f"  look at {out}/slides/overlaps/slides_rigid_overlap.png")
+    if any(row["route"] == "none" for row in rows):
         sys.exit(1)
-
-    print(f"\n=== {args.block}: writing the transform to the sidecars ===")
-    # every directory that holds sidecars for this block
-    for directory in (ZARR_DIR, TIFF_DIR, CZI_DIR):
-        if directory.exists():
-            write_to_sidecars(registrations, directory, write=True)
-
-    print(f"\n=== {args.block}: done ===")
-    print(f"  rigid error: {error_um:.1f} µm" if error_um else "  no error reported")
-    print(f"  overlap:     {out}/slides/overlaps/slides_rigid_overlap.png")
-    print(f"  view:        uv run python scripts/view_registered.py {ZARR_DIR} "
-          f"mouse_apap_{args.block}_cyp2e1")
-    if not args.keep_tiff:
-        gb = sum(t.stat().st_size for t in tiffs) / 1e9
-        print(f"\n  the TIFFs ({gb:.1f} GB) are only needed by VALIS and can go to the NAS:")
-        print(f"    {TIFF_DIR}/mouse_apap_{args.block}_*.ome.tiff")
 
 
 if __name__ == "__main__":
