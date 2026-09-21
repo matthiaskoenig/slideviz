@@ -62,6 +62,8 @@ class Registration(BaseModel):
     method: Name  # software and settings, an evaluation criterion
     error_um: float | None = Field(default=None, ge=0.0)  # residual, in physical units
     residual_px: float | None = Field(default=None, ge=0.0)  # how exactly the affine fit the warp
+    # tissue-outline overlap after the transform, 0 to 1, for methods reporting no um
+    outline_dice: float | None = Field(default=None, ge=0.0, le=1.0)
     registered: Date | None = None
 
     @field_validator("matrix")
@@ -104,6 +106,8 @@ class Slide(BaseModel):
     registration: Registration | None = None
 
     # Wet-lab identity; an animal can have multiple paraffin-block cases.
+    # why animal_id differs from the scanner's name, e.g. a lab labelling swap
+    animal_id_corrected: str | None = None
     case_id: str | None = None
     lobes: str | None = None
     antibody_dilution: str | None = None

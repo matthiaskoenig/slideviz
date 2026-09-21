@@ -240,18 +240,24 @@ class SlideList(QWidget):
     def _label(self, row, slides) -> str:
         """One list entry per block, saying how well its stains are registered."""
         moving = [s for s in slides if s["stain"] != REFERENCE_STAIN]
-        errors = [
-            registration.error_um
-            for s in moving
-            if (registration := self._registration(s)) is not None
-        ]
-        if not errors:
+        found = [r for s in moving if (r := self._registration(s)) is not None]
+        if not found:
             quality = "not registered"
         else:
             # the worst stain, since that is what limits the block as a whole
-            known = [e for e in errors if e is not None]
-            quality = f"{max(known):.0f} um" if known else "registered"
-            if len(errors) < len(moving):
+            known = [r.error_um for r in found if r.error_um is not None]
+            if known:
+                quality = f"{max(known):.0f} um"
+            else:
+                # the outline route scores overlap, on a different scale to um
+                scored = [r.outline_dice for r in found if r.outline_dice is not None]
+                if scored:
+                    quality = f"outline {min(scored):.3f}"
+                else:
+                    quality = "outline" if all(
+                        r.method.startswith("outline") for r in found
+                    ) else "registered"
+            if len(found) < len(moving):
                 quality += ", some not registered"
 
         dose = row["dose_mg_per_kg"]

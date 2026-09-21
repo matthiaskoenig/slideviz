@@ -196,6 +196,14 @@ def pose_from_outline(fixed_mask: np.ndarray, moving_mask: np.ndarray):
     return report, matrix
 
 
+def mask_dice(fixed_mask: np.ndarray, moving_mask: np.ndarray, matrix) -> float:
+    """Outline overlap after applying `matrix`, in the mask's own pixel grid."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+    from slideviz.analysis.outline import dice, warp_mask
+
+    return dice(fixed_mask, warp_mask(moving_mask, matrix, fixed_mask.shape))
+
+
 def overlap_png(fixed: np.ndarray, moving: np.ndarray, matrix, path: Path) -> None:
     """Fixed slide in magenta, warped moving one in green; agreement is grey.
 
@@ -234,7 +242,7 @@ def main() -> None:
         sys.exit(f"need a reference and at least one moving slide in {args.slide_dir}")
 
     print(f"reference: {reference.name}")
-    entries, scores = {}, {}
+    entries, scores, dices = {}, {}, {}
     for moving_path in moving_slides:
         print(f"\n=== {moving_path.name} ===")
 
@@ -295,12 +303,16 @@ def main() -> None:
         full = to_full @ matrix @ from_full
 
         name = moving_path.name.split(".")[0]
+        final_dice = mask_dice(fixed_mask, moving_mask, matrix)
+        print(f"  final outline dice {final_dice:.4f}")
+        dices[name] = final_dice
         entries[name] = {
             "source": str(moving_path),
             "matrix": full.tolist(),
             # a rotation and a shift, so exactly affine
             "residual_px": 0.0,
             "slide_shape_rc": [moving_image.height, moving_image.width],
+            "outline_dice": final_dice,
         }
         scores[name] = score
         print(f"  scale {float(np.sqrt(abs(np.linalg.det(full[:2, :2])))):.4f}")

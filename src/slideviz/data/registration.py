@@ -45,6 +45,7 @@ def from_valis_run(
             error_um=error_um,
             # how exactly the affine fit the full warp
             residual_px=entry.get("residual_px"),
+            outline_dice=entry.get("outline_dice"),
             registered=datetime.now(UTC).date().isoformat(),  # UTC, for provenance
         )
     return found

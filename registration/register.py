@@ -87,12 +87,29 @@ def attempt(command: list[str], **kwargs) -> int:
     return subprocess.run(command, check=False, **kwargs).returncode
 
 
+def readable(path: Path) -> bool:
+    """Whether the file opens as a pyramidal slide."""
+    import subprocess
+
+    probe = subprocess.run(
+        ["uv", "run", "python", "-c",
+         f"import pyvips; pyvips.Image.new_from_file({str(path)!r}, page=0).width"],
+        cwd=VALIS_PROJECT, capture_output=True, check=False,
+    )
+    return probe.returncode == 0
+
+
 def all_blocks() -> set[str]:
-    """Every block with both stains available as OME-TIFF."""
+    """Every block whose two stains are both present and readable."""
     stems = {p.name.split(".")[0] for p in TIFF_DIR.glob("mouse_apap_*_he.ome.tiff")}
     blocks = {s.removeprefix("mouse_apap_").removesuffix("_he") for s in stems}
-    return {b for b in blocks
-            if (TIFF_DIR / f"mouse_apap_{b}_cyp2e1.ome.tiff").exists()}
+    return {
+        b for b in blocks
+        if all(readable(TIFF_DIR / f"mouse_apap_{b}_{stain}.ome.tiff")
+               for stain in STAINS
+               if (TIFF_DIR / f"mouse_apap_{b}_{stain}.ome.tiff").exists())
+        and (TIFF_DIR / f"mouse_apap_{b}_cyp2e1.ome.tiff").exists()
+    }
 
 
 def to_tiff(block: str, stain: str) -> Path:
