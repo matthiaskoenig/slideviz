@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "numpy>=2.0",
     "pillow>=11.0",
+    "scikit-image>=0.25",  # rgb2lab/lab2rgb for stain matching, see stain_norm.py
     "scikit-learn>=1.6",
     "timm>=1.0.20",
     "torch>=2.6",

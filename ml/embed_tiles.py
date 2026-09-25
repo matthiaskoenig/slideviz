@@ -1,9 +1,9 @@
-"""Embed exported slide tiles with a frozen encoder, cached to disk.
-
-The same encoder as the HepatoBench baseline, so the two runs are comparable.
+"""Embed exported slide tiles with the frozen HepatoBench encoder.
 
     uv run python embed_tiles.py --tiles /data/michelle/mouse/tiles \
         --out /data/michelle/mouse/embeddings
+
+Use --stain-reference to colour-match tiles before encoding.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ import timm
 import torch
 import torchvision.transforms as T
 from PIL import Image
+from stain_norm import normalise, read_reference
 from torch.utils.data import DataLoader, Dataset
 
 # ungated, and PFM-DenseBench found it beats encoders 14x its size
@@ -35,11 +36,20 @@ WORKERS = 16
 class TileSet(Dataset):
     """Every tile in the manifest, as (tensor, index)."""
 
-    def __init__(self, tile_dir: Path, rows: list[dict], transform: T.Compose):
-        """Hold the manifest rows and the directory their paths are relative to."""
+    def __init__(
+        self,
+        tile_dir: Path,
+        rows: list[dict],
+        transform: T.Compose,
+        target: dict | None = None,
+        per_slide: dict | None = None,
+    ):
+        """Hold the manifest rows, their directory, and any stain correction to apply."""
         self.tile_dir = tile_dir
         self.rows = rows
         self.transform = transform
+        self.target = target
+        self.per_slide = per_slide or {}
 
     def __len__(self) -> int:
         """Number of tiles in the manifest."""
@@ -47,7 +57,12 @@ class TileSet(Dataset):
 
     def __getitem__(self, i: int) -> tuple[torch.Tensor, int]:
         """One transformed tile, with its manifest row index."""
-        image = Image.open(self.tile_dir / "tiles" / self.rows[i]["tile"]).convert("RGB")
+        row = self.rows[i]
+        image = Image.open(self.tile_dir / "tiles" / row["tile"]).convert("RGB")
+        if self.target is not None:
+            # in memory, so one tile set on disk serves both the raw and matched runs
+            matched = normalise(np.asarray(image), self.per_slide[row["slide"]], self.target)
+            image = Image.fromarray(matched)
         return self.transform(image), i
 
 
@@ -68,6 +83,8 @@ def main() -> None:
     parser.add_argument("--device", default="cuda:0", help="cuda:N, or cpu")
     parser.add_argument("--batch", type=int, default=BATCH)
     parser.add_argument("--workers", type=int, default=WORKERS)
+    parser.add_argument("--stain-reference", type=Path,
+                       help="stain reference JSON from stain_stats.py; omit to embed raw tiles")
     args = parser.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -82,7 +99,21 @@ def main() -> None:
     print(f"  {parameters:,} parameters, input {INPUT_PX}px")
     print(f"  {len(rows):,} tiles across {len(manifest['animals'])} animals")
 
-    dataset = TileSet(args.tiles, rows, build_transform(config["mean"], config["std"]))
+    target, per_slide, reference_written = (None, {}, None)
+    if args.stain_reference:
+        target, per_slide = read_reference(args.stain_reference)
+        # a slide with no statistics would silently go through uncorrected
+        missing = sorted({r["slide"] for r in rows} - set(per_slide))
+        if missing:
+            raise ValueError(f"stain reference covers no statistics for: {', '.join(missing)}")
+        reference_written = json.loads(args.stain_reference.read_text()).get("written")
+        print(f"=== stain matching against {args.stain_reference.name} ===")
+        print(f"  target L {target['mean'][0]:.2f}  a {target['mean'][1]:.2f}  "
+              f"b {target['mean'][2]:.2f}, {len(per_slide)} slides")
+
+    dataset = TileSet(
+        args.tiles, rows, build_transform(config["mean"], config["std"]), target, per_slide
+    )
     loader = DataLoader(
         dataset, batch_size=args.batch, shuffle=False, num_workers=args.workers,
         pin_memory=True, prefetch_factor=4 if args.workers else None,
@@ -133,6 +164,10 @@ def main() -> None:
         "input_px": INPUT_PX,
         "transform": f"resize {INPUT_PX}x{INPUT_PX} bicubic, no crop",
         "normalize": {"mean": list(config["mean"]), "std": list(config["std"])},
+        # without this two caches look identical and neither says which one was matched
+        "stain_matched": bool(args.stain_reference),
+        "stain_reference": str(args.stain_reference) if args.stain_reference else None,
+        "stain_reference_written": reference_written,
         "device": args.device,
         "source_manifest": str(args.tiles / "manifest.json"),
         "seconds": round(elapsed, 1),
