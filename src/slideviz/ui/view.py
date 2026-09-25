@@ -28,9 +28,14 @@ def main() -> None:
     # 0.01 s for 40 slides, so this is for when the set is much larger, or the data is away
     parser.add_argument("--no-reindex", action="store_true",
                         help="open the existing index instead of rebuilding it")
+    parser.add_argument("--stain-reference", type=Path, default=None,
+                        help="stain reference JSON; defaults to stain_reference.json beside --data")
     parser.add_argument("-v", "--verbose", action="store_true", help="log at debug level")
     args = parser.parse_args()
     setup(args.verbose)
+
+    if args.stain_reference:
+        settings.stain_reference = args.stain_reference
 
     if args.no_reindex and not default_db().exists():
         parser.error(f"no index at {default_db()}: run without --no-reindex first")

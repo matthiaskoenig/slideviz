@@ -23,6 +23,8 @@ from qtpy.QtWidgets import (
 
 from slideviz.analysis.masked import to_rgba
 from slideviz.analysis.prediction import add_prediction_layers, tile_um_of
+from slideviz.analysis.stain import normalise_levels
+from slideviz.analysis.stain_stats import read as read_stain_reference
 from slideviz.data.catalog import query, slide_path
 from slideviz.data.registration import napari_affine
 from slideviz.data.schema import Registration, Slide
@@ -102,6 +104,7 @@ class SlideList(QWidget):
         super().__init__()
         self.viewer = viewer
         self.directory = str(directory.resolve()) if directory else None
+        self._stain = None  # read on first use, then kept
 
         self.boxes = {}
         filters = QFormLayout()
@@ -282,6 +285,8 @@ class SlideList(QWidget):
         registration = self._registration(row)
         try:
             info, levels = open_slide(path, scene)  # lazy, pixels arrive when napari draws
+            # applied always, so one slide has one appearance for everyone who opens it
+            levels = self._matched(levels, Path(row["file"]).name.split(".")[0])
             stain = STAIN_NAMES.get(row["stain"], row["stain"].upper())
             # a scene number only means something on the files that hold more than one
             what = f"{stain} s{scene}" if info.n_scenes > 1 else stain
@@ -311,6 +316,33 @@ class SlideList(QWidget):
 
         return info.pixel_size_um
 
+    def _stain_reference(self) -> tuple[object, dict] | None:
+        """The stain target and per-slide statistics, read once and kept."""
+        if self._stain is None:
+            path = settings.stain_reference_file()
+            if path is None:
+                self._stain = ()
+            else:
+                try:
+                    self._stain = read_stain_reference(path)
+                    log.info("stain reference: %d slides from %s", len(self._stain[1]), path)
+                except (OSError, ValueError, KeyError) as exc:
+                    log.warning("unreadable stain reference %s: %s", path, exc)
+                    self._stain = ()
+        return self._stain or None
+
+    def _matched(self, levels: list, slide_key: str) -> list:
+        """The pyramid matched onto the shared stain target, when the slide has statistics."""
+        reference = self._stain_reference()
+        if reference is None:
+            return levels
+        target, per_slide = reference
+        stats = per_slide.get(slide_key)
+        if stats is None:
+            log.debug("no stain statistics for %s", slide_key)
+            return levels
+        return normalise_levels(levels, stats, target)
+
     def _levels_for(self, levels: list) -> list:
         """The pyramid as the checkbox currently wants it: masked or untouched."""
         if not self.hide_background.isChecked():
@@ -329,12 +361,13 @@ class SlideList(QWidget):
     @staticmethod
     def _prediction_file(block: str) -> Path | None:
         """The model output for one block, when a prediction directory is configured."""
-        if settings.predictions is None:
+        directory = settings.predictions_dir()
+        if directory is None or not directory.is_dir():
             return None
         animal = block.removeprefix(BLOCK_PREFIX)
         # an unannotated slide writes its own name, so try both
         for suffix in ("_predictions.json", "_unlabelled_predictions.json"):
-            path = settings.predictions / f"{animal}{suffix}"
+            path = directory / f"{animal}{suffix}"
             if path.exists():
                 return path
         return None
