@@ -1,8 +1,6 @@
-"""Train a linear head on cached tile embeddings, held out one animal at a time.
+"""Train a linear head on cached tile embeddings, holding out one animal per fold.
 
-Every tile of one animal comes from one slide, so a random split would put tiles from
-a training slide into the test set and the score would measure memorisation. With three
-animals the honest report is three folds, each holding out one animal completely.
+Animals correspond to slides, so random tile splits would leak slide-specific features.
 
     uv run python train_necrosis.py --cache /data/michelle/mouse/embeddings
 """
@@ -138,8 +136,7 @@ def main() -> None:
     mean_f1 = float(np.mean([f["f1"] for f in folds]))
     print(f"{'mean':<12}{'':>8}{'':>7}{mean_balanced:>9.4f}{mean_f1:>8.4f}")
 
-    # a control slide has no positive tiles, so its F1 is 0 by definition and its
-    # balanced accuracy is a near-1 for predicting nothing; both distort an average
+    # Exclude control slides from the average; they have no positive tiles.
     scored = [f for f in folds if f["test_positive"]]
     if len(scored) != len(folds):
         mean_balanced_scored = float(np.mean([f["balanced_accuracy"] for f in scored]))
@@ -181,9 +178,16 @@ def main() -> None:
             float(np.mean([f["f1"] for f in folds if f["test_positive"]])), 4
         ),
         "n_animals": len(meta["animals"]),
-        "caveat": "three animals, so each fold trains on two; a fold is one slide, not a cohort",
+        # derived to avoid stale hardcoded counts
+        "caveat": (
+            f"{len(meta['animals'])} animals, so each fold trains on "
+            f"{len(meta['animals']) - 1}; a fold is one slide, not a cohort"
+        ),
+        # identify matched embeddings
+        "stain_matched": meta.get("stain_matched", False),
+        "stain_reference": meta.get("stain_reference"),
     }
-    # the tag keeps one run from overwriting another, so results accumulate
+    # keep tagged runs from overwriting each other
     suffix = "_no_boundary" if args.drop_boundary else ""
     tag = f"_{args.tag}" if args.tag else ""
     name = f"necrosis_results{tag}{suffix}.json"
