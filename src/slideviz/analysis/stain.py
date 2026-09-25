@@ -1,13 +1,8 @@
-"""Per-slide stain normalisation, so a slide's staining cannot stand in for its dose.
+"""Per-slide LAB stain normalisation using statistics from healthy tiles.
 
-Staining varies between batches, and if it happens to correlate with dose the encoder
-can read colour instead of morphology. Reinhard matching in LAB moves each slide's
-colour distribution onto a shared target: shift by the mean, scale by the standard
-deviation, one channel at a time.
-
-The statistics come from HEALTHY tiles only. Necrotic tissue is genuinely paler, so a
-slide with more necrosis would otherwise pull its own reference and the correction
-would partly erase the signal it is meant to preserve.
+Reinhard matching shifts and scales each slide's colour distribution to a shared
+target without letting necrotic tissue influence the reference. Keep `normalise()`
+in sync with the copy in `ml/stain_norm.py`.
 """
 
 from __future__ import annotations
