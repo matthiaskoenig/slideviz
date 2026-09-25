@@ -48,6 +48,19 @@ def common_target(stats: dict[str, LabStats]) -> LabStats:
     return LabStats(_triple(means.mean(axis=0)), _triple(sds.mean(axis=0)))
 
 
+def normalise_levels(levels: list, source: LabStats, target: LabStats) -> list:
+    """A pyramid with every level matched onto the target, corrected chunk by chunk."""
+    import dask.array as da
+
+    # stays lazy: only the chunks napari draws are converted
+    return [
+        da.map_blocks(
+            lambda a: normalise(a, source, target) if a.size else a, level, dtype=np.uint8
+        )
+        for level in levels
+    ]
+
+
 def normalise(tile: np.ndarray, source: LabStats, target: LabStats) -> np.ndarray:
     """One tile moved from its slide's colour distribution onto the shared target."""
     lab = rgb2lab(tile.astype(np.float32) / 255)
