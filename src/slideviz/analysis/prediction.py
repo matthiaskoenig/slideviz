@@ -68,6 +68,8 @@ def add_prediction_layers(
         "blending": "additive",  # so the two maps show through each other
         "contrast_limits": (0.0, 1.0),
         "visible": visible,
+        # one tile is one pixel, so nearest draws hard squares at every zoom
+        "interpolation2d": "linear",
     }
     layers = [
         viewer.add_image(
