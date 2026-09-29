@@ -19,8 +19,8 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from slideviz.log import setup
 from slideviz.data.schema import COLUMNS, Slide, create_table_sql
+from slideviz.log import setup
 from slideviz.settings import settings
 
 log = logging.getLogger(__name__)
@@ -53,6 +53,11 @@ def read_sidecars(directory: Path) -> list[dict]:
     records = []
     for path in sorted(root.rglob("*.json")):
         data = json.loads(path.read_text())
+        # predictions, annotations and the stain reference live beside the slides,
+        # so a sidecar is recognised by naming the image it describes
+        if not isinstance(data, dict) or "file" not in data:
+            log.debug("skipping %s, not a slide sidecar", path.name)
+            continue
         # a slide the lab marked as a control or a failure is kept on disk for its
         # provenance but must never reach an analysis as if it were a readout
         if data.get("excluded"):
