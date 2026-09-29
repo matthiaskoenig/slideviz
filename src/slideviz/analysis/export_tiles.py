@@ -19,7 +19,7 @@ import numpy as np
 from PIL import Image
 
 from slideviz.analysis.annotation import cvat_polygons, label_grid, read_overview
-from slideviz.analysis.tiling import build_grid, read_tile
+from slideviz.analysis.tiling import TARGET_UM_PER_PX, TILE_UM, build_grid, read_tile
 from slideviz.io.reader import open_slide
 
 log = logging.getLogger(__name__)
@@ -61,6 +61,8 @@ def export_slide(
     out_dir: Path,
     scene: int = 0,
     rewrite: bool = False,
+    tile_um: float = TILE_UM,
+    target_um_per_px: float = TARGET_UM_PER_PX,
 ) -> list[Row]:
     """Write every tissue tile of one slide as a PNG, with its annotated fraction.
 
@@ -68,7 +70,7 @@ def export_slide(
     reused. Annotating changes the label, which lives in the manifest, not the image.
     `rewrite` forces them out again, for when the grid parameters themselves change.
     """
-    grid = build_grid(slide_path, scene)
+    grid = build_grid(slide_path, scene, tile_um=tile_um, target_um_per_px=target_um_per_px)
     labels = label_grid(grid, polygons, overview)
 
     slide = slide_path.name.split(".")[0]
@@ -130,6 +132,8 @@ def export_annotated(
     out_dir: Path,
     confirmed_empty: Path | None = None,
     rewrite: bool = False,
+    tile_um: float = TILE_UM,
+    target_um_per_px: float = TARGET_UM_PER_PX,
 ) -> dict:
     """Write tiles for every slide in the annotation export, plus one manifest."""
     export = json.loads(annotations.read_text())
@@ -161,7 +165,8 @@ def export_annotated(
             )
         polygons = [cvat_polygons(p["points"]) for p in record["polygons"]]
         rows += export_slide(
-            slide_dir / f"{slide}.ome.tiff", polygons, overview, out_dir, rewrite=rewrite
+            slide_dir / f"{slide}.ome.tiff", polygons, overview, out_dir, rewrite=rewrite,
+            tile_um=tile_um, target_um_per_px=target_um_per_px,
         )
 
     necrosis = np.array([r.necrosis for r in rows])
@@ -170,6 +175,10 @@ def export_annotated(
         "annotations": str(annotations),
         "slide_dir": str(slide_dir),
         "n_tiles": len(rows),
+        "tile_um": tile_um,  # a score is only comparable to another at the same tile size
+        "target_um_per_px": target_um_per_px,
+        "level": rows[0].level if rows else None,
+        "size_px": rows[0].size_px if rows else None,
         "animals": sorted({r.animal for r in rows}),
         "label": "necrosis",
         "label_is_fraction": True,  # a threshold is the training stage's choice, not this one
