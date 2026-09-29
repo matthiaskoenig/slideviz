@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     predictions: Path | None = None
     # stain reference from stain_stats.py; slides are matched onto its target when found
     stain_reference: Path | None = None
+    # brownness reference from dab.py; DAB slides are scaled onto its target when found
+    dab_reference: Path | None = None
 
     def predictions_dir(self) -> Path | None:
         """The prediction directory, falling back to one beside the data."""
@@ -39,6 +41,15 @@ class Settings(BaseSettings):
         if self.data is None:
             return None
         beside = self.data / "stain_reference.json"
+        return beside if beside.exists() else None
+
+    def dab_reference_file(self) -> Path | None:
+        """The brownness reference, falling back to the conventional name beside the data."""
+        if self.dab_reference is not None:
+            return self.dab_reference
+        if self.data is None:
+            return None
+        beside = self.data / "dab_reference.json"
         return beside if beside.exists() else None
 
 

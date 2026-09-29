@@ -47,6 +47,23 @@ def brownness(rgb: np.ndarray) -> np.ndarray:
     return (channels[..., 0] - channels[..., 2]) / np.maximum(channels[..., 2], 1.0)
 
 
+def brownness_levels(levels: list, factor: float = 1.0) -> list:
+    """A brownness pyramid, computed chunk by chunk as napari draws it."""
+    import dask.array as da
+
+    def block(a: np.ndarray) -> np.ndarray:
+        """One RGB chunk as brownness, keeping the trailing axis for map_blocks."""
+        if not a.size:
+            return np.zeros(a.shape[:2] + (1,), dtype=np.float32)
+        return (brownness(a) * factor).astype(np.float32)[..., None]
+
+    # drop_axis would collapse the chunk graph, so the channel axis stays width 1
+    return [
+        da.map_blocks(block, level, dtype=np.float32, chunks=level.chunks[:2] + ((1,),))
+        for level in levels
+    ]
+
+
 def slide_brownness(path: Path, scene: int = 0) -> tuple[Brownness, np.ndarray, np.ndarray]:
     """One slide's brownness distribution, with the working level and its tissue mask."""
     _, levels = open_slide(path, scene)
