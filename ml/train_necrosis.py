@@ -29,6 +29,10 @@ POSITIVE = 0.5
 MAX_ITER = 2000
 CLASS_WEIGHT = "balanced"
 
+# a tile between these two is partly covered, so it sits on a region edge
+BOUNDARY_LOW = 0.1
+BOUNDARY_HIGH = 0.9
+
 
 def load_cache(cache: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str], dict]:
     """Embeddings, necrosis fractions, animals, tile paths and their provenance."""
@@ -45,12 +49,24 @@ def load_cache(cache: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[st
     return embeddings, necrosis, animals, tiles, meta
 
 
+def shown(value: float | None) -> str:
+    """A score as text, or n/a where it is undefined."""
+    return "n/a" if value is None else f"{value:.4f}"
+
+
+def overlap(truth: np.ndarray, predicted: np.ndarray) -> float | None:
+    """IoU of two boolean masks, None when neither calls a single positive."""
+    union = (truth | predicted).sum()
+    return None if union == 0 else round(float((truth & predicted).sum() / union), 4)
+
+
 def fold(
     embeddings: np.ndarray,
     target: np.ndarray,
     animals: np.ndarray,
     held_out: str,
     keep: np.ndarray,
+    coverage: np.ndarray,
 ) -> dict:
     """Fit on every other animal and score on this one."""
     test = (animals == held_out) & keep
@@ -63,9 +79,15 @@ def fold(
     scores = head.predict_proba(scaler.transform(embeddings[test]))[:, 1]
     predicted = scores >= 0.5
     truth = target[test]
+    tested = coverage[test]
+    boundary = (tested > BOUNDARY_LOW) & (tested < BOUNDARY_HIGH)
 
     matrix = confusion_matrix(truth, predicted, labels=[False, True])
     single_class = len(np.unique(truth)) < 2  # AUROC is undefined on one class
+    true_positive, false_positive, false_negative = (
+        int(matrix[1, 1]), int(matrix[0, 1]), int(matrix[1, 0])
+    )
+    union = true_positive + false_positive + false_negative
     return {
         "held_out": held_out,
         "n_train": int(train.sum()),
@@ -73,7 +95,15 @@ def fold(
         "test_positive": int(truth.sum()),
         "test_positive_rate": round(float(truth.mean()), 4),
         "balanced_accuracy": round(float(balanced_accuracy_score(truth, predicted)), 4),
+        # DSC is F1 under another name, reported as both because the thesis asks for DSC
         "f1": round(float(f1_score(truth, predicted, zero_division=0)), 4),
+        "dsc": round(float(f1_score(truth, predicted, zero_division=0)), 4),
+        "iou": None if union == 0 else round(true_positive / union, 4),
+        # partial coverage marks a region edge, where the polygons are least reliable
+        "iou_boundary": overlap(
+            truth[boundary], predicted[boundary]
+        ) if boundary.any() else None,
+        "iou_core": overlap(truth[~boundary], predicted[~boundary]) if (~boundary).any() else None,
         "auroc": None if single_class else round(float(roc_auc_score(truth, scores)), 4),
         "average_precision": None
         if single_class
@@ -108,7 +138,7 @@ def main() -> None:
     embeddings, necrosis, animals, _, meta = load_cache(args.cache)
     target = necrosis >= args.positive
     keep = (
-        (necrosis <= 0.1) | (necrosis >= 0.9) if args.drop_boundary
+        (necrosis <= BOUNDARY_LOW) | (necrosis >= BOUNDARY_HIGH) if args.drop_boundary
         else np.ones(len(necrosis), dtype=bool)
     )
 
@@ -120,16 +150,20 @@ def main() -> None:
         print(f"  boundary filter: {(~keep).sum():,} of {len(keep):,} tiles dropped")
 
     print(f"\n=== leave one animal out, positive at coverage >= {args.positive} ===")
-    folds = [fold(embeddings, target, animals, a, keep) for a in meta["animals"]]
+    folds = [fold(embeddings, target, animals, a, keep, necrosis) for a in meta["animals"]]
 
-    header = f"{'held out':<12}{'train':>8}{'test':>7}{'bal acc':>9}{'F1':>8}{'AUROC':>8}{'AP':>8}"
+    header = (
+        f"{'held out':<12}{'train':>8}{'test':>7}{'bal acc':>9}"
+        f"{'DSC/F1':>8}{'IoU':>8}{'AUROC':>8}{'AP':>8}"
+    )
     print(header)
     for f in folds:
         auroc = "n/a" if f["auroc"] is None else f"{f['auroc']:.4f}"
         ap = "n/a" if f["average_precision"] is None else f"{f['average_precision']:.4f}"
+        iou = "n/a" if f["iou"] is None else f"{f['iou']:.4f}"
         print(
             f"{f['held_out']:<12}{f['n_train']:>8,}{f['n_test']:>7,}"
-            f"{f['balanced_accuracy']:>9.4f}{f['f1']:>8.4f}{auroc:>8}{ap:>8}"
+            f"{f['balanced_accuracy']:>9.4f}{f['f1']:>8.4f}{iou:>8}{auroc:>8}{ap:>8}"
         )
 
     mean_balanced = float(np.mean([f["balanced_accuracy"] for f in folds]))
@@ -145,6 +179,16 @@ def main() -> None:
             f"{'mean, positive folds only':<12}{'':>8}"
             f"{mean_balanced_scored:>16.4f}{mean_f1_scored:>8.4f}"
             f"   ({len(scored)} of {len(folds)})"
+        )
+
+    print("\n=== IoU at region edges against the interior ===")
+    print(f"{'animal':<12}{'IoU':>9}{'boundary':>10}{'core':>9}")
+    for f in folds:
+        if not f["test_positive"]:
+            continue
+        print(
+            f"{f['held_out']:<12}{shown(f['iou']):>9}"
+            f"{shown(f['iou_boundary']):>10}{shown(f['iou_core']):>9}"
         )
 
     print("\n=== necrotic area per slide, the project's actual readout ===")
@@ -177,11 +221,37 @@ def main() -> None:
         "mean_f1_positive_folds": round(
             float(np.mean([f["f1"] for f in folds if f["test_positive"]])), 4
         ),
+        # DSC equals F1; IoU is the same overlap on a stricter denominator
+        "mean_dsc_positive_folds": round(
+            float(np.mean([f["dsc"] for f in folds if f["test_positive"]])), 4
+        ),
+        "mean_iou_positive_folds": round(
+            float(np.mean([f["iou"] for f in folds if f["test_positive"] and f["iou"] is not None])),
+            4,
+        ),
+        # the gap between these two is the label quality question, not a model score
+        "mean_iou_boundary": round(
+            float(np.mean([
+                f["iou_boundary"] for f in folds
+                if f["test_positive"] and f["iou_boundary"] is not None
+            ])), 4,
+        ),
+        "mean_iou_core": round(
+            float(np.mean([
+                f["iou_core"] for f in folds
+                if f["test_positive"] and f["iou_core"] is not None
+            ])), 4,
+        ),
         "n_animals": len(meta["animals"]),
         # derived to avoid stale hardcoded counts
         "caveat": (
             f"{len(meta['animals'])} animals, so each fold trains on "
             f"{len(meta['animals']) - 1}; a fold is one slide, not a cohort"
+        ),
+        # the polygons stop short of the necrosis edge, so overlap scores are floors
+        "metric_caveat": (
+            "DSC and IoU are scored against hand polygons that under-call necrosis at "
+            "region edges, so both are lower bounds on agreement"
         ),
         # identify matched embeddings
         "stain_matched": meta.get("stain_matched", False),
