@@ -33,6 +33,9 @@ CLASS_WEIGHT = "balanced"
 BOUNDARY_LOW = 0.1
 BOUNDARY_HIGH = 0.9
 
+# thresholds the inner folds choose between; the readout is area, so the grid is fine
+CUTOFFS = np.round(np.arange(0.30, 0.91, 0.025), 3)
+
 
 def load_cache(cache: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str], dict]:
     """Embeddings, necrosis fractions, animals, tile paths and their provenance."""
@@ -60,6 +63,40 @@ def overlap(truth: np.ndarray, predicted: np.ndarray) -> float | None:
     return None if union == 0 else round(float((truth & predicted).sum() / union), 4)
 
 
+def area_error(scores: np.ndarray, truth: np.ndarray, cutoff: float) -> float:
+    """How far this cutoff puts predicted necrotic area from the annotated area."""
+    return abs(float((scores >= cutoff).mean() - truth.mean()))
+
+
+def choose_cutoff(
+    embeddings: np.ndarray,
+    target: np.ndarray,
+    animals: np.ndarray,
+    inner: list[str],
+    keep: np.ndarray,
+) -> tuple[float, list[dict]]:
+    """The cutoff with the lowest mean absolute area error across the inner animals."""
+    errors = np.zeros((len(inner), len(CUTOFFS)))
+    for row, validation in enumerate(inner):
+        fit = np.isin(animals, [a for a in inner if a != validation]) & keep
+        check = (animals == validation) & keep
+        scaler = StandardScaler().fit(embeddings[fit])
+        head = LogisticRegression(max_iter=MAX_ITER, class_weight=CLASS_WEIGHT)
+        head.fit(scaler.transform(embeddings[fit]), target[fit])
+        scores = head.predict_proba(scaler.transform(embeddings[check]))[:, 1]
+        for column, cutoff in enumerate(CUTOFFS):
+            errors[row, column] = area_error(scores, target[check], cutoff)
+
+    # averaged over animals first, so one large slide cannot decide the cutoff
+    mean = errors.mean(axis=0)
+    best = int(np.argmin(mean))
+    trace = [
+        {"cutoff": float(c), "mean_absolute_area_error": round(float(m), 4)}
+        for c, m in zip(CUTOFFS, mean, strict=True)
+    ]
+    return float(CUTOFFS[best]), trace
+
+
 def fold(
     embeddings: np.ndarray,
     target: np.ndarray,
@@ -67,17 +104,24 @@ def fold(
     held_out: str,
     keep: np.ndarray,
     coverage: np.ndarray,
+    nested: bool = False,
 ) -> dict:
     """Fit on every other animal and score on this one."""
     test = (animals == held_out) & keep
     train = (animals != held_out) & keep
+
+    cutoff, trace = 0.5, None
+    if nested:
+        # chosen inside the training animals, so the held-out slide never informs it
+        inner = [a for a in np.unique(animals[train]) if a != held_out]
+        cutoff, trace = choose_cutoff(embeddings, target, animals, inner, keep)
 
     scaler = StandardScaler().fit(embeddings[train])  # train alone, so test statistics stay out
     head = LogisticRegression(max_iter=MAX_ITER, class_weight=CLASS_WEIGHT)
     head.fit(scaler.transform(embeddings[train]), target[train])
 
     scores = head.predict_proba(scaler.transform(embeddings[test]))[:, 1]
-    predicted = scores >= 0.5
+    predicted = scores >= cutoff
     truth = target[test]
     tested = coverage[test]
     boundary = (tested > BOUNDARY_LOW) & (tested < BOUNDARY_HIGH)
@@ -90,6 +134,9 @@ def fold(
     union = true_positive + false_positive + false_negative
     return {
         "held_out": held_out,
+        "cutoff": cutoff,
+        "cutoff_chosen_on": None if trace is None else len(inner),
+        "cutoff_trace": trace,
         "n_train": int(train.sum()),
         "n_test": int(test.sum()),
         "test_positive": int(truth.sum()),
@@ -129,6 +176,8 @@ def main() -> None:
                         help="coverage above which a tile counts as necrotic")
     parser.add_argument("--drop-boundary", action="store_true",
                         help="train and test only on tiles below 0.1 or above 0.9")
+    parser.add_argument("--nested", action="store_true",
+                        help="choose the score cutoff inside each fold's training animals")
     parser.add_argument("--tag", default="", help="names this run in the output file")
     args = parser.parse_args()
 
@@ -150,7 +199,12 @@ def main() -> None:
         print(f"  boundary filter: {(~keep).sum():,} of {len(keep):,} tiles dropped")
 
     print(f"\n=== leave one animal out, positive at coverage >= {args.positive} ===")
-    folds = [fold(embeddings, target, animals, a, keep, necrosis) for a in meta["animals"]]
+    if args.nested:
+        print("  cutoff chosen per fold on the training animals, by absolute area error")
+    folds = [
+        fold(embeddings, target, animals, a, keep, necrosis, nested=args.nested)
+        for a in meta["animals"]
+    ]
 
     header = (
         f"{'held out':<12}{'train':>8}{'test':>7}{'bal acc':>9}"
@@ -192,13 +246,22 @@ def main() -> None:
         )
 
     print("\n=== necrotic area per slide, the project's actual readout ===")
-    print(f"{'animal':<12}{'annotated':>11}{'predicted':>11}{'error':>9}")
+    print(f"{'animal':<12}{'annotated':>11}{'predicted':>11}{'error':>9}{'cutoff':>8}")
     for f in folds:
         error = f["area_predicted"] - f["area_true"]
         print(
             f"{f['held_out']:<12}{f['area_true']:>10.1%}{f['area_predicted']:>11.1%}"
-            f"{error:>+9.1%}"
+            f"{error:>+9.1%}{f['cutoff']:>8.3f}"
         )
+
+    scored_area = [f for f in folds if f["test_positive"]]
+    absolute = [abs(f["area_predicted"] - f["area_true"]) for f in scored_area]
+    signed = [f["area_predicted"] - f["area_true"] for f in scored_area]
+    print(
+        f"{'mean |error|':<12}{'':>11}{'':>11}{np.mean(absolute):>9.1%}"
+        f"   over {len(scored_area)} necrotic slides"
+    )
+    print(f"{'mean error':<12}{'':>11}{'':>11}{np.mean(signed):>+9.1%}")
 
     results = {
         "written": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -210,6 +273,19 @@ def main() -> None:
         "class_weight": CLASS_WEIGHT,
         "positive_threshold": args.positive,
         "boundary_dropped": bool(args.drop_boundary),
+        "cutoff_nested": bool(args.nested),
+        "cutoff_objective": "mean absolute area error" if args.nested else None,
+        "cutoff_grid": [float(c) for c in CUTOFFS] if args.nested else None,
+        "mean_absolute_area_error": round(
+            float(np.mean([
+                abs(f["area_predicted"] - f["area_true"]) for f in folds if f["test_positive"]
+            ])), 4,
+        ),
+        "mean_signed_area_error": round(
+            float(np.mean([
+                f["area_predicted"] - f["area_true"] for f in folds if f["test_positive"]
+            ])), 4,
+        ),
         "split": "leave one animal out",
         "folds": folds,
         "mean_balanced_accuracy": round(mean_balanced, 4),
@@ -247,6 +323,11 @@ def main() -> None:
         "caveat": (
             f"{len(meta['animals'])} animals, so each fold trains on "
             f"{len(meta['animals']) - 1}; a fold is one slide, not a cohort"
+        ),
+        # the manuscript reports necrotic area, so the cutoff is chosen against that
+        "area_note": (
+            "percent necrotic area is the reported readout; the cutoff is selected on "
+            "training animals only, so the held-out area is not fitted"
         ),
         # the polygons stop short of the necrosis edge, so overlap scores are floors
         "metric_caveat": (
