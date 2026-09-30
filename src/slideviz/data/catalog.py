@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -47,11 +49,25 @@ def split_scenes(data: dict) -> list[dict]:
     return [{**data, "scene": i, **scene} for i, scene in enumerate(scenes)]
 
 
-def read_sidecars(directory: Path) -> list[dict]:
-    """Load every sidecar under a directory, including nested ones."""
+def sidecar_paths(root: Path) -> list[Path]:
+    """Every .json under root, outside image stores."""
+    found = []
+    for folder, dirs, files in os.walk(root):
+        # a .zarr store holds thousands of chunk files and no sidecars
+        dirs[:] = [d for d in dirs if not d.endswith(".zarr")]
+        found += [Path(folder) / name for name in files if name.endswith(".json")]
+    return sorted(found)
+
+
+def read_sidecars(directory: Path,
+                  progress: Callable[[int, int], None] | None = None) -> list[dict]:
+    """Load every sidecar under a directory, calling progress(done, total) per file."""
     root = directory.resolve()
+    paths = sidecar_paths(root)
     records = []
-    for path in sorted(root.rglob("*.json")):
+    for done, path in enumerate(paths, 1):
+        if progress:
+            progress(done, len(paths))
         data = json.loads(path.read_text())
         # predictions, annotations and the stain reference live beside the slides,
         # so a sidecar is recognised by naming the image it describes
@@ -91,11 +107,12 @@ def check(records: list[dict]) -> None:
             raise ValueError(f"{name}: {problems}") from exc
 
 
-def build(directory: Path, db_path: Path | None = None) -> int:
+def build(directory: Path, db_path: Path | None = None,
+          progress: Callable[[int, int], None] | None = None) -> int:
     """Rebuild the index from the sidecars in a directory. Returns row count."""
     db_path = db_path or default_db()
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    records = read_sidecars(directory)
+    records = read_sidecars(directory, progress)
     check(records)  # fail before touching the database, so the index is not half-baked
 
     with sqlite3.connect(db_path) as conn:

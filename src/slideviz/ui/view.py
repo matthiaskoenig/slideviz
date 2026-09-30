@@ -12,6 +12,13 @@ import os
 from pathlib import Path
 
 from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    TextColumn,
+    TimeElapsedColumn,
+)
 
 from slideviz.data.catalog import build, default_db
 from slideviz.log import setup
@@ -50,8 +57,13 @@ def main() -> None:
         if not args.data.is_dir():
             parser.error(f"not a directory: {args.data}")
 
-        with console.status(f"indexing {args.data}"):
-            count = build(args.data)  # rebuild first, so the list matches what is on disk
+        columns = (TextColumn("{task.description}"), BarColumn(), MofNCompleteColumn(),
+                   TimeElapsedColumn())
+        with Progress(*columns, console=console) as bar:
+            # no total until the folder listing is done, so the bar pulses until then
+            task = bar.add_task(f"indexing {args.data}", total=None)
+            count = build(args.data, progress=lambda done, total: bar.update(
+                task, completed=done, total=total))  # rebuild first, so the list matches disk
         log.info("indexed %d records from %s", count, args.data)
 
     # tiles are fetched off the UI thread, for this session only
