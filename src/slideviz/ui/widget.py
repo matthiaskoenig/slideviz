@@ -317,9 +317,6 @@ class SlideList(QWidget):
                 if row["stain"] in DAB_STAINS:
                     self._add_brownness(row, levels, affine, info.pixel_size_um)
             else:
-                # the rigid placement stays available, hidden, for comparison
-                self._add_stain(row, levels, layer_name(name, "rigid"),
-                                info.pixel_size_um, affine, visible=False)
                 warped = nonrigid_levels(levels, self._reference_shapes, registration,
                                          field, reference_um)
                 self._add_stain(row, warped, name, reference_um, None)
@@ -333,8 +330,7 @@ class SlideList(QWidget):
 
         return info.pixel_size_um
 
-    def _add_stain(self, row, levels: list, name: str, pixel_size_um: float, affine,
-                   visible: bool = True) -> None:
+    def _add_stain(self, row, levels: list, name: str, pixel_size_um: float, affine) -> None:
         """Add one stain pyramid as an RGB layer, placed by `affine` when given."""
         layer = self.viewer.add_image(
             self._levels_for(levels),
@@ -347,7 +343,6 @@ class SlideList(QWidget):
             colormap=STAIN_COLOURS.get(row["stain"], FALLBACK_COLOUR),
             opacity=0.7,
             blending="additive",  # so the stains show through each other
-            visible=visible,
         )
         # keep the unmasked pyramid, so the toggle can swap the layer's data without opening the slide again
         layer.metadata[SOURCE_LEVELS] = levels
