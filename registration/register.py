@@ -261,7 +261,7 @@ def register_block(block: str, args) -> dict:
         for reason in reasons:
             print(f"  {reason}")
         if route != routes[-1]:
-            print(f"  falling back to the outline path")
+            print("  falling back to the outline path")
 
     return {"block": block, "route": "none", "error_um": None, "reasons": reasons}
 

@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from scipy.ndimage import binary_fill_holes, zoom
+from scipy.ndimage import binary_fill_holes
 from scipy.optimize import minimize
 from skimage.filters import sobel
 
