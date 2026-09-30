@@ -8,7 +8,9 @@ from pathlib import Path
 
 import numpy as np
 
-from slideviz.data.schema import Registration
+from slideviz.data.schema import NonRigid, Registration
+
+FIELD_DIR = "transforms"  # beside the sidecars; NonRigid.path points into it
 
 SWAP_XY = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
 
@@ -71,3 +73,71 @@ def write_to_sidecars(
         if write:
             sidecar.write_text(json.dumps(data, indent=2) + "\n")
     return changed
+
+
+def sha256(path: Path) -> str:
+    """Hex digest of a file, read in chunks."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def attach_nonrigid(summary_path: Path, slide_dir: Path, write: bool = False) -> NonRigid:
+    """Point a sidecar at its non-rigid field, refusing one computed on another matrix."""
+    import shutil
+
+    summary = json.loads(summary_path.read_text())
+    field = summary_path.parent / summary["field"]
+    matches = [p for p in slide_dir.glob("*.json") if p.name.split(".")[0] == summary["slide"]]
+    if not matches:
+        raise FileNotFoundError(f"no sidecar for {summary['slide']} in {slide_dir}")
+    sidecar = matches[0]
+
+    data = json.loads(sidecar.read_text())
+    registration = Registration(**data["registration"])
+    with np.load(field) as stored:
+        if not np.allclose(stored["matrix"], registration.matrix):
+            raise ValueError(f"{summary['slide']}: the field was computed on another matrix "
+                             "than the sidecar carries, so it no longer applies")
+
+    nonrigid = NonRigid(
+        path=f"{FIELD_DIR}/{field.name}",
+        sha256=sha256(field),
+        grid_um_per_px=summary["grid_um_per_px"],
+        grid_shape_rc=summary["grid_shape_rc"],
+        method=summary["method"],
+        median_um=summary["median_um"],
+        p95_um=summary["p95_um"],
+        registered=summary["registered"],
+    )
+    print(f"  {summary['slide']}: {nonrigid.path}, median {nonrigid.median_um} µm")
+    if write:
+        (slide_dir / FIELD_DIR).mkdir(exist_ok=True)
+        shutil.copy2(field, slide_dir / nonrigid.path)
+        data["registration"]["nonrigid"] = nonrigid.model_dump(exclude_none=True)
+        sidecar.write_text(json.dumps(data, indent=2) + "\n")
+    return nonrigid
+
+
+def main() -> None:
+    """Attach every non-rigid field in a directory to the sidecars of another."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description=main.__doc__)
+    parser.add_argument("fields", type=Path, help="directory of *_nonrigid.json summaries")
+    parser.add_argument("slide_dir", type=Path, help="directory of the slides' sidecars")
+    parser.add_argument("--write", action="store_true", help="without it, only report")
+    args = parser.parse_args()
+
+    summaries = sorted(args.fields.glob("*_nonrigid.json"))
+    for summary in summaries:
+        attach_nonrigid(summary, args.slide_dir, write=args.write)
+    print(f"{len(summaries)} fields {'attached' if args.write else 'checked, nothing written'}")
+
+
+if __name__ == "__main__":
+    main()
