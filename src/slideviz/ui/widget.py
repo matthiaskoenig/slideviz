@@ -27,6 +27,7 @@ from slideviz.analysis.masked import to_rgba
 from slideviz.analysis.prediction import add_prediction_layers, tile_um_of
 from slideviz.analysis.stain import normalise_levels
 from slideviz.analysis.stain_stats import read as read_stain_reference
+from slideviz.analysis.warp import load_field, nonrigid_levels
 from slideviz.data.catalog import query, slide_path
 from slideviz.data.registration import napari_affine
 from slideviz.data.schema import Registration, Slide
@@ -114,6 +115,8 @@ class SlideList(QWidget):
         self.directory = str(directory.resolve()) if directory else None
         self._stain = None  # read on first use, then kept
         self._dab = None  # read on first use, then kept
+        # level shapes of the block's reference slide, the grid a non-rigid layer is drawn on
+        self._reference_shapes: list[tuple[int, int]] = []
 
         self.boxes = {}
         filters = QFormLayout()
@@ -300,25 +303,28 @@ class SlideList(QWidget):
             # a scene number only means something on the files that hold more than one
             what = f"{stain} s{scene}" if info.n_scenes > 1 else stain
             name = layer_name(row["serial_block"].removeprefix(BLOCK_PREFIX), what)
+            if registration is None:
+                self._reference_shapes = [level.shape[:2] for level in levels]
             affine = None
             if registration is not None:
                 affine = napari_affine(registration, reference_um or info.pixel_size_um)
-            layer = self.viewer.add_image(
-                self._levels_for(levels),
-                name=name,
-                rgb=True,
-                multiscale=True,  # levels is a pyramid, napari picks one per zoom
-                scale=(info.pixel_size_um, info.pixel_size_um),
-                units="um",  # makes the scale bar read in micrometres
-                affine=affine,
-                colormap=STAIN_COLOURS.get(row["stain"], FALLBACK_COLOUR),
-                opacity=0.7,
-                blending="additive",  # so the stains show through each other
-            )
-            # keep the unmasked pyramid, so the toggle can swap the layer's data without opening the slide again
-            layer.metadata[SOURCE_LEVELS] = levels
-            if row["stain"] in DAB_STAINS:
-                self._add_brownness(row, levels, affine, info.pixel_size_um)
+            field = None
+            if registration is not None and reference_um and self._reference_shapes:
+                field = load_field(path.parent, registration)
+
+            if field is None:
+                self._add_stain(row, levels, name, info.pixel_size_um, affine)
+                if row["stain"] in DAB_STAINS:
+                    self._add_brownness(row, levels, affine, info.pixel_size_um)
+            else:
+                # the rigid placement stays available, hidden, for comparison
+                self._add_stain(row, levels, layer_name(name, "rigid"),
+                                info.pixel_size_um, affine, visible=False)
+                warped = nonrigid_levels(levels, self._reference_shapes, registration,
+                                         field, reference_um)
+                self._add_stain(row, warped, name, reference_um, None)
+                if row["stain"] in DAB_STAINS:
+                    self._add_brownness(row, warped, None, reference_um)
         # unreadable file, unsupported suffix, shape napari rejects; report, stay alive
         except (RuntimeError, ValueError, OSError, KeyError) as exc:
             log.exception("could not load %s", path)  # status line is transient, the log is not
@@ -326,6 +332,25 @@ class SlideList(QWidget):
             return None
 
         return info.pixel_size_um
+
+    def _add_stain(self, row, levels: list, name: str, pixel_size_um: float, affine,
+                   visible: bool = True) -> None:
+        """Add one stain pyramid as an RGB layer, placed by `affine` when given."""
+        layer = self.viewer.add_image(
+            self._levels_for(levels),
+            name=name,
+            rgb=True,
+            multiscale=True,  # levels is a pyramid, napari picks one per zoom
+            scale=(pixel_size_um, pixel_size_um),
+            units="um",  # makes the scale bar read in micrometres
+            affine=affine,
+            colormap=STAIN_COLOURS.get(row["stain"], FALLBACK_COLOUR),
+            opacity=0.7,
+            blending="additive",  # so the stains show through each other
+            visible=visible,
+        )
+        # keep the unmasked pyramid, so the toggle can swap the layer's data without opening the slide again
+        layer.metadata[SOURCE_LEVELS] = levels
 
     def _dab_reference(self) -> tuple[float, dict] | None:
         """The brownness target and per-slide medians, read once and kept."""
@@ -458,6 +483,7 @@ class SlideList(QWidget):
             return
 
         reference_um, loaded, unaligned = None, 0, []
+        self._reference_shapes = []  # another block's reference must not carry over
         for row in slides:
             pixel_size = self._load(row, reference_um)
             if pixel_size is None:
