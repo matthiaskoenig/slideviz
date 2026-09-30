@@ -17,6 +17,8 @@ from outline_register import _warp, read_level, shared_downsample, tissue_mask
 
 EDGE_PX = 2048  # RAFT tore the tissue at this size, DeepFlow matched its 1024 px result
 MIN_AGREEMENT = 0.99  # own resampling against VALIS's warped image
+# good blocks move 7–71 um; edge DAB reached 307 um
+MAX_MEDIAN_UM = 100.0
 
 
 def um_per_px(path: Path) -> float:
@@ -86,6 +88,9 @@ def register_block(block: str, slides: Path, out: Path, edge: int) -> dict:
                            f"{agree:.3f}, so the stored convention would be wrong")
 
     shift_um = np.hypot(*dxdy)[mask] * grid_um
+    if np.median(shift_um) > MAX_MEDIAN_UM:
+        raise RuntimeError(f"{block}: median shift {np.median(shift_um):.0f} µm is above "
+                           f"{MAX_MEDIAN_UM:.0f} µm, so the field is matching stain, not tissue")
     method = (f"valis-{valis.__version__} OpticalFlowWarper (DeepFlow), tissue density "
               f"input at {edge} px, after the sidecar matrix")
     summary = {
@@ -125,10 +130,18 @@ def main() -> None:
     parser.add_argument("--edge", type=int, default=EDGE_PX, help="longest edge in px")
     args = parser.parse_args()
 
+    refused = []
     for block in args.block:
-        s = register_block(block, args.slides, args.out, args.edge)
+        try:
+            s = register_block(block, args.slides, args.out, args.edge)
+        except RuntimeError as exc:
+            print(f"{block:10s} REFUSED: {exc}")
+            refused.append(block)
+            continue
         print(f"{block:10s} {s['grid_um_per_px']:.2f} µm/px  median {s['median_um']:5.1f} µm"
               f"  p95 {s['p95_um']:5.1f} µm  agreement {s['agreement']:.4f}  {s['seconds']} s")
+    if refused:
+        raise SystemExit(f"refused, no field written: {', '.join(refused)}")
 
 
 if __name__ == "__main__":
