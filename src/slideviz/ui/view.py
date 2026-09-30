@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 from pathlib import Path
+
+from rich.console import Console
 
 from slideviz.data.catalog import build, default_db
 from slideviz.log import setup
@@ -33,6 +36,7 @@ def main() -> None:
     parser.add_argument("-v", "--verbose", action="store_true", help="log at debug level")
     args = parser.parse_args()
     setup(args.verbose)
+    console = Console(stderr=True)
 
     if args.stain_reference:
         settings.stain_reference = args.stain_reference
@@ -46,18 +50,22 @@ def main() -> None:
         if not args.data.is_dir():
             parser.error(f"not a directory: {args.data}")
 
-        count = build(args.data)  # rebuild first, so the list matches what is on disk
+        with console.status(f"indexing {args.data}"):
+            count = build(args.data)  # rebuild first, so the list matches what is on disk
         log.info("indexed %d records from %s", count, args.data)
 
-    import napari  # imported here, pulling in Qt is slow
+    # tiles are fetched off the UI thread, for this session only
+    os.environ.setdefault("NAPARI_ASYNC", "1")
+    with console.status("starting napari"):
+        import napari  # imported here, pulling in Qt is slow
 
-    from slideviz.ui.widget import SlideList
+        from slideviz.ui.widget import SlideList
 
-    viewer = napari.Viewer(title="slideviz")
-    # --no-reindex has no directory to scope by, so the list falls back to the whole index
-    widget = SlideList(viewer, None if args.no_reindex else args.data)
-    viewer.window.add_dock_widget(widget, name="Slides", area="right")
-    viewer.scale_bar.visible = True
+        viewer = napari.Viewer(title="slideviz")
+        # --no-reindex has no directory to scope by, so the list falls back to the whole index
+        widget = SlideList(viewer, None if args.no_reindex else args.data)
+        viewer.window.add_dock_widget(widget, name="Slides", area="right")
+        viewer.scale_bar.visible = True
     napari.run()
 
 

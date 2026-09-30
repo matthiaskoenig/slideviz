@@ -6,7 +6,8 @@ import json
 import logging
 from pathlib import Path
 
-from qtpy.QtCore import Qt
+from napari.qt.threading import thread_worker
+from qtpy.QtCore import Qt, QTimer
 from qtpy.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -16,6 +17,7 @@ from qtpy.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QProgressBar,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -84,6 +86,8 @@ FILTERS = {"Species": "species", "Stain": "stain", "Dose": "dose_mg_per_kg"}
 FILTER_TYPES = {"species": str, "stain": str, "dose_mg_per_kg": int}
 
 ANY = "All"
+
+PIXEL_POLL_MS = 200
 
 log = logging.getLogger(__name__)
 
@@ -176,6 +180,12 @@ class SlideList(QWidget):
         clear.clicked.connect(self._clear)
 
         self.status = QLabel()
+        self.activity = QLabel()
+        self.progress = QProgressBar()
+        self.progress.setTextVisible(False)
+        self._show_activity(None)
+        self._buttons = (load, add, clear)
+        self._worker = None  # the block being opened, one at a time
 
         buttons = QHBoxLayout()
         for button in (load, add, clear):
@@ -187,7 +197,13 @@ class SlideList(QWidget):
         layout.addWidget(self.info)
         layout.addWidget(self.hide_background)
         layout.addLayout(buttons)
+        layout.addWidget(self.activity)
+        layout.addWidget(self.progress)
         layout.addWidget(self.status)
+
+        self._pixels = QTimer(self)
+        self._pixels.timeout.connect(self._poll_pixels)
+        self._pixels.start(PIXEL_POLL_MS)
 
         self.reload()
 
@@ -265,10 +281,12 @@ class SlideList(QWidget):
     @staticmethod
     def _sidecar(row) -> Slide | None:
         """A slide's full sidecar, for the fields SQL does not carry."""
-        sidecar = slide_path(row).with_suffix(".json")
-        if not sidecar.exists():
-            return None
-        return Slide(**json.loads(sidecar.read_text()))
+        path = slide_path(row)
+        # <stem>.ome.json locally, <stem>.json on the NAS
+        for sidecar in (path.with_suffix(".json"), path.with_name(f"{path.name.split('.')[0]}.json")):
+            if sidecar.exists():
+                return Slide(**json.loads(sidecar.read_text()))
+        return None
 
     @classmethod
     def _registration(cls, row) -> Registration | None:
@@ -354,44 +372,49 @@ class SlideList(QWidget):
             return None
         return item.data(Qt.ItemDataRole.UserRole)
 
-    def _load(self, row, reference_um: float | None = None) -> float | None:
-        """Add one slide as a multiscale layer, transformed when it has a transform."""
+    def _open(self, row, reference_um: float | None = None) -> dict:
+        """Open one slide and build its lazy layer data; touches no widget."""
         path, scene = slide_path(row), row["scene"]
         registration = self._registration(row)
+        info, levels = open_slide(path, scene)  # lazy, pixels arrive when napari draws
+        # applied always, so one slide has one appearance for everyone who opens it
+        levels = self._matched(levels, Path(row["file"]).name.split(".")[0])
+        stain = STAIN_NAMES.get(row["stain"], row["stain"].upper())
+        # a scene number only means something on the files that hold more than one
+        what = f"{stain} s{scene}" if info.n_scenes > 1 else stain
+        name = layer_name(row["serial_block"].removeprefix(BLOCK_PREFIX), what)
+        if registration is None:
+            self._reference_shapes = [level.shape[:2] for level in levels]
+        affine = None
+        if registration is not None:
+            affine = napari_affine(registration, reference_um or info.pixel_size_um)
+        field = None
+        if registration is not None and reference_um and self._reference_shapes:
+            field = load_field(path.parent, registration)
+
+        shown_um = info.pixel_size_um
+        if field is not None:
+            levels = nonrigid_levels(levels, self._reference_shapes, registration,
+                                     field, reference_um)
+            shown_um, affine = reference_um, None
+        return {"row": row, "levels": levels, "name": name, "shown_um": shown_um,
+                "affine": affine, "pixel_size_um": info.pixel_size_um,
+                "registered": registration is not None}
+
+    def _show(self, opened: dict) -> bool:
+        """Add an opened slide's layers; False when napari rejects them."""
+        row = opened["row"]
         try:
-            info, levels = open_slide(path, scene)  # lazy, pixels arrive when napari draws
-            # applied always, so one slide has one appearance for everyone who opens it
-            levels = self._matched(levels, Path(row["file"]).name.split(".")[0])
-            stain = STAIN_NAMES.get(row["stain"], row["stain"].upper())
-            # a scene number only means something on the files that hold more than one
-            what = f"{stain} s{scene}" if info.n_scenes > 1 else stain
-            name = layer_name(row["serial_block"].removeprefix(BLOCK_PREFIX), what)
-            if registration is None:
-                self._reference_shapes = [level.shape[:2] for level in levels]
-            affine = None
-            if registration is not None:
-                affine = napari_affine(registration, reference_um or info.pixel_size_um)
-            field = None
-            if registration is not None and reference_um and self._reference_shapes:
-                field = load_field(path.parent, registration)
-
-            if field is None:
-                self._add_stain(row, levels, name, info.pixel_size_um, affine)
-                if row["stain"] in DAB_STAINS:
-                    self._add_brownness(row, levels, affine, info.pixel_size_um)
-            else:
-                warped = nonrigid_levels(levels, self._reference_shapes, registration,
-                                         field, reference_um)
-                self._add_stain(row, warped, name, reference_um, None)
-                if row["stain"] in DAB_STAINS:
-                    self._add_brownness(row, warped, None, reference_um)
-        # unreadable file, unsupported suffix, shape napari rejects; report, stay alive
-        except (RuntimeError, ValueError, OSError, KeyError) as exc:
-            log.exception("could not load %s", path)  # status line is transient, the log is not
-            self.status.setText(f"{path.name}: {type(exc).__name__}: {exc}")
-            return None
-
-        return info.pixel_size_um
+            self._add_stain(row, opened["levels"], opened["name"], opened["shown_um"],
+                            opened["affine"])
+            if row["stain"] in DAB_STAINS:
+                self._add_brownness(row, opened["levels"], opened["affine"],
+                                    opened["shown_um"])
+        except (RuntimeError, ValueError, KeyError) as exc:
+            log.exception("could not show %s", opened["name"])
+            self.status.setText(f"{opened['name']}: {type(exc).__name__}: {exc}")
+            return False
+        return True
 
     def _add_stain(self, row, levels: list, name: str, pixel_size_um: float, affine) -> None:
         """Add one stain pyramid as an RGB layer, placed by `affine` when given."""
@@ -534,34 +557,103 @@ class SlideList(QWidget):
             return 0
         return len(layers)
 
+    @thread_worker
+    def _open_block(self, slides: list):
+        """Open a block's slides in order, yielding (row, opened or error) for each."""
+        reference_um = None
+        for row in slides:
+            try:
+                opened = self._open(row, reference_um)
+            # unreadable file, unsupported suffix, missing sidecar field
+            except (RuntimeError, ValueError, OSError, KeyError) as exc:
+                log.exception("could not open %s", slide_path(row))
+                yield row, exc
+                continue
+            if reference_um is None:  # the reference stain sorts first
+                reference_um = opened["pixel_size_um"]
+            yield row, opened
+
     def _load_block(self, directory: str, block: str) -> None:
-        """Add every stain of one block, aligned onto the reference where possible."""
+        """Open every stain of one block off the UI thread, adding each as it is ready."""
         slides = self._block_slides(directory, block)
-        if not slides:
+        if not slides or self._worker is not None:
             return
 
-        reference_um, loaded, unaligned = None, 0, []
+        animal = block.removeprefix(BLOCK_PREFIX)
+        state = {"reference_um": None, "loaded": 0, "unaligned": [], "done": 0}
         self._reference_shapes = []  # another block's reference must not carry over
-        for row in slides:
-            pixel_size = self._load(row, reference_um)
-            if pixel_size is None:
-                continue
-            loaded += 1
-            if reference_um is None:  # the reference stain sorts first
-                reference_um = pixel_size
-            elif self._registration(row) is None:
-                unaligned.append(row["stain"])
+        self._set_busy(True)
+        self._step(animal, slides[0], 0, len(slides))
 
-        maps = self._load_predictions(block, reference_um) if reference_um else 0
+        def arrived(item) -> None:
+            """Add one opened slide and move the bar on."""
+            row, opened = item
+            state["done"] += 1
+            if isinstance(opened, Exception):
+                self.status.setText(f"{slide_path(row).name}: {type(opened).__name__}: {opened}")
+            elif self._show(opened):
+                state["loaded"] += 1
+                if state["reference_um"] is None:
+                    state["reference_um"] = opened["pixel_size_um"]
+                elif not opened["registered"]:
+                    state["unaligned"].append(row["stain"])
+            if state["done"] < len(slides):
+                self._step(animal, slides[state["done"]], state["done"], len(slides))
 
-        note = f"  (overlaid, not registered: {', '.join(unaligned)})" if unaligned else ""
-        maps_note = "  + necrosis maps" if maps else ""
-        self.status.setText(f"{block}  {loaded} layers{maps_note}{note}")
+        def finished() -> None:
+            """Add the prediction maps and report the block."""
+            self._worker = None
+            self._set_busy(False)
+            reference_um = state["reference_um"]
+            maps = self._load_predictions(block, reference_um) if reference_um else 0
+            unaligned = state["unaligned"]
+            note = f"  (overlaid, not registered: {', '.join(unaligned)})" if unaligned else ""
+            maps_note = "  + necrosis maps" if maps else ""
+            self.status.setText(f"{block}  {state['loaded']} layers{maps_note}{note}")
+
+        self._worker = self._open_block(slides)
+        self._worker.yielded.connect(arrived)
+        self._worker.errored.connect(
+            lambda exc: self.status.setText(f"{block}: {type(exc).__name__}: {exc}"))
+        self._worker.finished.connect(finished)  # emitted after an error too
+        self._worker.start()
+
+    def _step(self, animal: str, row, done: int, total: int) -> None:
+        """Show which slide is being opened."""
+        stain = STAIN_NAMES.get(row["stain"], row["stain"].upper())
+        self.progress.setRange(0, total)
+        self.progress.setValue(done)
+        self._show_activity(f"{animal}: opening {stain} ({done + 1}/{total})")
+
+    def _set_busy(self, busy: bool) -> None:
+        """Lock the controls while a block opens."""
+        for control in (*self._buttons, self.list):
+            control.setEnabled(not busy)
+        if not busy:
+            self._show_activity(None)
+
+    def _poll_pixels(self) -> None:
+        """Show a busy bar while napari is still fetching pixels for any layer."""
+        if self._worker is not None:
+            return
+        waiting = [layer for layer in self.viewer.layers if not layer.loaded]
+        if not waiting:
+            self._show_activity(None)
+            return
+        self.progress.setRange(0, 0)  # busy indicator, the tile count is unknown
+        self._show_activity(f"loading pixels: {len(waiting)} of {len(self.viewer.layers)} layers")
+
+    def _show_activity(self, text: str | None) -> None:
+        """Show the activity line and bar with `text`, or hide both for None."""
+        self.activity.setVisible(text is not None)
+        self.progress.setVisible(text is not None)
+        if text is not None:
+            self.activity.setText(text)
 
     def _replace(self) -> None:
         """Drop the open layers and show the selected block on its own."""
         selected = self._selected()
-        if selected:
+        if selected and self._worker is None:
             self.viewer.layers.clear()
             self._load_block(*selected)
 
