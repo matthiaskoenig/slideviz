@@ -101,6 +101,31 @@ def layer_name(animal: str, what: str, kind: str | None = None) -> str:
     return NAME_SEPARATOR.join(parts)
 
 
+def registration_lines(registration: Registration) -> list[str]:
+    """Rigid method with its score, pose, and the non-rigid shift when there is one."""
+    import numpy as np
+
+    matrix = np.array(registration.matrix, float)
+    rotation = np.degrees(np.arctan2(matrix[1, 0], matrix[0, 0]))
+    scale = np.sqrt(abs(np.linalg.det(matrix[:2, :2])))
+    method = registration.method
+    for prefix, short in (("outline", "outline"), ("valis", "VALIS")):
+        if method.startswith(prefix):
+            method = short
+    score = ""
+    if registration.error_um is not None:
+        score = f", {registration.error_um:.0f} um"
+    elif registration.outline_dice is not None:
+        score = f", Dice {registration.outline_dice:.3f}"
+    lines = [f"rigid: {method}{score}", f"rotation {rotation:.1f} deg, scale {scale:.3f}"]
+    nonrigid = registration.nonrigid
+    if nonrigid is None:
+        lines.append("non-rigid: none")
+    else:
+        lines.append(f"non-rigid: median {nonrigid.median_um:.0f} um, p95 {nonrigid.p95_um:.0f} um")
+    return lines
+
+
 class SlideList(QWidget):
     """Slide picker docked into the napari window."""
 
@@ -129,6 +154,12 @@ class SlideList(QWidget):
         self.list = QListWidget()
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.list.itemDoubleClicked.connect(self._replace)  # second route to Load
+        self.list.currentItemChanged.connect(self._show_info)
+
+        self.info = QLabel()
+        self.info.setWordWrap(True)
+        self.info.setTextFormat(Qt.TextFormat.RichText)
+        self.info.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         self.hide_background = QCheckBox("Hide background")
         self.hide_background.setChecked(True)
@@ -153,6 +184,7 @@ class SlideList(QWidget):
         layout = QVBoxLayout(self)  # passing self installs it as this widget's layout
         layout.addLayout(filters)
         layout.addWidget(self.list)
+        layout.addWidget(self.info)
         layout.addWidget(self.hide_background)
         layout.addLayout(buttons)
         layout.addWidget(self.status)
@@ -213,8 +245,7 @@ class SlideList(QWidget):
         where, params = self._where()
         rows = query(f"{BLOCK_SQL} {where} {BLOCK_GROUP_SQL}", params)
         for row in rows:
-            slides = self._block_slides(row["directory"], row["serial_block"])
-            item = QListWidgetItem(self._label(row, slides))
+            item = QListWidgetItem(self._label(row))
             # the block key rides on the item, so loading needs no second lookup
             item.setData(
                 Qt.ItemDataRole.UserRole, (row["directory"], row["serial_block"])
@@ -232,13 +263,18 @@ class SlideList(QWidget):
         return sorted(rows, key=lambda r: r["stain"] != REFERENCE_STAIN)
 
     @staticmethod
-    def _registration(row) -> Registration | None:
-        """The transform from a slide's sidecar, which SQL does not carry."""
+    def _sidecar(row) -> Slide | None:
+        """A slide's full sidecar, for the fields SQL does not carry."""
         sidecar = slide_path(row).with_suffix(".json")
         if not sidecar.exists():
             return None
-        slide = Slide(**json.loads(sidecar.read_text()))
-        return slide.registration
+        return Slide(**json.loads(sidecar.read_text()))
+
+    @classmethod
+    def _registration(cls, row) -> Registration | None:
+        """The transform from a slide's sidecar."""
+        slide = cls._sidecar(row)
+        return slide.registration if slide is not None else None
 
     def _count(self) -> str:
         """Blocks listed, and the total when a filter is hiding some."""
@@ -252,37 +288,64 @@ class SlideList(QWidget):
         shown = self.list.count()
         return f"{shown} blocks" if shown == total else f"{shown} of {total} blocks"
 
-    def _label(self, row, slides) -> str:
-        """One list entry per block, saying how well its stains are registered."""
-        moving = [s for s in slides if s["stain"] != REFERENCE_STAIN]
-        found = [r for s in moving if (r := self._registration(s)) is not None]
-        if not found:
-            quality = "not registered"
-        else:
-            # the worst stain, since that is what limits the block as a whole
-            known = [r.error_um for r in found if r.error_um is not None]
-            if known:
-                quality = f"{max(known):.0f} um"
-            else:
-                # the outline route scores overlap, on a different scale to um
-                scored = [r.outline_dice for r in found if r.outline_dice is not None]
-                if scored:
-                    quality = f"outline {min(scored):.3f}"
-                else:
-                    quality = "outline" if all(
-                        r.method.startswith("outline") for r in found
-                    ) else "registered"
-            if len(found) < len(moving):
-                quality += ", some not registered"
-
+    @staticmethod
+    def _label(row) -> str:
+        """One list entry per block: species, substance, dose, animal and stain count."""
         dose = row["dose_mg_per_kg"]
         return (
             f"{row['species']:<6} {row['substance']} "  # species first
             # xxx where the dose is not known yet, matching the placeholder in the filename
             f"{dose if dose is not None else 'xxx':>3} mg/kg  "
             f"{row['animal_id']:<3} "
-            f"{row['n_slides']} stains  [{quality}]"
+            f"{row['n_slides']} stains"
         )
+
+    def _show_info(self) -> None:
+        """Fill the info panel with what the sidecars and predictions hold for a block."""
+        selected = self._selected()
+        if selected is None:
+            self.info.setText("")
+            return
+        directory, block = selected
+        slides = self._block_slides(directory, block)
+        if not slides:
+            self.info.setText("")
+            return
+
+        first = slides[0]
+        dose = first["dose_mg_per_kg"]
+        dose_text = dose if dose is not None else "xxx"
+        title = f"{first['species']} {first['substance']}, {dose_text} mg/kg, {first['animal_id']}"
+        lines = [f"<b>{title}</b>"]
+        for row in slides:
+            stain = STAIN_NAMES.get(row["stain"], row["stain"].upper())
+            sidecar = self._sidecar(row)
+            lines.append(f"<br><b>{stain}</b>")
+            if sidecar is None:
+                continue
+            if sidecar.original_name:
+                lines.append(f"file: {sidecar.original_name}")
+            if sidecar.animal_id_corrected:
+                lines.append(f"ID corrected: {sidecar.animal_id_corrected}")
+            registration = sidecar.registration
+            if registration is None:
+                if row["stain"] != REFERENCE_STAIN:
+                    lines.append("not registered")
+                continue
+            lines.extend(registration_lines(registration))
+
+        prediction = self._prediction_file(block)
+        if prediction is not None:
+            try:
+                record = json.loads(prediction.read_text())
+                written = record.get("written", "")[:10]  # the model output's date
+                lines.append(f"<br><b>Necrosis</b> (prediction file, {written})")
+                lines.append(f"annotated {record['area_annotated']:.1%}, "
+                             f"predicted {record['area_predicted']:.1%} of tissue")
+            # a half-written prediction file should not take the panel down
+            except (OSError, ValueError, KeyError) as exc:
+                log.warning("unreadable prediction file %s: %s", prediction, exc)
+        self.info.setText("<br>".join(lines))
 
     def _selected(self) -> tuple[str, str] | None:
         """Directory and block of the highlighted entry, or None when nothing is selected."""

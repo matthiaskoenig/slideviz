@@ -13,7 +13,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
-from outline_register import _warp, read_level, shared_downsample, tissue_mask
+from outline_register import (
+    _warp,
+    full_size,
+    read_level,
+    shared_downsample,
+    tissue_mask,
+)
 
 EDGE_PX = 2048  # RAFT tore the tissue at this size, DeepFlow matched its 1024 px result
 MIN_AGREEMENT = 0.99  # own resampling against VALIS's warped image
@@ -55,7 +61,45 @@ def agreement(moving: np.ndarray, warped: np.ndarray, dxdy: np.ndarray, mask) ->
     return float(np.corrcoef(mine[mask], np.asarray(warped, float)[mask])[0, 1])
 
 
-def register_block(block: str, slides: Path, out: Path, edge: int) -> dict:
+def read_rgb(path: Path, downsample: float) -> np.ndarray:
+    """An RGB view of a slide at the shared shrink, from its three one-band pages."""
+    import pyvips
+
+    width, _ = full_size(path)
+    target = width / downsample
+    level = -1  # deepest SubIFD still at or above target, so the last step shrinks
+    for candidate in range(16):
+        try:
+            probe = pyvips.Image.new_from_file(str(path), page=0, subifd=candidate)
+        except pyvips.Error:
+            break
+        if probe.width < target:
+            break
+        level = candidate
+
+    bands = []
+    for page in range(3):
+        image = pyvips.Image.new_from_file(str(path), page=page, subifd=level)
+        image = image.resize(target / image.width)
+        bands.append(np.ndarray(buffer=image.write_to_memory(), dtype=np.uint8,
+                                shape=[image.height, image.width, image.bands])[..., 0])
+    rows = min(b.shape[0] for b in bands)
+    cols = min(b.shape[1] for b in bands)
+    return np.dstack([b[:rows, :cols] for b in bands])
+
+
+def haematoxylin(rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Haematoxylin density inside the tissue, 1 to 255, zero outside; DAB split off."""
+    from skimage.color import rgb2hed
+
+    density = rgb2hed(rgb)[..., 0]
+    low, high = np.percentile(density[mask], [1, 99])
+    return np.where(mask, np.clip((density - low) / (high - low), 0, 1) * 254 + 1,
+                    0).astype(np.uint8)
+
+
+def register_block(block: str, slides: Path, out: Path, edge: int,
+                   source: str = "density") -> dict:
     """Run DeepFlow on one block and write its field and summary."""
     import valis
     from valis.non_rigid_registrars import OpticalFlowWarper
@@ -75,6 +119,11 @@ def register_block(block: str, slides: Path, out: Path, edge: int) -> dict:
     fixed = density(fixed_grey, fixed_mask)
     moving = _warp(density(moving_grey, tissue_mask(moving_grey)).astype(float),
                    scaled(matrix, downsample), fixed.shape).astype(np.uint8)
+    if source == "haematoxylin":
+        fixed = haematoxylin(read_rgb(he, downsample), fixed_mask)
+        moving_rgb = read_rgb(cyp, downsample)
+        moving = _warp(haematoxylin(moving_rgb, tissue_mask(moving_rgb.mean(axis=-1)))
+                       .astype(float), scaled(matrix, downsample), fixed.shape).astype(np.uint8)
     mask = fixed_mask | (moving > 0)  # union, so a misaligned edge can still move
 
     start = time.time()
@@ -91,7 +140,8 @@ def register_block(block: str, slides: Path, out: Path, edge: int) -> dict:
     if np.median(shift_um) > MAX_MEDIAN_UM:
         raise RuntimeError(f"{block}: median shift {np.median(shift_um):.0f} µm is above "
                            f"{MAX_MEDIAN_UM:.0f} µm, so the field is matching stain, not tissue")
-    method = (f"valis-{valis.__version__} OpticalFlowWarper (DeepFlow), tissue density "
+    inputs = {"density": "tissue density", "haematoxylin": "haematoxylin channel"}
+    method = (f"valis-{valis.__version__} OpticalFlowWarper (DeepFlow), {inputs[source]} "
               f"input at {edge} px, after the sidecar matrix")
     summary = {
         "slide": slide,
@@ -128,12 +178,15 @@ def main() -> None:
                         help="OME-TIFFs with their sidecars")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--edge", type=int, default=EDGE_PX, help="longest edge in px")
+    parser.add_argument("--input", choices=("density", "haematoxylin"), default="density",
+                        help="haematoxylin leaves DAB out, for a slide whose DAB pattern the "
+                             "flow would otherwise follow")
     args = parser.parse_args()
 
     refused = []
     for block in args.block:
         try:
-            s = register_block(block, args.slides, args.out, args.edge)
+            s = register_block(block, args.slides, args.out, args.edge, args.input)
         except RuntimeError as exc:
             print(f"{block:10s} REFUSED: {exc}")
             refused.append(block)
