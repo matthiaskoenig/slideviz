@@ -181,6 +181,8 @@ class SlideList(QWidget):
 
         self.status = QLabel()
         self.activity = QLabel()
+        for label in (self.status, self.activity):
+            label.setWordWrap(True)  # long messages wrap instead of widening the dock
         self.progress = QProgressBar()
         self.progress.setTextVisible(False)
         self._show_activity(None)
