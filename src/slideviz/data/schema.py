@@ -51,6 +51,23 @@ class Scene(BaseModel):
     scene: int | None = None  # None means take the position in the list
 
 
+class NonRigid(BaseModel):
+    """A displacement field applied after the matrix, stored as its own file."""
+
+    model_config = STRICT
+
+    path: Name  # relative to the sidecar's directory
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")  # detects a swapped or damaged field file
+    # grid on the reference slide from its origin; dx, dy in um, sampled at reference
+    # point p, give where the matrix-transformed moving slide is read: p + (dx, dy)
+    grid_um_per_px: float = Field(gt=0.0)
+    grid_shape_rc: list[int] = Field(min_length=2, max_length=2)
+    method: Name  # software, settings and input image, an evaluation criterion
+    median_um: float | None = Field(default=None, ge=0.0)
+    p95_um: float | None = Field(default=None, ge=0.0)
+    registered: Date | None = None
+
+
 class Registration(BaseModel):
     """How this slide maps onto another one. The reference slide carries none."""
 
@@ -65,6 +82,7 @@ class Registration(BaseModel):
     # tissue-outline overlap after the transform, 0 to 1, for methods reporting no um
     outline_dice: float | None = Field(default=None, ge=0.0, le=1.0)
     registered: Date | None = None
+    nonrigid: NonRigid | None = None  # absent means the matrix is the whole transform
 
     @field_validator("matrix")
     @classmethod
