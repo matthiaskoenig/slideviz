@@ -16,6 +16,7 @@ from slideviz.data.schema import Registration
 log = logging.getLogger(__name__)
 
 CHUNK_PX = 1024
+WHITE = 255
 
 
 @dataclass(frozen=True)
@@ -65,7 +66,8 @@ def _chunk(block_info, source: da.Array, inverse: np.ndarray, field: Field,
     qx = (inverse[0, 0] * x + inverse[0, 1] * y + inverse[0, 2]) / src_factor[1]
     qy = (inverse[1, 0] * x + inverse[1, 1] * y + inverse[1, 2]) / src_factor[0]
 
-    out = np.zeros((r1 - r0, c1 - c0, 3), np.uint8)
+    # synthetic white, as the scanner writes outside its grid, so masking drops it
+    out = np.full((r1 - r0, c1 - c0, 3), WHITE, np.uint8)
     top = max(int(np.floor(qy.min())) - 1, 0)
     left = max(int(np.floor(qx.min())) - 1, 0)
     bottom = min(int(np.ceil(qy.max())) + 2, source.shape[0])
@@ -76,7 +78,7 @@ def _chunk(block_info, source: da.Array, inverse: np.ndarray, field: Field,
     crop = np.asarray(source[top:bottom, left:right])
     for channel in range(3):
         out[..., channel] = map_coordinates(
-            crop[..., channel], [qy - top, qx - left], order=1, mode="constant")
+            crop[..., channel], [qy - top, qx - left], order=1, mode="constant", cval=WHITE)
     return out
 
 
