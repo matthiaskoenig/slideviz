@@ -45,6 +45,7 @@ def main() -> None:
     setup(args.verbose)
     console = Console(stderr=True)
 
+    settings.data = args.data  # predictions and references are found beside --data
     if args.stain_reference:
         settings.stain_reference = args.stain_reference
 
