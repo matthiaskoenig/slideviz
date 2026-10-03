@@ -16,7 +16,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import ListedColormap
 from matplotlib.patches import Rectangle
-from PIL import Image
 from scipy.ndimage import map_coordinates
 
 from slideviz.analysis.dab import glass_colour, relative_readout
@@ -30,7 +29,7 @@ from slideviz.io.ome_tiff import read_pyramid
 BLOCKS = {
     0: ("000mg_m1", (14790, 21250)),
     89: ("089mg_m1", (17170, 25670)),
-    158: ("158mg_m2", (8670, 29070)),
+    158: ("158mg_m2", (16965, 30042)),
     281: ("281mg_m1", (4250, 12750)),
     375: ("375mg_m3", (2890, 19210)),
     500: ("500mg_m1", (4250, 19890)),
@@ -41,8 +40,7 @@ ZOOM_UM_PER_PX = 0.9
 READOUT_UM_PER_PX = 1.8  # the CYP2E1 readout's working resolution
 READOUT_MARGIN_UM = 600.0  # more than one readout window, so the field matches the whole-slide run
 THUMB_EDGE_PX = 1200
-THUMB_UM_PER_PX = 8.0  # every whole slide on one scale, so one bar holds for the row
-THUMB_PAD = 1.04  # white border around the largest slide
+THUMB_PAD = 1.04  # each slide fills its square up to this thin white border
 
 ROWS = ("H&E", "H&E", "Necrosis\nsegmentation", "CYP2E1", "CYP2E1\nsegmentation",
         "Model\nCYP2E1", "Model\nnecrosis")
@@ -145,12 +143,18 @@ def read_block(slides: Path, field_scores: Path, block: str, spot: tuple[int, in
 
     thumb_level = max(i for i, level in enumerate(he) if max(level.shape[:2]) >= THUMB_EDGE_PX)
     thumb = np.asarray(he[thumb_level]).copy()
-    thumb[~mask_from_level(thumb)] = 255
-    # resampled to the shared scale, so slides compare in size
-    thumb_factor = THUMB_UM_PER_PX / um
-    picture = Image.fromarray(thumb)
-    thumb = np.asarray(picture.resize((round(he[0].shape[1] / thumb_factor),
-                                       round(he[0].shape[0] / thumb_factor)), Image.LANCZOS))
+    tissue = mask_from_level(thumb)
+    thumb[~tissue] = 255
+    thumb_factor = he[0].shape[1] / he[thumb_level].shape[1]
+    # cropped to the tissue and centred on a square, so every slide fills its panel
+    rows, cols = np.nonzero(tissue)
+    top, left = rows.min(), cols.min()
+    height, width = rows.max() + 1 - top, cols.max() + 1 - left
+    side = int(max(height, width) * THUMB_PAD)
+    shift_r, shift_c = (side - height) // 2 - top, (side - width) // 2 - left
+    canvas = np.full((side, side, 3), 255, np.uint8)
+    canvas[shift_r + top:shift_r + top + height, shift_c + left:shift_c + left + width] = \
+        thumb[top:top + height, left:left + width]
 
     level = pick_level(he, um, ZOOM_UM_PER_PX)
     factor = he[0].shape[1] / he[level].shape[1]
@@ -159,10 +163,10 @@ def read_block(slides: Path, field_scores: Path, block: str, spot: tuple[int, in
     window = np.s_[r - half:r + half, c - half:c + half]
     segmentation, segmentation_um = cyp2e1_field(warped, he, um, spot)
     return {
-        "thumb": thumb,
-        "thumb_um_per_px": THUMB_UM_PER_PX,
-        "box": ((spot[1] - ZOOM_UM / 2 / um) / thumb_factor,
-                (spot[0] - ZOOM_UM / 2 / um) / thumb_factor,
+        "thumb": canvas,
+        "thumb_um_per_px": um * thumb_factor,
+        "box": ((spot[1] - ZOOM_UM / 2 / um) / thumb_factor + shift_c,
+                (spot[0] - ZOOM_UM / 2 / um) / thumb_factor + shift_r,
                 ZOOM_UM / um / thumb_factor),
         "he": np.asarray(he[level][window]),
         "necrosis": necrosis_field(field_scores / f"{block}_field.json", he, level,
@@ -208,19 +212,6 @@ def area_panel(ax, results: Path) -> None:
     ax.set_ylabel("Necrotic area [% of tissue]", fontsize=7)
     ax.tick_params(labelsize=6)
     ax.spines[["top", "right"]].set_visible(False)
-
-
-def square_thumbs(blocks: dict) -> None:
-    """Centre every whole-slide thumbnail on one white square, the largest slide's size."""
-    side = int(max(max(d["thumb"].shape[:2]) for d in blocks.values()) * THUMB_PAD)
-    for data in blocks.values():
-        h, w = data["thumb"].shape[:2]
-        top, left = (side - h) // 2, (side - w) // 2
-        canvas = np.full((side, side, 3), 255, np.uint8)
-        canvas[top:top + h, left:left + w] = data["thumb"]
-        data["thumb"] = canvas
-        x, y, size = data["box"]
-        data["box"] = (x + left, y + top, size)
 
 
 def overlay(ax, image: np.ndarray, mask: np.ndarray, colour: str) -> None:
@@ -287,11 +278,11 @@ def draw(blocks: dict, style: str, results: Path, out: Path) -> None:
         for row, label in enumerate(ROWS):
             ax = fig.add_axes(rect(left, TITLE_MM + row * (panel + GAP_MM), panel, panel))
             image_panel(ax, data, row, style)
+            if row == 0:  # slides are scaled to fill their squares, so each needs its own bar
+                scale_bar(ax, data["thumb_um_per_px"], 2000, "2 mm")
             if col == 0:
                 ax.set_ylabel(label, fontsize=7)
-                if row == 0:
-                    scale_bar(ax, data["thumb_um_per_px"], 2000, "2 mm")
-                elif row in (1, 2, 3):
+                if row in (1, 2, 3):
                     scale_bar(ax, data["zoom_um_per_px"], 200, "200 µm")
                 elif row == 4:
                     um_per_px = data["zoom_um_per_px" if style == "overlay" else "segmentation_um_per_px"]
@@ -318,7 +309,6 @@ def main() -> None:
 
     blocks = {dose: read_block(args.slides, args.field_scores, block, spot)
               for dose, (block, spot) in BLOCKS.items()}
-    square_thumbs(blocks)
 
     args.out.mkdir(parents=True, exist_ok=True)
     for style in STYLES:
