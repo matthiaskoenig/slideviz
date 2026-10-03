@@ -1,7 +1,8 @@
 """Manuscript figure: per dose, whole H&E, zooms with necrosis and CYP2E1 segmentation, model rows, necrotic area.
 
     uv run --with matplotlib python scripts/manuscript_figure.py --slides <APAP_tiff> \
-        --predictions <nested predictions> --results <necrosis_results_nested_area.json> --out <figures>
+        --field-scores <predict_field.py output> --results <necrosis_results_nested_area.json> \
+        --out <figures>
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import ListedColormap
 from matplotlib.patches import Rectangle
+from scipy.ndimage import map_coordinates
 
 from slideviz.analysis.dab import glass_colour, relative_readout
 from slideviz.analysis.tissue import mask_from_level
@@ -66,20 +68,29 @@ def sidecar(slides: Path, stem: str) -> dict:
     raise FileNotFoundError(f"no sidecar for {stem} in {slides}")
 
 
-def necrosis_field(prediction: Path, he: list, level: int, top_left: tuple[int, int], size: int) -> np.ndarray:
-    """Nested necrosis tiles over a square field of H&E level `level`: 0 surviving, 1 necrotic, 2 untiled."""
-    record = json.loads(prediction.read_text())
-    tiles = record["tiles"]
-    grid = np.full((max(t["row"] for t in tiles) + 1, max(t["col"] for t in tiles) + 1), 2, np.uint8)
-    for t in tiles:
-        grid[t["row"], t["col"]] = t["predicted"] >= record["cutoff"]
-    # field pixels to tile indices, through the prediction's own level
-    scale = he[record["level"]].shape[1] / he[level].shape[1] / record["size_px"]
-    rows = ((top_left[0] + np.arange(size)) * scale).astype(int)
-    cols = ((top_left[1] + np.arange(size)) * scale).astype(int)
-    inside = (rows[:, None] < grid.shape[0]) & (cols[None, :] < grid.shape[1])
-    field = grid[np.minimum(rows, grid.shape[0] - 1)][:, np.minimum(cols, grid.shape[1] - 1)]
-    return np.where(inside, field, 2)
+def necrosis_field(scores: Path, he: list, level: int, top_left: tuple[int, int], size: int) -> np.ndarray:
+    """Held-out necrosis over a square field of H&E level `level`: 0 surviving, 1 necrotic, 2 no tissue.
+
+    Scores come from overlapping tiles (ml/predict_field.py); each pixel blends the four
+    nearest tile centres, counting only those with tissue.
+    """
+    record = json.loads(scores.read_text())
+    field = record["field"]
+    probability = np.zeros(field["grid_shape"], np.float32)
+    present = np.zeros(field["grid_shape"], np.float32)
+    for t in record["tiles"]:
+        probability[t["row"], t["col"]] = t["predicted"]
+        present[t["row"], t["col"]] = 1.0
+
+    # zoom pixels to positions on the tile-centre grid, through level 0
+    to_field = he[field["level"]].shape[1] / he[level].shape[1]
+    rows = ((top_left[0] + np.arange(size)) * to_field - field["first_centre"][0]) / field["stride_px"]
+    cols = ((top_left[1] + np.arange(size)) * to_field - field["first_centre"][1]) / field["stride_px"]
+    grid = np.meshgrid(rows, cols, indexing="ij")
+    weight = map_coordinates(present, grid, order=1, mode="nearest")
+    blended = map_coordinates(probability * present, grid, order=1, mode="nearest") / np.maximum(weight, 1e-6)
+    necrotic = (blended >= record["cutoff"]).astype(np.uint8)
+    return np.where(weight >= 0.5, necrotic, 2)
 
 
 def cyp2e1_field(warped: list, he: list, um: float, spot: tuple[int, int]) -> tuple[np.ndarray, float]:
@@ -105,7 +116,7 @@ def cyp2e1_field(warped: list, he: list, um: float, spot: tuple[int, int]) -> tu
     return positive[r - top - zoom:r - top + zoom, c - left - zoom:c - left + zoom], um * factor
 
 
-def read_block(slides: Path, predictions: Path, block: str, spot: tuple[int, int]) -> dict:
+def read_block(slides: Path, field_scores: Path, block: str, spot: tuple[int, int]) -> dict:
     """The whole H&E thumbnail, the zooms in H&E and registered CYP2E1, and both segmentations."""
     he_info, he = read_pyramid(slides / f"mouse_apap_{block}_he.ome.tiff")
     _, cyp = read_pyramid(slides / f"mouse_apap_{block}_cyp2e1.ome.tiff")
@@ -134,7 +145,7 @@ def read_block(slides: Path, predictions: Path, block: str, spot: tuple[int, int
                 (spot[0] - ZOOM_UM / 2 / um) / thumb_factor,
                 ZOOM_UM / um / thumb_factor),
         "he": np.asarray(he[level][window]),
-        "necrosis": necrosis_field(predictions / f"{block}_predictions.json", he, level,
+        "necrosis": necrosis_field(field_scores / f"{block}_field.json", he, level,
                                    (r - half, c - half), 2 * half),
         "cyp": np.asarray(warped[level][window].compute()),
         "cyp_segmentation": segmentation,
@@ -210,12 +221,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--slides", type=Path, required=True)
-    parser.add_argument("--predictions", type=Path, required=True)
+    parser.add_argument("--field-scores", type=Path, required=True)
     parser.add_argument("--results", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
 
-    blocks = {dose: read_block(args.slides, args.predictions, block, spot)
+    blocks = {dose: read_block(args.slides, args.field_scores, block, spot)
               for dose, (block, spot) in BLOCKS.items()}
 
     fig = plt.figure(figsize=(WIDTH_MM * MM, HEIGHT_MM * MM))
