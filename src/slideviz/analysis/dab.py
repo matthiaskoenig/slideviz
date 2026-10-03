@@ -1,7 +1,10 @@
-"""DAB signal quantification for CYP2E1 slides, without stain separation.
+"""DAB signal quantification for CYP2E1 slides.
 
-Brownness per pixel is (red - blue) / blue, following DAB-quant (Fridovich-Keil
-et al. 2022).
+Stain optical density against each slide's own glass, separated with one fixed set
+of haematoxylin-DAB vectors (Ruifrok and Johnston 2001) for every slide.
+
+Brownness per pixel, (red - blue) / blue following DAB-quant (Fridovich-Keil et al.
+2022), is the earlier readout and still feeds the viewer layer.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
+from skimage.color import hed_from_rgb
 
 from slideviz.analysis.tissue import mask_from_level, pick_level
 from slideviz.io.reader import open_slide
@@ -26,6 +30,27 @@ CUTOFF = 0.22
 QUANTILES = (10, 25, 50, 75, 90, 99)
 
 SEED = 0
+
+# channel order of stain_od
+HAEMATOXYLIN, RESIDUAL, DAB = 0, 1, 2
+
+# optical density is scaled by this log, as in skimage.color.rgb2hed, so cutoffs share its units
+LOG_FLOOR = np.log(1e-6)
+
+
+def glass_colour(level: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Median RGB of the real glass: outside the tissue, without the synthetic white."""
+    glass = ~mask & ~(level == 255).all(axis=-1)
+    if not glass.any():
+        raise ValueError("no glass outside the tissue to measure")
+    return np.median(level[glass], axis=0)
+
+
+def stain_od(rgb: np.ndarray, glass: np.ndarray) -> np.ndarray:
+    """Haematoxylin, residual and DAB optical density per pixel, against the slide's glass."""
+    transmitted = np.clip(rgb.astype(np.float32) / glass.astype(np.float32), 1e-6, 1.0)
+    od = np.log(transmitted) / LOG_FLOOR
+    return np.clip(od @ hed_from_rgb.astype(np.float32), 0, None)
 
 
 @dataclass(frozen=True)
