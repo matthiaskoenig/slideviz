@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 
 from napari.qt.threading import thread_worker
+from napari.utils.colormaps import Colormap
 from qtpy.QtCore import Qt, QTimer
 from qtpy.QtWidgets import (
     QAbstractItemView,
@@ -78,6 +79,12 @@ DAB_STAINS = ("cyp2e1", "cyp1a2")
 
 # brownness is shown to twice the cutoff, so positive tissue spans the upper half
 DAB_DISPLAY_MAX = CUTOFF * 2
+
+# stored positive-share map of a DAB slide, from scripts/cyp2e1_readout.py
+READOUT_SUFFIX = "_readout.npz"
+
+# transparent where no cell is positive, brown where all are, so it lies over any stain
+POSITIVE_COLOURS = Colormap([[0.55, 0.27, 0.07, 0.0], [0.55, 0.27, 0.07, 1.0]], name="dab positive")
 
 # Filter label to the column it restricts
 FILTERS = {"Species": "species", "Stain": "stain", "Dose": "dose_mg_per_kg"}
@@ -559,6 +566,50 @@ class SlideList(QWidget):
             return 0
         return len(layers)
 
+    def _load_readouts(self, slides: list) -> int:
+        """Add the stored positive-share map of each DAB slide, on its H&E partner's grid."""
+        import numpy as np
+
+        directory = settings.predictions_dir()
+        if directory is None or not directory.is_dir():
+            return 0
+        references = {Path(row["file"]).name.split(".")[0]
+                      for row in slides if row["stain"] == REFERENCE_STAIN}
+        added = 0
+        for row in slides:
+            if row["stain"] not in DAB_STAINS:
+                continue
+            path = directory / f"{Path(row['file']).name.split('.')[0]}{READOUT_SUFFIX}"
+            if not path.exists():
+                continue
+            try:
+                with np.load(path) as stored:
+                    shares = np.nan_to_num(stored["positive_share"], nan=0.0)
+                    cell_um = float(stored["um_per_px"])
+                    reference = str(stored["reference"])
+            except (OSError, ValueError, KeyError) as exc:
+                log.exception("could not load readout %s", path)
+                self.status.setText(f"{path.name}: {type(exc).__name__}: {exc}")
+                continue
+            # the map is drawn in the H&E frame, so it only fits that H&E slide
+            if reference not in references:
+                log.warning("%s is on %s, not on this block's H&E", path.name, reference)
+                continue
+            self.viewer.add_image(
+                shares,
+                name=layer_name(row["serial_block"].removeprefix(BLOCK_PREFIX),
+                                STAIN_NAMES.get(row["stain"], row["stain"].upper()), "positive"),
+                scale=(cell_um, cell_um),
+                translate=(cell_um / 2, cell_um / 2),  # napari centres pixels on their indices
+                units="um",
+                colormap=POSITIVE_COLOURS,
+                contrast_limits=(0.0, 1.0),
+                interpolation2d="linear",
+                visible=False,
+            )
+            added += 1
+        return added
+
     @thread_worker
     def _open_block(self, slides: list):
         """Open a block's slides in order, yielding (row, opened or error) for each."""
@@ -608,9 +659,10 @@ class SlideList(QWidget):
             self._set_busy(False)
             reference_um = state["reference_um"]
             maps = self._load_predictions(block, reference_um) if reference_um else 0
+            readouts = self._load_readouts(slides)
             unaligned = state["unaligned"]
             note = f"  (overlaid, not registered: {', '.join(unaligned)})" if unaligned else ""
-            maps_note = "  + necrosis maps" if maps else ""
+            maps_note = ("  + necrosis maps" if maps else "") + ("  + CYP2E1 map" if readouts else "")
             self.status.setText(f"{block}  {state['loaded']} layers{maps_note}{note}")
 
         self._worker = self._open_block(slides)
