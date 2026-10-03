@@ -24,8 +24,6 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from slideviz.analysis.dab import CUTOFF, brownness_levels
-from slideviz.analysis.dab import read_reference as read_dab_reference
 from slideviz.analysis.masked import to_rgba
 from slideviz.analysis.prediction import add_prediction_layers, tile_um_of
 from slideviz.analysis.stain import normalise_levels
@@ -74,11 +72,8 @@ NAME_SEPARATOR = " · "
 # what a prediction file is about, when it does not say; steatosis is the planned second
 DEFAULT_LABEL = "necrosis"
 
-# the DAB stains that carry a brownness readout, keyed as the index writes them
+# the DAB stains that carry a positive-share readout, keyed as the index writes them
 DAB_STAINS = ("cyp2e1", "cyp1a2")
-
-# brownness is shown to twice the cutoff, so positive tissue spans the upper half
-DAB_DISPLAY_MAX = CUTOFF * 2
 
 # stored positive-share map of a DAB slide, from scripts/cyp2e1_readout.py
 READOUT_SUFFIX = "_readout.npz"
@@ -150,7 +145,6 @@ class SlideList(QWidget):
         self.viewer = viewer
         self.directory = str(directory.resolve()) if directory else None
         self._stain = None  # read on first use, then kept
-        self._dab = None  # read on first use, then kept
         # level shapes of the block's reference slide, the grid a non-rigid layer is drawn on
         self._reference_shapes: list[tuple[int, int]] = []
 
@@ -416,9 +410,6 @@ class SlideList(QWidget):
         try:
             self._add_stain(row, opened["levels"], opened["name"], opened["shown_um"],
                             opened["affine"])
-            if row["stain"] in DAB_STAINS:
-                self._add_brownness(row, opened["levels"], opened["affine"],
-                                    opened["shown_um"])
         except (RuntimeError, ValueError, KeyError) as exc:
             log.exception("could not show %s", opened["name"])
             self.status.setText(f"{opened['name']}: {type(exc).__name__}: {exc}")
@@ -441,50 +432,6 @@ class SlideList(QWidget):
         )
         # keep the unmasked pyramid, so the toggle can swap the layer's data without opening the slide again
         layer.metadata[SOURCE_LEVELS] = levels
-
-    def _dab_reference(self) -> tuple[float, dict] | None:
-        """The brownness target and per-slide medians, read once and kept."""
-        if self._dab is None:
-            path = settings.dab_reference_file()
-            if path is None:
-                self._dab = ()
-            else:
-                try:
-                    self._dab = read_dab_reference(path)
-                    log.info("dab reference: %d slides from %s", len(self._dab[1]), path)
-                except (OSError, ValueError, KeyError) as exc:
-                    log.warning("unreadable dab reference %s: %s", path, exc)
-                    self._dab = ()
-        return self._dab or None
-
-    def _add_brownness(self, row, levels: list, affine, pixel_size_um: float) -> None:
-        """Add the DAB brownness map for a stain that carries one."""
-        slide_key = Path(row["file"]).name.split(".")[0]
-        reference = self._dab_reference()
-        factor = 1.0
-        if reference is not None:
-            target, medians = reference
-            median = medians.get(slide_key)
-            # scaled onto the shared median, so one cutoff means the same on every slide
-            factor = target / median if median else 1.0
-
-        name = layer_name(
-            row["serial_block"].removeprefix(BLOCK_PREFIX),
-            STAIN_NAMES.get(row["stain"], row["stain"].upper()),
-            "brownness",
-        )
-        self.viewer.add_image(
-            [level[..., 0] for level in brownness_levels(levels, factor)],
-            name=name,
-            multiscale=True,
-            scale=(pixel_size_um, pixel_size_um),
-            units="um",
-            affine=affine,
-            colormap="inferno",
-            contrast_limits=(0.0, DAB_DISPLAY_MAX),
-            interpolation2d="linear",
-            visible=False,  # the readout is a measurement, the stain is what one looks at
-        )
 
     def _stain_reference(self) -> tuple[object, dict] | None:
         """The stain target and per-slide statistics, read once and kept."""
