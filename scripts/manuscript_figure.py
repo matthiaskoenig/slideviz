@@ -1,7 +1,7 @@
-"""Manuscript figure: whole H&E per dose, a zoom in H&E and CYP2E1, necrotic area by dose.
+"""Manuscript figure: per dose, whole H&E, zooms with necrosis and CYP2E1 segmentation, model rows, necrotic area.
 
-    uv run --with matplotlib python scripts/manuscript_figure.py \
-        --slides <APAP_tiff> --results <necrosis_results_nested_area.json> --out <figures>
+    uv run --with matplotlib python scripts/manuscript_figure.py --slides <APAP_tiff> \
+        --predictions <nested predictions> --results <necrosis_results_nested_area.json> --out <figures>
 """
 
 from __future__ import annotations
@@ -12,9 +12,12 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.colors import ListedColormap
 from matplotlib.patches import Rectangle
 
+from slideviz.analysis.dab import glass_colour, relative_readout
 from slideviz.analysis.tissue import mask_from_level
+from slideviz.analysis.tissue import pick_level as outline_level
 from slideviz.analysis.warp import load_field, nonrigid_levels
 from slideviz.data.schema import Registration
 from slideviz.io.ome_tiff import read_pyramid
@@ -31,10 +34,19 @@ BLOCKS = {
 
 ZOOM_UM = 1000.0
 ZOOM_UM_PER_PX = 0.9
+READOUT_UM_PER_PX = 1.8  # the CYP2E1 readout's working resolution
+READOUT_MARGIN_UM = 600.0  # more than one readout window, so the field matches the whole-slide run
 THUMB_EDGE_PX = 1200
+
+ROWS = ("H&E", "H&E", "Necrosis\nsegmentation", "CYP2E1", "CYP2E1\nsegmentation",
+        "Model\nCYP2E1", "Model\nnecrosis")
+# negative or surviving, positive or necrotic, outside tissue
+NECROSIS_COLOURS = ListedColormap(["#ececf4", "#c0392b", "white"])
+CYP2E1_COLOURS = ListedColormap(["#ececf4", "#8b4513", "white"])
 
 MM = 1 / 25.4
 WIDTH_MM = 190  # Elsevier full page width
+HEIGHT_MM = 245
 
 
 def pick_level(levels, level0_um: float, target_um: float) -> int:
@@ -46,12 +58,58 @@ def pick_level(levels, level0_um: float, target_um: float) -> int:
     return chosen
 
 
-def read_block(slides: Path, block: str, spot: tuple[int, int]) -> dict:
-    """The whole H&E thumbnail and the zoom in H&E and registered CYP2E1."""
+def sidecar(slides: Path, stem: str) -> dict:
+    """A slide's sidecar, named <stem>.json or <stem>.ome.json."""
+    for name in (f"{stem}.json", f"{stem}.ome.json"):
+        if (slides / name).exists():
+            return json.loads((slides / name).read_text())
+    raise FileNotFoundError(f"no sidecar for {stem} in {slides}")
+
+
+def necrosis_field(prediction: Path, he: list, level: int, top_left: tuple[int, int], size: int) -> np.ndarray:
+    """Nested necrosis tiles over a square field of H&E level `level`: 0 surviving, 1 necrotic, 2 untiled."""
+    record = json.loads(prediction.read_text())
+    tiles = record["tiles"]
+    grid = np.full((max(t["row"] for t in tiles) + 1, max(t["col"] for t in tiles) + 1), 2, np.uint8)
+    for t in tiles:
+        grid[t["row"], t["col"]] = t["predicted"] >= record["cutoff"]
+    # field pixels to tile indices, through the prediction's own level
+    scale = he[record["level"]].shape[1] / he[level].shape[1] / record["size_px"]
+    rows = ((top_left[0] + np.arange(size)) * scale).astype(int)
+    cols = ((top_left[1] + np.arange(size)) * scale).astype(int)
+    inside = (rows[:, None] < grid.shape[0]) & (cols[None, :] < grid.shape[1])
+    field = grid[np.minimum(rows, grid.shape[0] - 1)][:, np.minimum(cols, grid.shape[1] - 1)]
+    return np.where(inside, field, 2)
+
+
+def cyp2e1_field(warped: list, he: list, um: float, spot: tuple[int, int]) -> tuple[np.ndarray, float]:
+    """The relative CYP2E1 readout over the zoom field (0 negative, 1 positive, 2 excluded) and its um/px."""
+    level = pick_level(he, um, READOUT_UM_PER_PX)
+    factor = he[0].shape[1] / he[level].shape[1]
+    half = int((ZOOM_UM / 2 + READOUT_MARGIN_UM) / (um * factor))
+    r, c = int(spot[0] / factor), int(spot[1] / factor)
+    top, left = max(r - half, 0), max(c - half, 0)
+    bottom = min(r + half, he[level].shape[0])
+    right = min(c + half, he[level].shape[1])
+    rgb = np.asarray(warped[level][top:bottom, left:right])
+
+    coarse_index = outline_level(warped)
+    coarse = np.asarray(warped[coarse_index])
+    outline = mask_from_level(coarse)
+    to_coarse = he[level].shape[1] / coarse.shape[1]
+    outline_crop = outline[int(top / to_coarse):int(np.ceil(bottom / to_coarse)),
+                           int(left / to_coarse):int(np.ceil(right / to_coarse))]
+    positive, _, _ = relative_readout(rgb, glass_colour(coarse, outline), outline_crop, um * factor)
+
+    zoom = int(ZOOM_UM / 2 / (um * factor))
+    return positive[r - top - zoom:r - top + zoom, c - left - zoom:c - left + zoom], um * factor
+
+
+def read_block(slides: Path, predictions: Path, block: str, spot: tuple[int, int]) -> dict:
+    """The whole H&E thumbnail, the zooms in H&E and registered CYP2E1, and both segmentations."""
     he_info, he = read_pyramid(slides / f"mouse_apap_{block}_he.ome.tiff")
     _, cyp = read_pyramid(slides / f"mouse_apap_{block}_cyp2e1.ome.tiff")
-    sidecar = json.loads((slides / f"mouse_apap_{block}_cyp2e1.json").read_text())
-    registration = Registration(**sidecar["registration"])
+    registration = Registration(**sidecar(slides, f"mouse_apap_{block}_cyp2e1")["registration"])
     field = load_field(slides, registration)
     if field is None:
         raise RuntimeError(f"{block}: no valid non-rigid field")
@@ -68,6 +126,7 @@ def read_block(slides: Path, block: str, spot: tuple[int, int]) -> dict:
     half = int(ZOOM_UM / 2 / (um * factor))
     r, c = int(spot[0] / factor), int(spot[1] / factor)
     window = np.s_[r - half:r + half, c - half:c + half]
+    segmentation, segmentation_um = cyp2e1_field(warped, he, um, spot)
     return {
         "thumb": thumb,
         "thumb_um_per_px": um * thumb_factor,
@@ -75,7 +134,11 @@ def read_block(slides: Path, block: str, spot: tuple[int, int]) -> dict:
                 (spot[0] - ZOOM_UM / 2 / um) / thumb_factor,
                 ZOOM_UM / um / thumb_factor),
         "he": np.asarray(he[level][window]),
+        "necrosis": necrosis_field(predictions / f"{block}_predictions.json", he, level,
+                                   (r - half, c - half), 2 * half),
         "cyp": np.asarray(warped[level][window].compute()),
+        "cyp_segmentation": segmentation,
+        "segmentation_um_per_px": segmentation_um,
         "zoom_um_per_px": um * factor,
     }
 
@@ -86,7 +149,7 @@ def scale_bar(ax, um_per_px: float, length_um: float, label: str) -> None:
     length = length_um / um_per_px
     x = width * 0.95 - length
     y = height * 0.93
-    ax.plot([x, x + length], [y, y], color="black", lw=1.5, solid_capstyle="butt")
+    ax.plot([x, x + length], [y, y], color="black", lw=1.2, solid_capstyle="butt")
     ax.text(x + length / 2, y - height * 0.03, label, ha="center", va="bottom", fontsize=5)
 
 
@@ -116,46 +179,73 @@ def area_panel(ax, results: Path) -> None:
     ax.spines[["top", "right"]].set_visible(False)
 
 
+def image_panel(ax, data: dict, row: int) -> None:
+    """One cell of the image grid; the model rows stay empty until simulations exist."""
+    if row == 0:
+        ax.imshow(data["thumb"])
+        x, y, size = data["box"]
+        ax.add_patch(Rectangle((x, y), size, size, fill=False, edgecolor="black", lw=0.6))
+    elif row == 1:
+        ax.imshow(data["he"])
+    elif row == 2:
+        ax.imshow(data["necrosis"], cmap=NECROSIS_COLOURS, vmin=0, vmax=2, interpolation="nearest")
+    elif row == 3:
+        ax.imshow(data["cyp"])
+    elif row == 4:
+        ax.imshow(data["cyp_segmentation"], cmap=CYP2E1_COLOURS, vmin=0, vmax=2,
+                  interpolation="nearest")
+    else:
+        ax.set_facecolor("#f2f2f2")
+        ax.set_box_aspect(1)
+        ax.text(0.5, 0.5, "simulation\n(placeholder)", ha="center", va="center",
+                transform=ax.transAxes, fontsize=5, color="#888888")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.4)
+
+
 def main() -> None:
     """Read the six blocks and draw the figure."""
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--slides", type=Path, required=True)
+    parser.add_argument("--predictions", type=Path, required=True)
     parser.add_argument("--results", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
 
-    blocks = {dose: read_block(args.slides, block, spot)
+    blocks = {dose: read_block(args.slides, args.predictions, block, spot)
               for dose, (block, spot) in BLOCKS.items()}
 
-    fig = plt.figure(figsize=(WIDTH_MM * MM, WIDTH_MM * MM * 1.05))
-    # the fourth column is a spacer
-    grid = fig.add_gridspec(len(BLOCKS), 5, width_ratios=[1.3, 1, 1, 0.45, 2.2],
-                            wspace=0.05, hspace=0.05)
-    for row, (dose, data) in enumerate(blocks.items()):
-        axes = [fig.add_subplot(grid[row, col]) for col in range(3)]
-        axes[0].imshow(data["thumb"])
-        x, y, size = data["box"]
-        axes[0].add_patch(Rectangle((x, y), size, size, fill=False, edgecolor="black", lw=0.8))
-        axes[1].imshow(data["he"])
-        axes[2].imshow(data["cyp"])
-        scale_bar(axes[0], data["thumb_um_per_px"], 2000, "2 mm")
-        scale_bar(axes[1], data["zoom_um_per_px"], 200, "200 µm")
-        scale_bar(axes[2], data["zoom_um_per_px"], 200, "200 µm")
-        for ax in axes:
-            ax.set_xticks([])
-            ax.set_yticks([])
-            for spine in ax.spines.values():
-                spine.set_linewidth(0.4)
-        axes[0].set_ylabel(f"{dose}", fontsize=7)
-        if row == 0:
-            for ax, title in zip(axes, ("H&E", "H&E", "CYP2E1"), strict=True):
-                ax.set_title(title, fontsize=7)
-    fig.text(0.1, 0.5, "APAP [mg/kg]", rotation=90, va="center", fontsize=7)
+    fig = plt.figure(figsize=(WIDTH_MM * MM, HEIGHT_MM * MM))
+    outer = fig.add_gridspec(2, 1, height_ratios=[len(ROWS), 1.9], hspace=0.08)
+    grid = outer[0].subgridspec(len(ROWS), len(BLOCKS), wspace=0.04, hspace=0.06)
+    titles = []
+    for col, (dose, data) in enumerate(blocks.items()):
+        for row, label in enumerate(ROWS):
+            ax = fig.add_subplot(grid[row, col])
+            image_panel(ax, data, row)
+            if col == 0:
+                ax.set_ylabel(label, fontsize=7)
+                if row == 0:
+                    scale_bar(ax, data["thumb_um_per_px"], 2000, "2 mm")
+                elif row in (1, 2, 3):
+                    scale_bar(ax, data["zoom_um_per_px"], 200, "200 µm")
+                elif row == 4:
+                    scale_bar(ax, data["segmentation_um_per_px"], 200, "200 µm")
+            if row == 1:
+                titles.append((ax, f"{dose} mg/kg"))
 
-    area = fig.add_subplot(grid[1:5, 4])
+    # one line above the grid; the thumbnails differ in shape, so their own tops do not align
+    top = grid[0, 0].get_position(fig).y1
+    for ax, title in titles:
+        box = ax.get_position()
+        fig.text((box.x0 + box.x1) / 2, top + 0.008, title, ha="center", va="bottom", fontsize=7)
+
+    # centred under the grid, so its aspect stays readable
+    area = fig.add_subplot(outer[1].subgridspec(1, 3, width_ratios=[1, 2.2, 1])[0, 1])
     area_panel(area, args.results)
-    area.set_box_aspect(1)
 
     args.out.mkdir(parents=True, exist_ok=True)
     for suffix in ("png", "pdf"):
