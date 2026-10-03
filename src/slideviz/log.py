@@ -22,3 +22,5 @@ def setup(verbose: bool = False) -> None:
         level=logging.DEBUG if verbose else logging.INFO,
         handlers=[handler],
     )
+    # PyOpenGL reports its missing optional accelerator at info level on every start
+    logging.getLogger("OpenGL").setLevel(logging.WARNING)
