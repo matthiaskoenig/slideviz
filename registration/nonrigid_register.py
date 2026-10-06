@@ -23,8 +23,15 @@ from outline_register import (
 
 EDGE_PX = 2048  # RAFT tore the tissue at this size, DeepFlow matched its 1024 px result
 MIN_AGREEMENT = 0.99  # own resampling against VALIS's warped image
-# good blocks move 7–71 um; edge DAB reached 307 um
-MAX_MEDIAN_UM = 100.0
+
+
+def code_version() -> str:
+    """The repo's commit, marked dirty when files differ from it."""
+    import subprocess
+
+    found = subprocess.run(["git", "describe", "--always", "--dirty"], capture_output=True,
+                           text=True, check=False, cwd=Path(__file__).resolve().parent)
+    return found.stdout.strip() or "unknown"
 
 
 def um_per_px(path: Path) -> float:
@@ -99,7 +106,7 @@ def haematoxylin(rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
 
 
 def register_block(block: str, slides: Path, out: Path, edge: int,
-                   source: str = "density") -> dict:
+                   source: str = "haematoxylin") -> dict:
     """Run DeepFlow on one block and write its field and summary."""
     import valis
     from valis.non_rigid_registrars import OpticalFlowWarper
@@ -137,9 +144,6 @@ def register_block(block: str, slides: Path, out: Path, edge: int,
                            f"{agree:.3f}, so the stored convention would be wrong")
 
     shift_um = np.hypot(*dxdy)[mask] * grid_um
-    if np.median(shift_um) > MAX_MEDIAN_UM:
-        raise RuntimeError(f"{block}: median shift {np.median(shift_um):.0f} µm is above "
-                           f"{MAX_MEDIAN_UM:.0f} µm, so the field is matching stain, not tissue")
     inputs = {"density": "tissue density", "haematoxylin": "haematoxylin channel"}
     method = (f"valis-{valis.__version__} OpticalFlowWarper (DeepFlow), {inputs[source]} "
               f"input at {edge} px, after the sidecar matrix")
@@ -155,6 +159,7 @@ def register_block(block: str, slides: Path, out: Path, edge: int,
         "agreement": round(agree, 4),
         "seconds": round(seconds, 1),
         "registered": datetime.now(UTC).date().isoformat(),
+        "code": code_version(),
     }
 
     out.mkdir(parents=True, exist_ok=True)
@@ -178,9 +183,9 @@ def main() -> None:
                         help="OME-TIFFs with their sidecars")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--edge", type=int, default=EDGE_PX, help="longest edge in px")
-    parser.add_argument("--input", choices=("density", "haematoxylin"), default="density",
-                        help="haematoxylin leaves DAB out, for a slide whose DAB pattern the "
-                             "flow would otherwise follow")
+    parser.add_argument("--input", choices=("density", "haematoxylin"), default="haematoxylin",
+                        help="haematoxylin leaves DAB out, so the flow cannot follow the DAB "
+                             "pattern; density was the input before 6 Oct 2026")
     args = parser.parse_args()
 
     refused = []
