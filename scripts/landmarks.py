@@ -50,7 +50,7 @@ def view(slides: Path, slide: str) -> tuple[np.ndarray, float, float]:
 
 
 def place(block: str, slides: Path, out: Path) -> None:
-    """Open H&E and rigidly placed CYP2E1 side by side with a points layer on each."""
+    """Open H&E and rigidly placed CYP2E1 side by side; clicks alternate between their points layers."""
     import napari
 
     he, cyp = f"mouse_apap_{block}_he", f"mouse_apap_{block}_cyp2e1"
@@ -62,7 +62,7 @@ def place(block: str, slides: Path, out: Path) -> None:
     path = out / f"{block}.json"
     stored = json.loads(path.read_text()) if path.exists() else {"he": [], "cyp2e1": []}
 
-    viewer = napari.Viewer(title=f"{block} landmarks: H&E left, CYP2E1 right")
+    viewer = napari.Viewer()
     viewer.add_image(he_image, name="H&E", rgb=True, scale=(he_um * he_factor,) * 2)
     he_points = viewer.add_points(np.array(stored["he"]).reshape(-1, 2), name="H&E points",
                                   scale=(he_um,) * 2, size=POINT_UM / he_um,
@@ -79,18 +79,32 @@ def place(block: str, slides: Path, out: Path) -> None:
     viewer.grid.enabled = True
     viewer.grid.stride = 2  # each image with its points in one panel
 
-    def save(_=None) -> None:
-        """Write both point lists and show the pair count."""
+    def following():
+        """The points layer the next click belongs to: CYP2E1 while it trails H&E."""
+        return cyp_points if len(he_points.data) > len(cyp_points.data) else he_points
+
+    def show() -> None:
+        """Put the pair count and the side to click next in the window title."""
+        pairs = min(len(he_points.data), len(cyp_points.data))
+        side = "CYP2E1 (right)" if following() is cyp_points else "H&E (left)"
+        viewer.title = f"{block}: {pairs} pairs, click {side} next"
+
+    def save(event=None) -> None:
+        """Write both point lists and pass the next click to the other image."""
         record = {"block": block, "he_slide": he, "cyp2e1_slide": cyp,
                   "he": he_points.data.round(1).tolist(),
                   "cyp2e1": cyp_points.data.round(1).tolist()}
         out.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(record, indent=1) + "\n")
-        viewer.status = f"{len(he_points.data)} H&E, {len(cyp_points.data)} CYP2E1 points saved"
+        if event is not None and event.action == "added":
+            viewer.layers.selection.active = following()
+            following().mode = "add"
+        show()
 
     he_points.events.data.connect(save)
     cyp_points.events.data.connect(save)
-    viewer.layers.selection.active = he_points
+    viewer.layers.selection.active = following()
+    show()
     napari.run()
 
 
