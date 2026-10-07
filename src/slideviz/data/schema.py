@@ -66,6 +66,7 @@ class NonRigid(BaseModel):
     median_um: float | None = Field(default=None, ge=0.0)
     p95_um: float | None = Field(default=None, ge=0.0)
     registered: Date | None = None
+    code: Name | None = None  # git commit of the code that computed the field
 
 
 class Registration(BaseModel):
@@ -82,6 +83,7 @@ class Registration(BaseModel):
     # tissue-outline overlap after the transform, 0 to 1, for methods reporting no um
     outline_dice: float | None = Field(default=None, ge=0.0, le=1.0)
     registered: Date | None = None
+    code: Name | None = None  # git commit of the code that computed the matrix
     nonrigid: NonRigid | None = None  # absent means the matrix is the whole transform
 
     @field_validator("matrix")

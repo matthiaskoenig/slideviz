@@ -26,11 +26,13 @@ VALIS_METHOD = "valis-1.2.0 rigid, GradientOD"
 
 
 def from_valis_run(
-    run_dir: Path, error_um: float | None = None, method: str = VALIS_METHOD
+    run_dir: Path, error_um: float | None = None, method: str = VALIS_METHOD,
+    code: str | None = None,
 ) -> dict[str, Registration]:
     """Read a run's transforms.json, keyed by slide stem.
 
-    `method` records what produced it, since outline_register.py writes this file too.
+    `method` records what produced it, since outline_register.py writes this file too;
+    `code` is the commit that ran it.
     """
     data = json.loads((run_dir / "transforms.json").read_text())
     reference = Path(data["reference"]).name.split(".")[0]
@@ -49,6 +51,7 @@ def from_valis_run(
             residual_px=entry.get("residual_px"),
             outline_dice=entry.get("outline_dice"),
             registered=datetime.now(UTC).date().isoformat(),  # UTC, for provenance
+            code=code,
         )
     return found
 
@@ -113,6 +116,7 @@ def attach_nonrigid(summary_path: Path, slide_dir: Path, write: bool = False) ->
         median_um=summary["median_um"],
         p95_um=summary["p95_um"],
         registered=summary["registered"],
+        code=summary.get("code"),  # summaries before 6 Oct 2026 carry none
     )
     print(f"  {summary['slide']}: {nonrigid.path}, median {nonrigid.median_um} µm")
     if write:
