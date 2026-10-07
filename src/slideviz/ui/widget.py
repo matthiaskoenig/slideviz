@@ -78,6 +78,12 @@ DAB_STAINS = ("cyp2e1", "cyp1a2")
 # stored positive-share map of a DAB slide, from scripts/cyp2e1_readout.py
 READOUT_SUFFIX = "_readout.npz"
 
+# that run's per-slide numbers, beside the maps
+READOUT_RECORD = "cyp2e1_readout.json"
+
+# the share of necrotic tissue that is DAB positive is shown from this much necrosis on, as reported
+NECROTIC_SHOWN_PCT = 5.0
+
 # transparent where no cell is positive, brown where all are, so it lies over any stain
 POSITIVE_COLOURS = Colormap([[0.55, 0.27, 0.07, 0.0], [0.55, 0.27, 0.07, 1.0]], name="dab positive")
 
@@ -145,6 +151,7 @@ class SlideList(QWidget):
         self.viewer = viewer
         self.directory = str(directory.resolve()) if directory else None
         self._stain = None  # read on first use, then kept
+        self._readout = None  # the readout run's numbers, read on first use, then kept
         # level shapes of the block's reference slide, the grid a non-rigid layer is drawn on
         self._reference_shapes: list[tuple[int, int]] = []
 
@@ -311,14 +318,13 @@ class SlideList(QWidget):
 
     @staticmethod
     def _label(row) -> str:
-        """One list entry per block: species, substance, dose, animal and stain count."""
+        """One list entry per block: species, substance, dose and animal."""
         dose = row["dose_mg_per_kg"]
         return (
             f"{row['species']:<6} {row['substance']} "  # species first
             # xxx where the dose is not known yet, matching the placeholder in the filename
             f"{dose if dose is not None else 'xxx':>3} mg/kg  "
-            f"{row['animal_id']:<3} "
-            f"{row['n_slides']} stains"
+            f"{row['animal_id']}"
         )
 
     def _show_info(self) -> None:
@@ -366,7 +372,40 @@ class SlideList(QWidget):
             # a half-written prediction file should not take the panel down
             except (OSError, ValueError, KeyError) as exc:
                 log.warning("unreadable prediction file %s: %s", prediction, exc)
+        lines.extend(self._readout_lines(slides))
         self.info.setText("<br>".join(lines))
+
+    def _readout_record(self) -> dict:
+        """The CYP2E1 readout run's record from the prediction directory, read once and kept."""
+        if self._readout is None:
+            self._readout = {}
+            directory = settings.predictions_dir()
+            path = directory / READOUT_RECORD if directory is not None else None
+            if path is not None and path.exists():
+                try:
+                    self._readout = json.loads(path.read_text())
+                except (OSError, ValueError) as exc:
+                    log.warning("unreadable readout record %s: %s", path, exc)
+        return self._readout
+
+    def _readout_lines(self, slides: list) -> list[str]:
+        """Info lines with the CYP2E1-positive share of each DAB slide in the block."""
+        record = self._readout_record()
+        measured = record.get("slides_measured", {})
+        lines = []
+        for row in slides:
+            found = measured.get(Path(row["file"]).name.split(".")[0])
+            if row["stain"] not in DAB_STAINS or found is None:
+                continue
+            stain = STAIN_NAMES.get(row["stain"], row["stain"].upper())
+            lines.append(f"<br><b>{stain} positive</b> (readout, {record.get('written', '')[:10]})")
+            if found.get("positive_surviving_pct") is not None:
+                lines.append(f"{found['positive_surviving_pct']:.1f}% of surviving tissue")
+            if (found.get("positive_necrotic_pct") is not None
+                    and found.get("necrotic_pct", 0) >= NECROTIC_SHOWN_PCT):
+                lines.append(f"{found['positive_necrotic_pct']:.1f}% of necrotic tissue")
+            lines.append(f"{found['positive_pct']:.1f}% of all tissue")
+        return lines
 
     def _selected(self) -> tuple[str, str] | None:
         """Directory and block of the highlighted entry, or None when nothing is selected."""
