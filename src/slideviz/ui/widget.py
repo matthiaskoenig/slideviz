@@ -24,6 +24,8 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from slideviz.analysis.flatten import flatten_levels
+from slideviz.analysis.flatten import load as load_flattening
 from slideviz.analysis.masked import to_rgba
 from slideviz.analysis.prediction import add_prediction_layers, tile_um_of
 from slideviz.analysis.stain import normalise_levels
@@ -53,8 +55,12 @@ ORDER BY species, substance, dose_mg_per_kg, animal_id
 # the stain that every other one is registered to, so it goes in first and untransformed
 REFERENCE_STAIN = "he"
 
-# where a layer keeps its unmasked pyramid, so the background toggle can swap data
+# where a layer keeps its unmasked pyramids, raw and evened, so the toggles can swap data
 SOURCE_LEVELS = "slideviz_levels"
+EVENED_LEVELS = "slideviz_evened_levels"
+
+# a slide's flattening fields sit in this folder beside it, as <stem>_flatten.npz
+FLATTEN_DIR = "flatten"
 
 # a block's name carries this prefix, a prediction file's animal does not
 BLOCK_PREFIX = "apap_"
@@ -178,7 +184,14 @@ class SlideList(QWidget):
         self.hide_background.setToolTip(
             "Make the white scan area and the staircase transparent, leaving tissue"
         )
-        self.hide_background.toggled.connect(self._apply_background)
+        self.hide_background.toggled.connect(self._apply_display)
+
+        self.even_staining = QCheckBox("Even out staining")
+        self.even_staining.setChecked(True)
+        self.even_staining.setToolTip(
+            "Divide out slide-wide staining gradients for display; measurements use the raw pixels"
+        )
+        self.even_staining.toggled.connect(self._apply_display)
 
         load = QPushButton("Load")
         load.clicked.connect(self._replace)
@@ -206,6 +219,7 @@ class SlideList(QWidget):
         layout.addWidget(self.list)
         layout.addWidget(self.info)
         layout.addWidget(self.hide_background)
+        layout.addWidget(self.even_staining)
         layout.addLayout(buttons)
         layout.addWidget(self.activity)
         layout.addWidget(self.progress)
@@ -419,8 +433,14 @@ class SlideList(QWidget):
         path, scene = slide_path(row), row["scene"]
         registration = self._registration(row)
         info, levels = open_slide(path, scene)  # lazy, pixels arrive when napari draws
+        slide_key = Path(row["file"]).name.split(".")[0]
+        pyramids = {SOURCE_LEVELS: levels}
+        # fields are fitted on a file's only scene, on its own pixel grid, so they go in before the warp
+        flat = self._flattening(path.parent, slide_key) if info.n_scenes == 1 else None
+        if flat is not None:
+            pyramids[EVENED_LEVELS] = flatten_levels(levels, flat, info.pixel_size_um)
         # applied always, so one slide has one appearance for everyone who opens it
-        levels = self._matched(levels, Path(row["file"]).name.split(".")[0])
+        pyramids = {key: self._matched(p, slide_key) for key, p in pyramids.items()}
         stain = STAIN_NAMES.get(row["stain"], row["stain"].upper())
         # a scene number only means something on the files that hold more than one
         what = f"{stain} s{scene}" if info.n_scenes > 1 else stain
@@ -436,18 +456,31 @@ class SlideList(QWidget):
 
         shown_um = info.pixel_size_um
         if field is not None:
-            levels = nonrigid_levels(levels, self._reference_shapes, registration,
-                                     field, reference_um)
+            pyramids = {key: nonrigid_levels(p, self._reference_shapes, registration, field, reference_um)
+                        for key, p in pyramids.items()}
             shown_um, affine = reference_um, None
-        return {"row": row, "levels": levels, "name": name, "shown_um": shown_um,
+        return {"row": row, "pyramids": pyramids, "name": name, "shown_um": shown_um,
                 "affine": affine, "pixel_size_um": info.pixel_size_um,
                 "registered": registration is not None}
+
+    @staticmethod
+    def _flattening(directory: Path, slide_key: str):
+        """A slide's flattening fields from the folder beside it, or None when absent or unreadable."""
+        path = directory / FLATTEN_DIR / f"{slide_key}_flatten.npz"
+        if not path.exists():
+            log.debug("no flattening fields for %s", slide_key)
+            return None
+        try:
+            return load_flattening(path)
+        except (OSError, ValueError, KeyError) as exc:
+            log.warning("unreadable flattening fields %s: %s", path, exc)
+            return None
 
     def _show(self, opened: dict) -> bool:
         """Add an opened slide's layers; False when napari rejects them."""
         row = opened["row"]
         try:
-            self._add_stain(row, opened["levels"], opened["name"], opened["shown_um"],
+            self._add_stain(row, opened["pyramids"], opened["name"], opened["shown_um"],
                             opened["affine"])
         except (RuntimeError, ValueError, KeyError) as exc:
             log.exception("could not show %s", opened["name"])
@@ -455,10 +488,10 @@ class SlideList(QWidget):
             return False
         return True
 
-    def _add_stain(self, row, levels: list, name: str, pixel_size_um: float, affine) -> None:
-        """Add one stain pyramid as an RGB layer, placed by `affine` when given."""
-        layer = self.viewer.add_image(
-            self._levels_for(levels),
+    def _add_stain(self, row, pyramids: dict, name: str, pixel_size_um: float, affine) -> None:
+        """Add one stain as an RGB layer, placed by `affine` when given."""
+        self.viewer.add_image(
+            self._levels_for(pyramids),
             name=name,
             rgb=True,
             multiscale=True,  # levels is a pyramid, napari picks one per zoom
@@ -468,9 +501,9 @@ class SlideList(QWidget):
             colormap=STAIN_COLOURS.get(row["stain"], FALLBACK_COLOUR),
             opacity=0.7,
             blending="additive",  # so the stains show through each other
+            # keep the unmasked pyramids, so the toggles can swap the layer's data without opening the slide again
+            metadata=dict(pyramids),
         )
-        # keep the unmasked pyramid, so the toggle can swap the layer's data without opening the slide again
-        layer.metadata[SOURCE_LEVELS] = levels
 
     def _stain_reference(self) -> tuple[object, dict] | None:
         """The stain target and per-slide statistics, read once and kept."""
@@ -499,20 +532,22 @@ class SlideList(QWidget):
             return levels
         return normalise_levels(levels, stats, target)
 
-    def _levels_for(self, levels: list) -> list:
-        """The pyramid as the checkbox currently wants it: masked or untouched."""
+    def _levels_for(self, pyramids: dict) -> list:
+        """The pyramid as the checkboxes currently want it: evened or raw, masked or untouched."""
+        levels = pyramids[SOURCE_LEVELS]
+        if self.even_staining.isChecked() and EVENED_LEVELS in pyramids:
+            levels = pyramids[EVENED_LEVELS]
         if not self.hide_background.isChecked():
             return levels
         # stays lazy: an alpha chunk is built only for the level being drawn
         return to_rgba(levels)
 
-    def _apply_background(self) -> None:
-        """Re-mask every open layer, so the checkbox acts on what is already shown."""
+    def _apply_display(self) -> None:
+        """Re-pick every open layer's pyramid, so the checkboxes act on what is already shown."""
         for layer in self.viewer.layers:
-            levels = layer.metadata.get(SOURCE_LEVELS)
-            if levels is None:  # a layer this widget did not load
+            if SOURCE_LEVELS not in layer.metadata:  # a layer this widget did not load
                 continue
-            layer.data = self._levels_for(levels)
+            layer.data = self._levels_for(layer.metadata)
 
     @staticmethod
     def _prediction_file(block: str) -> Path | None:
@@ -619,7 +654,7 @@ class SlideList(QWidget):
             return
 
         animal = block.removeprefix(BLOCK_PREFIX)
-        state = {"reference_um": None, "loaded": 0, "unaligned": [], "done": 0}
+        state = {"reference_um": None, "loaded": 0, "evened": 0, "unaligned": [], "done": 0}
         self._reference_shapes = []  # another block's reference must not carry over
         self._set_busy(True)
         self._step(animal, slides[0], 0, len(slides))
@@ -632,6 +667,7 @@ class SlideList(QWidget):
                 self.status.setText(f"{slide_path(row).name}: {type(opened).__name__}: {opened}")
             elif self._show(opened):
                 state["loaded"] += 1
+                state["evened"] += EVENED_LEVELS in opened["pyramids"]
                 if state["reference_um"] is None:
                     state["reference_um"] = opened["pixel_size_um"]
                 elif not opened["registered"]:
@@ -649,7 +685,8 @@ class SlideList(QWidget):
             unaligned = state["unaligned"]
             note = f"  (overlaid, not registered: {', '.join(unaligned)})" if unaligned else ""
             maps_note = ("  + necrosis maps" if maps else "") + ("  + CYP2E1 map" if readouts else "")
-            self.status.setText(f"{block}  {state['loaded']} layers{maps_note}{note}")
+            evened_note = f", staining fields for {state['evened']}"
+            self.status.setText(f"{block}  {state['loaded']} layers{evened_note}{maps_note}{note}")
 
         self._worker = self._open_block(slides)
         self._worker.yielded.connect(arrived)
