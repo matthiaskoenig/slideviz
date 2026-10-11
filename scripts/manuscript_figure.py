@@ -1,5 +1,7 @@
 """Manuscript figure: per dose, whole H&E, zooms with necrosis and CYP2E1 segmentation, model rows, necrotic area.
 
+Picture rows use the flattening fields in <slides>/flatten/; the segmentations use raw pixels.
+
     uv run --with matplotlib python scripts/manuscript_figure.py --slides <APAP_tiff> \
         --field-scores <predict_field.py output> --results <necrosis_results_nested_area.json> \
         --out <figures>
@@ -18,6 +20,7 @@ from matplotlib.colors import ListedColormap
 from matplotlib.patches import Rectangle
 from scipy.ndimage import map_coordinates
 
+from slideviz.analysis import flatten
 from slideviz.analysis.dab import glass_colour, relative_readout
 from slideviz.analysis.tissue import mask_from_level
 from slideviz.analysis.tissue import pick_level as outline_level
@@ -130,20 +133,34 @@ def cyp2e1_field(warped: list, he: list, um: float, spot: tuple[int, int]) -> tu
     return positive[r - top - zoom:r - top + zoom, c - left - zoom:c - left + zoom], um * factor
 
 
+def flattening(slides: Path, stem: str) -> flatten.Flattening:
+    """A slide's flattening fields from the folder beside it."""
+    path = slides / "flatten" / f"{stem}_flatten.npz"
+    if not path.exists():
+        raise FileNotFoundError(f"no flattening fields: {path}")
+    return flatten.load(path)
+
+
 def read_block(slides: Path, field_scores: Path, block: str, spot: tuple[int, int]) -> dict:
     """The whole H&E thumbnail, the zooms in H&E and registered CYP2E1, and both segmentations."""
     he_info, he = read_pyramid(slides / f"mouse_apap_{block}_he.ome.tiff")
-    _, cyp = read_pyramid(slides / f"mouse_apap_{block}_cyp2e1.ome.tiff")
+    cyp_info, cyp = read_pyramid(slides / f"mouse_apap_{block}_cyp2e1.ome.tiff")
     registration = Registration(**sidecar(slides, f"mouse_apap_{block}_cyp2e1")["registration"])
     field = load_field(slides, registration)
     if field is None:
         raise RuntimeError(f"{block}: no valid non-rigid field")
     um = he_info.pixel_size_um
-    warped = nonrigid_levels(cyp, [level.shape[:2] for level in he], registration, field, um)
+    he_shapes = [level.shape[:2] for level in he]
+    warped = nonrigid_levels(cyp, he_shapes, registration, field, um)
+    # the picture rows show the slides with the staining gradients divided out
+    he_shown = flatten.flatten_levels(he, flattening(slides, f"mouse_apap_{block}_he"), um)
+    cyp_flat = flatten.flatten_levels(cyp, flattening(slides, f"mouse_apap_{block}_cyp2e1"),
+                                      cyp_info.pixel_size_um)
+    cyp_shown = nonrigid_levels(cyp_flat, he_shapes, registration, field, um)
 
     thumb_level = max(i for i, level in enumerate(he) if max(level.shape[:2]) >= THUMB_EDGE_PX)
-    thumb = np.asarray(he[thumb_level]).copy()
-    tissue = mask_from_level(thumb)
+    tissue = mask_from_level(np.asarray(he[thumb_level]))
+    thumb = np.asarray(he_shown[thumb_level]).copy()
     thumb[~tissue] = 255
     thumb_factor = he[0].shape[1] / he[thumb_level].shape[1]
     # cropped to the tissue and centred on a square, so every slide fills its panel
@@ -168,10 +185,10 @@ def read_block(slides: Path, field_scores: Path, block: str, spot: tuple[int, in
         "box": ((spot[1] - ZOOM_UM / 2 / um) / thumb_factor + shift_c,
                 (spot[0] - ZOOM_UM / 2 / um) / thumb_factor + shift_r,
                 ZOOM_UM / um / thumb_factor),
-        "he": np.asarray(he[level][window]),
+        "he": np.asarray(he_shown[level][window]),
         "necrosis": necrosis_field(field_scores / f"{block}_field.json", he, level,
                                    (r - half, c - half), 2 * half),
-        "cyp": np.asarray(warped[level][window].compute()),
+        "cyp": np.asarray(cyp_shown[level][window].compute()),
         "cyp_segmentation": segmentation,
         "segmentation_um_per_px": segmentation_um,
         "zoom_um_per_px": um * factor,
