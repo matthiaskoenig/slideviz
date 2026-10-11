@@ -402,9 +402,26 @@ def apply(rgb: np.ndarray, flat: Flattening, rgb_um: float, origin_um: tuple[flo
     inside = map_coordinates(flat.tissue.astype(float), coords, order=1, mode="constant") > 0.5
     amounts = stain_amounts(rgb, flat.glass)
     for ch, f in flat.fields.items():
-        up = map_coordinates(f, coords, order=1, mode="nearest")
-        amounts[..., ch] = np.where(inside, amounts[..., ch] / np.exp(up), amounts[..., ch])
-    return to_rgb(amounts, flat.glass)
+        amounts[..., ch] /= np.exp(map_coordinates(f, coords, order=1, mode="nearest"))
+    # outside the tissue the raw pixels stay, so the background stays pure white for the viewer's mask
+    return np.where(inside[..., None], to_rgb(amounts, flat.glass), rgb)
+
+
+def flatten_levels(levels: list, flat: Flattening, level0_um: float) -> list:
+    """A pyramid with the fields divided out, corrected chunk by chunk."""
+    import dask.array as da
+
+    def chunk(rgb: np.ndarray, block_info=None, level_um: float = 0.0) -> np.ndarray:
+        """One chunk flattened, placed by its position in the level."""
+        if not rgb.size:
+            return rgb
+        (row, _), (col, _) = block_info[0]["array-location"][:2]
+        return apply(rgb, flat, level_um, (row * level_um, col * level_um))
+
+    # stays lazy: only the chunks napari draws are corrected
+    return [da.map_blocks(chunk, level, dtype=np.uint8,
+                          level_um=level0_um * levels[0].shape[1] / level.shape[1])
+            for level in levels]
 
 
 def save(path: Path, flat: Flattening) -> None:
