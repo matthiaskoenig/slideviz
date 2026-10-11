@@ -1,10 +1,11 @@
 """Manuscript figure: per dose, whole H&E, zooms with necrosis and CYP2E1 segmentation, model rows, necrotic area.
 
 Picture rows use the flattening fields in <slides>/flatten/; the segmentations use raw pixels.
+Necrosis leaves out vessel lumina, from the necrosis_lumen.py output in --lumen.
 
     uv run --with matplotlib python scripts/manuscript_figure.py --slides <APAP_tiff> \
         --field-scores <predict_field.py output> --results <necrosis_results_nested_area.json> \
-        --out <figures>
+        --lumen <necrosis_lumen.py output> --out <figures>
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from scipy.ndimage import map_coordinates
 
 from slideviz.analysis import flatten
 from slideviz.analysis.dab import glass_colour, relative_readout
+from slideviz.analysis.prediction import read_lumen
 from slideviz.analysis.tissue import mask_from_level
 from slideviz.analysis.tissue import pick_level as outline_level
 from slideviz.analysis.warp import load_field, nonrigid_levels
@@ -55,6 +57,7 @@ NECROSIS_OVERLAY = "#c0392b"
 CYP2E1_OVERLAY = "#1f5fbf"
 OVERLAY_ALPHA = 0.4
 STYLES = ("panels", "overlay")
+LUMEN_RECORD = "necrosis_lumen.json"  # the lumen run's areas, beside its lumen files
 
 # page layout in mm; the panel size follows from the height, the width from the panels
 MM = 1 / 25.4
@@ -110,6 +113,14 @@ def necrosis_field(scores: Path, he: list, level: int, top_left: tuple[int, int]
     return np.where(weight >= 0.5, necrotic, 2)
 
 
+def lumen_field(lumen: tuple[np.ndarray, float], top_left: tuple[int, int], size: int, zoom_um: float) -> np.ndarray:
+    """A slide's lumen mask over a square zoom field whose pixels are zoom_um wide."""
+    mask, lumen_um = lumen
+    rows = (top_left[0] + np.arange(size) + 0.5) * zoom_um / lumen_um - 0.5
+    cols = (top_left[1] + np.arange(size) + 0.5) * zoom_um / lumen_um - 0.5
+    return map_coordinates(mask.astype(np.float32), np.meshgrid(rows, cols, indexing="ij"), order=1) >= 0.5
+
+
 def cyp2e1_field(warped: list, he: list, um: float, spot: tuple[int, int]) -> tuple[np.ndarray, float]:
     """The relative CYP2E1 readout over the zoom field (0 negative, 1 positive, 2 excluded) and its um/px."""
     level = pick_level(he, um, READOUT_UM_PER_PX)
@@ -141,8 +152,11 @@ def flattening(slides: Path, stem: str) -> flatten.Flattening:
     return flatten.load(path)
 
 
-def read_block(slides: Path, field_scores: Path, block: str, spot: tuple[int, int]) -> dict:
+def read_block(slides: Path, field_scores: Path, lumen_dir: Path, block: str, spot: tuple[int, int]) -> dict:
     """The whole H&E thumbnail, the zooms in H&E and registered CYP2E1, and both segmentations."""
+    lumen = read_lumen(lumen_dir / f"{block}_lumen.npz")
+    if lumen is None:
+        raise FileNotFoundError(f"no lumen file for {block} in {lumen_dir}")
     he_info, he = read_pyramid(slides / f"mouse_apap_{block}_he.ome.tiff")
     cyp_info, cyp = read_pyramid(slides / f"mouse_apap_{block}_cyp2e1.ome.tiff")
     registration = Registration(**sidecar(slides, f"mouse_apap_{block}_cyp2e1")["registration"])
@@ -179,6 +193,9 @@ def read_block(slides: Path, field_scores: Path, block: str, spot: tuple[int, in
     r, c = int(spot[0] / factor), int(spot[1] / factor)
     window = np.s_[r - half:r + half, c - half:c + half]
     segmentation, segmentation_um = cyp2e1_field(warped, he, um, spot)
+    necrosis = necrosis_field(field_scores / f"{block}_field.json", he, level, (r - half, c - half), 2 * half)
+    # vessel lumina are outside the tissue the necrotic area is measured on
+    necrosis[lumen_field(lumen, (r - half, c - half), 2 * half, um * factor)] = 2
     return {
         "thumb": canvas,
         "thumb_um_per_px": um * thumb_factor,
@@ -186,8 +203,7 @@ def read_block(slides: Path, field_scores: Path, block: str, spot: tuple[int, in
                 (spot[0] - ZOOM_UM / 2 / um) / thumb_factor + shift_r,
                 ZOOM_UM / um / thumb_factor),
         "he": np.asarray(he_shown[level][window]),
-        "necrosis": necrosis_field(field_scores / f"{block}_field.json", he, level,
-                                   (r - half, c - half), 2 * half),
+        "necrosis": necrosis,
         "cyp": np.asarray(cyp_shown[level][window].compute()),
         "cyp_segmentation": segmentation,
         "segmentation_um_per_px": segmentation_um,
@@ -205,12 +221,17 @@ def scale_bar(ax, um_per_px: float, length_um: float, label: str) -> None:
     ax.text(x + length / 2, y - height * 0.03, label, ha="center", va="bottom", fontsize=5)
 
 
-def area_panel(ax, results: Path) -> None:
-    """Held-out necrotic area per animal, boxed by dose, shown animals filled."""
+def area_panel(ax, results: Path, lumen_dir: Path) -> None:
+    """Held-out necrotic area without lumina per animal, boxed by dose, shown animals filled."""
+    areas = {row["animal"]: row for row in json.loads((lumen_dir / LUMEN_RECORD).read_text())["slides_areas"]}
     by_dose: dict[int, list[tuple[str, float]]] = {}
     for fold in json.loads(results.read_text())["folds"]:
-        dose = int(fold["held_out"][:3])
-        by_dose.setdefault(dose, []).append((fold["held_out"], 100 * fold["area_predicted"]))
+        animal = fold["held_out"]
+        # the lumen run must stand on the same predictions as the nested results
+        if areas[animal]["area_predicted"] != fold["area_predicted"]:
+            raise ValueError(f"{animal}: lumen run area {areas[animal]['area_predicted']} "
+                             f"against nested {fold['area_predicted']}")
+        by_dose.setdefault(int(animal[:3]), []).append((animal, 100 * areas[animal]["area_predicted_no_lumen"]))
 
     doses = sorted(by_dose)
     ax.boxplot([[v for _, v in by_dose[d]] for d in doses], positions=doses, widths=35,
@@ -275,7 +296,7 @@ def image_panel(ax, data: dict, row: int, style: str) -> None:
         spine.set_linewidth(0.4)
 
 
-def draw(blocks: dict, style: str, results: Path, out: Path) -> None:
+def draw(blocks: dict, style: str, results: Path, lumen_dir: Path, out: Path) -> None:
     """The whole figure in one style, panels placed in millimetres so the grid stays tight."""
     rows, columns = len(ROWS), len(blocks)
     fixed = TITLE_MM + (rows - 1) * GAP_MM + PLOT_GAP_MM + PLOT_MM + BOTTOM_MM
@@ -306,7 +327,7 @@ def draw(blocks: dict, style: str, results: Path, out: Path) -> None:
                     scale_bar(ax, um_per_px, 200, "200 µm")
 
     plot_top = TITLE_MM + rows * panel + (rows - 1) * GAP_MM + PLOT_GAP_MM
-    area_panel(fig.add_axes(rect(LABEL_MM, plot_top, grid_width, PLOT_MM)), results)
+    area_panel(fig.add_axes(rect(LABEL_MM, plot_top, grid_width, PLOT_MM)), results, lumen_dir)
 
     for suffix in ("png", "pdf"):
         fig.savefig(out / f"necrosis_figure_{style}.{suffix}", dpi=400)
@@ -321,15 +342,16 @@ def main() -> None:
     parser.add_argument("--slides", type=Path, required=True)
     parser.add_argument("--field-scores", type=Path, required=True)
     parser.add_argument("--results", type=Path, required=True)
+    parser.add_argument("--lumen", type=Path, required=True, help="necrosis_lumen.py output")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
 
-    blocks = {dose: read_block(args.slides, args.field_scores, block, spot)
+    blocks = {dose: read_block(args.slides, args.field_scores, args.lumen, block, spot)
               for dose, (block, spot) in BLOCKS.items()}
 
     args.out.mkdir(parents=True, exist_ok=True)
     for style in STYLES:
-        draw(blocks, style, args.results, args.out)
+        draw(blocks, style, args.results, args.lumen, args.out)
     print(f"written to {args.out}")
 
 
