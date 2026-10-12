@@ -305,7 +305,6 @@ class SlideList(QWidget):
                 Qt.ItemDataRole.UserRole, (row["directory"], row["serial_block"])
             )
             self.list.addItem(item)
-        self.status.setText(self._count())
 
     @staticmethod
     def _block_slides(directory: str, block: str) -> list:
@@ -331,18 +330,6 @@ class SlideList(QWidget):
         """The transform from a slide's sidecar."""
         slide = cls._sidecar(row)
         return slide.registration if slide is not None else None
-
-    def _count(self) -> str:
-        """Blocks listed, and the total when a filter is hiding some."""
-        scope, params = self._scope()
-        where = f"WHERE {scope[0]}" if scope else ""
-        # the collection's total, not the index's, so the count matches the list
-        total = query(
-            f"SELECT COUNT(DISTINCT directory || serial_block) FROM slides {where}",
-            tuple(params),
-        )[0][0]
-        shown = self.list.count()
-        return f"{shown} blocks" if shown == total else f"{shown} of {total} blocks"
 
     @staticmethod
     def _label(row) -> str:
@@ -373,21 +360,18 @@ class SlideList(QWidget):
         title = f"{first['species']} {first['substance']}, {dose_text} mg/kg, {first['animal_id']}"
         lines = [f"<b>{title}</b>"]
         for row in slides:
-            stain = STAIN_NAMES.get(row["stain"], row["stain"].upper())
             sidecar = self._sidecar(row)
-            lines.append(f"<br><b>{stain}</b>")
             if sidecar is None:
                 continue
-            if sidecar.original_name:
-                lines.append(f"file: {sidecar.original_name}")
-            if sidecar.animal_id_corrected:
-                lines.append(f"ID corrected: {sidecar.animal_id_corrected}")
-            registration = sidecar.registration
-            if registration is None:
-                if row["stain"] != REFERENCE_STAIN:
-                    lines.append("not registered")
-                continue
-            lines.extend(registration_lines(registration))
+            details = [f"ID corrected: {sidecar.animal_id_corrected}"] if sidecar.animal_id_corrected else []
+            if sidecar.registration is not None:
+                details.extend(registration_lines(sidecar.registration))
+            elif row["stain"] != REFERENCE_STAIN:
+                details.append("not registered")
+            # a stain gets a heading only when something is said about it
+            if details:
+                lines.append(f"<br><b>{STAIN_NAMES.get(row['stain'], row['stain'].upper())}</b>")
+                lines.extend(details)
 
         prediction = self._prediction_file(block)
         if prediction is not None:
@@ -436,7 +420,7 @@ class SlideList(QWidget):
         return self._lumen_areas
 
     def _readout_lines(self, slides: list) -> list[str]:
-        """Info lines with the positive share and gradient steps of each DAB slide in the block."""
+        """Info lines with the CYP2E1-positive share of each DAB slide in the block."""
         record = self._readout_record()
         measured = record.get("slides_measured", {})
         lines = []
@@ -445,21 +429,13 @@ class SlideList(QWidget):
             if row["stain"] not in DAB_STAINS or found is None:
                 continue
             stain = STAIN_NAMES.get(row["stain"], row["stain"].upper())
-            necrotic_shown = (found.get("positive_necrotic_pct") is not None
-                              and found.get("necrotic_pct", 0) >= NECROTIC_SHOWN_PCT)
             lines.append(f"<br><b>{stain} positive</b> (readout, {record.get('written', '')[:10]})")
             if found.get("positive_surviving_pct") is not None:
                 lines.append(f"{found['positive_surviving_pct']:.1f}% of surviving tissue")
-            if necrotic_shown:
+            if (found.get("positive_necrotic_pct") is not None
+                    and found.get("necrotic_pct", 0) >= NECROTIC_SHOWN_PCT):
                 lines.append(f"{found['positive_necrotic_pct']:.1f}% of necrotic tissue")
             lines.append(f"{found['positive_pct']:.1f}% of all tissue")
-            steps = [(found.get("steps_surviving_pct"), "surviving"),
-                     (found.get("steps_necrotic_pct") if necrotic_shown else None, "necrotic"),
-                     (found.get("steps_pct"), "all")]
-            if any(shares for shares, _ in steps):
-                lines.append(f"<b>{stain} gradient</b>, % in steps 0 (low) to {STEPS - 1} (high)")
-                lines.extend(f"{' · '.join(f'{v:.0f}' for v in shares)} of {what} tissue"
-                             for shares, what in steps if shares)
         return lines
 
     def _selected(self) -> tuple[str, str] | None:
@@ -704,8 +680,9 @@ class SlideList(QWidget):
             return
 
         animal = block.removeprefix(BLOCK_PREFIX)
-        state = {"reference_um": None, "loaded": 0, "evened": 0, "unaligned": [], "done": 0}
+        state = {"reference_um": None, "unaligned": [], "done": 0}
         self._reference_shapes = []  # another block's reference must not carry over
+        self.status.setText("")  # the status line only carries this load's problems
         self._set_busy(True)
         self._step(animal, slides[0], 0, len(slides))
 
@@ -716,8 +693,6 @@ class SlideList(QWidget):
             if isinstance(opened, Exception):
                 self.status.setText(f"{slide_path(row).name}: {type(opened).__name__}: {opened}")
             elif self._show(opened):
-                state["loaded"] += 1
-                state["evened"] += EVENED_LEVELS in opened["pyramids"]
                 if state["reference_um"] is None:
                     state["reference_um"] = opened["pixel_size_um"]
                 elif not opened["registered"]:
@@ -726,17 +701,15 @@ class SlideList(QWidget):
                 self._step(animal, slides[state["done"]], state["done"], len(slides))
 
         def finished() -> None:
-            """Add the prediction maps and report the block."""
+            """Add the prediction maps and warn about slides shown without registration."""
             self._worker = None
             self._set_busy(False)
             reference_um = state["reference_um"]
-            maps = self._load_predictions(block, reference_um) if reference_um else 0
-            readouts = self._load_readouts(slides)
-            unaligned = state["unaligned"]
-            note = f"  (overlaid, not registered: {', '.join(unaligned)})" if unaligned else ""
-            maps_note = ("  + necrosis maps" if maps else "") + ("  + CYP2E1 map" if readouts else "")
-            evened_note = f", staining fields for {state['evened']}"
-            self.status.setText(f"{block}  {state['loaded']} layers{evened_note}{maps_note}{note}")
+            if reference_um:
+                self._load_predictions(block, reference_um)
+            self._load_readouts(slides)
+            if state["unaligned"]:
+                self.status.setText(f"{block}: overlaid, not registered: {', '.join(state['unaligned'])}")
 
         self._worker = self._open_block(slides)
         self._worker.yielded.connect(arrived)
@@ -791,6 +764,6 @@ class SlideList(QWidget):
             self._load_block(*selected)
 
     def _clear(self) -> None:
-        """Empty the viewer and reset the status line to the slide count."""
+        """Empty the viewer and the status line."""
         self.viewer.layers.clear()
-        self.status.setText(self._count())
+        self.status.setText("")
