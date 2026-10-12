@@ -17,6 +17,10 @@ log = logging.getLogger(__name__)
 # lumen-grid pixels per map pixel when lumina are cut out, ~3.5 um, so vessels show as holes
 LUMEN_POOL = 2
 
+# the necrotic call as a see-through cyan area; over the gold CYP2E1 steps it mixes to green
+CALL_RGB = (0.0, 234 / 255, 248 / 255)
+CALL_OPACITY = 0.42
+
 
 def tile_map(rows: list[dict], values: np.ndarray, fill: float = np.nan) -> np.ndarray:
     """One value per tile as an array indexed by tile row and column."""
@@ -55,8 +59,10 @@ def read_lumen(path: Path) -> tuple[np.ndarray, float] | None:
         return stored["lumen"], float(stored["lumen_um"])
 
 
-def without_lumina(tiles: np.ndarray, tile_um: float, lumen: np.ndarray, lumen_um: float) -> tuple[np.ndarray, float]:
-    """A tile map resampled onto the pooled lumen grid with the lumina cut out, and its um/px."""
+def without_lumina(
+    tiles: np.ndarray, tile_um: float, lumen: np.ndarray, lumen_um: float, order: int = 1
+) -> tuple[np.ndarray, float]:
+    """A tile map resampled onto the pooled lumen grid with the lumina cut out, and its um/px; order 0 keeps tiles whole."""
     height, width = lumen.shape[0] // LUMEN_POOL, lumen.shape[1] // LUMEN_POOL
     pooled = lumen[:height * LUMEN_POOL, :width * LUMEN_POOL].reshape(height, LUMEN_POOL, width, LUMEN_POOL)
     open_share = 1.0 - pooled.mean(axis=(1, 3))
@@ -64,7 +70,7 @@ def without_lumina(tiles: np.ndarray, tile_um: float, lumen: np.ndarray, lumen_u
     # tile centres sit at (index + 0.5) * tile_um, so linear sampling matches the tile map's own blending
     rows = (np.arange(height) + 0.5) * um / tile_um - 0.5
     cols = (np.arange(width) + 0.5) * um / tile_um - 0.5
-    values = map_coordinates(tiles, np.meshgrid(rows, cols, indexing="ij"), order=1, mode="constant", cval=0.0)
+    values = map_coordinates(tiles, np.meshgrid(rows, cols, indexing="ij"), order=order, mode="constant", cval=0.0)
     return (values * open_share).astype(np.float32), um
 
 
@@ -77,43 +83,50 @@ def add_prediction_layers(
     visible: bool = False,
     lumen: tuple[np.ndarray, float] | None = None,
 ) -> list:
-    """Add predicted and annotated tile maps to an open viewer in micrometres.
+    """Add the annotated tile map and the predicted necrotic area to an open viewer in micrometres.
 
     Maps use absolute tile row and column indices and the reference stain's frame;
     with a lumen mask and its um/px, they are drawn finer with the lumina cut out.
+    The predicted area is the call at the file's nested cutoff, the area the readout counts.
     """
+    from napari.utils.colormaps import Colormap
+
     rows, predicted, annotated = read_predictions(path)
-    maps = {"annotated": tile_map(rows, annotated, fill=0.0), "predicted": tile_map(rows, predicted, fill=0.0)}
+    cutoff = json.loads(path.read_text())["cutoff"]
+    maps = {"annotated": tile_map(rows, annotated, fill=0.0),
+            "predicted": tile_map(rows, (predicted >= cutoff).astype(float), fill=0.0)}
     # tiles are square and spaced by their own size, so one tile is one pixel at this scale
     pixel_um = tile_um
     if lumen is not None:
-        for key, grid in maps.items():
-            maps[key], pixel_um = without_lumina(grid, tile_um, *lumen)
-    scale = (pixel_um, pixel_um)
-    # Offset by half a pixel because napari centres pixels on their indices.
-    offset = (pixel_um / 2, pixel_um / 2)
+        maps["annotated"], _ = without_lumina(maps["annotated"], tile_um, *lumen)
+        # nearest tile, so a pixel is necrotic when it lies in a called tile and mostly outside the lumina
+        maps["predicted"], pixel_um = without_lumina(maps["predicted"], tile_um, *lumen, order=0)
+    call = (maps["predicted"] >= 0.5).astype(np.uint8)
     common = {
-        "scale": scale,
-        "translate": offset,
+        "scale": (pixel_um, pixel_um),
+        "translate": (pixel_um / 2, pixel_um / 2),  # napari centres pixels on their indices
         "units": "um",
-        "opacity": 0.5,
-        "blending": "additive",  # so the two maps show through each other
         "contrast_limits": (0.0, 1.0),
         "visible": visible,
-        # one tile is one pixel, so nearest draws hard squares at every zoom
-        "interpolation2d": "linear",
     }
     layers = [
         viewer.add_image(
             maps["annotated"],
             name=annotated_name,
             colormap="green",
+            opacity=0.5,
+            blending="additive",
+            interpolation2d="linear",
             **common,
         ),
         viewer.add_image(
-            maps["predicted"],
+            call,
             name=predicted_name,
-            colormap="magenta",
+            colormap=Colormap([[0.0, 0.0, 0.0, 0.0], [*CALL_RGB, 1.0]], controls=[0.0, 0.5, 1.0],
+                              interpolation="zero", name="necrotic call"),
+            opacity=CALL_OPACITY,
+            blending="translucent_no_depth",
+            interpolation2d="nearest",  # a yes/no map, a blend between the two would be a third value
             **common,
         ),
     ]
