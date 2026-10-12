@@ -1,7 +1,8 @@
 """DAB signal quantification for CYP2E1 slides.
 
 Optical density against each slide's glass with fixed Ruifrok vectors. A pixel is
-positive when its DAB exceeds the midpoint of its surroundings' low and high level.
+positive when its DAB exceeds the midpoint of its surroundings' low and high level;
+where it sits between the two, cut into steps, is the gradient.
 """
 
 from __future__ import annotations
@@ -48,6 +49,11 @@ MIDPOINT = 0.5  # where between low and high the decision line sits
 CONTRAST_MIN = 1.25  # high over low below this is a window without zonation
 WINDOW_TISSUE_MIN = 0.3  # share of a window that must be tissue
 
+# Gradient: a pixel's position between its window's low (0) and high level, stored as uint8
+STEPS = 5  # equal steps of the position
+POSITION_SCALE = 250  # stored units for the whole low-to-high range
+NO_TISSUE = 255  # stored position outside the tissue
+
 
 def glass_like(od: np.ndarray) -> np.ndarray:
     """Pixels whose total optical density is close to the glass."""
@@ -71,11 +77,15 @@ class LocalLevels:
     origin_px: float  # level pixel of the first grid point, on both axes
     flat_fraction: float  # windows with tissue but no zonation, which took a neighbour's levels
 
+    def bounds(self, rows: np.ndarray, cols: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Low and high DAB at level pixel positions, interpolated between grid points."""
+        grid = [(rows - self.origin_px) / self.spacing_px, (cols - self.origin_px) / self.spacing_px]
+        return (map_coordinates(self.low, grid, order=1, mode="nearest"),
+                map_coordinates(self.high, grid, order=1, mode="nearest"))
+
     def threshold(self, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
         """The decision line at level pixel positions, interpolated between grid points."""
-        grid = [(rows - self.origin_px) / self.spacing_px, (cols - self.origin_px) / self.spacing_px]
-        low = map_coordinates(self.low, grid, order=1, mode="nearest")
-        high = map_coordinates(self.high, grid, order=1, mode="nearest")
+        low, high = self.bounds(rows, cols)
         return low + MIDPOINT * (high - low)
 
 
@@ -121,6 +131,26 @@ def positive_map(dab: np.ndarray, tissue: np.ndarray, levels: LocalLevels, band_
         positive = dab[r0:r1] > levels.threshold(rows, cc)
         out[r0:r1] = np.where(tissue[r0:r1], positive, 2)
     return out
+
+
+def relative_position(dab: np.ndarray, tissue: np.ndarray, levels: LocalLevels, band_px: int = 1024) -> np.ndarray:
+    """Each pixel's DAB between its window's low (0) and high (POSITION_SCALE) level, NO_TISSUE outside."""
+    out = np.full(dab.shape, NO_TISSUE, np.uint8)
+    cols = np.arange(dab.shape[1], dtype=np.float32)
+    for r0 in range(0, dab.shape[0], band_px):
+        r1 = min(r0 + band_px, dab.shape[0])
+        rows, cc = np.meshgrid(np.arange(r0, r1, dtype=np.float32), cols, indexing="ij")
+        low, high = levels.bounds(rows, cc)
+        # the range is zero only where low and high are both zero
+        share = np.clip((dab[r0:r1] - low) / np.maximum(high - low, 1e-6), 0.0, 1.0)
+        out[r0:r1] = np.where(tissue[r0:r1], np.floor(share * POSITION_SCALE), NO_TISSUE)
+    return out
+
+
+def gradient_steps(position: np.ndarray) -> np.ndarray:
+    """Each pixel's step, 0 to STEPS - 1, from its stored position; STEPS outside the tissue."""
+    steps = np.minimum(position.astype(np.uint16) * STEPS // POSITION_SCALE, STEPS - 1)
+    return np.where(position == NO_TISSUE, STEPS, steps).astype(np.uint8)
 
 
 def relative_readout(
