@@ -28,4 +28,6 @@ def normalise(tile: np.ndarray, source: dict, target: dict) -> np.ndarray:
     # a flat channel would divide by zero, and has nothing to rescale anyway
     scale = np.where(src_sd > 1e-6, tgt_sd / np.maximum(src_sd, 1e-6), 1.0)
     out = (lab - src_mean) * scale + tgt_mean
-    return (np.clip(lab2rgb(out), 0, 1) * 255).astype(np.uint8)
+    matched = (np.clip(lab2rgb(out), 0, 1) * 255).astype(np.uint8)
+    # pure white is the scanner's fill outside the scan grid: no stain, and the background mask finds it by that value
+    return np.where((tile == 255).all(axis=-1, keepdims=True), tile, matched)
