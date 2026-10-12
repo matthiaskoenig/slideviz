@@ -95,10 +95,11 @@ LUMEN_RECORD = "necrosis_lumen.json"
 # the share of necrotic tissue that is DAB positive is shown from this much necrosis on, as reported
 NECROTIC_SHOWN_PCT = 5.0
 
-# gradient steps from pale to dark brown; clear outside the tissue
+# gradient steps from pale to dark brown; step 0 and outside the tissue clear, so the slide below shows
 PALE, BROWN = (0.925, 0.925, 0.957), (0.545, 0.271, 0.075)
 STEP_COLOURS = Colormap(
-    [[p + (b - p) * i / (STEPS - 1) for p, b in zip(PALE, BROWN, strict=True)] + [1.0] for i in range(STEPS)]
+    [[p + (b - p) * i / (STEPS - 1) for p, b in zip(PALE, BROWN, strict=True)] + [1.0 if i else 0.0]
+     for i in range(STEPS)]
     + [[0.0, 0.0, 0.0, 0.0]],
     controls=[0.0] + [(i + 0.5) / STEPS for i in range(STEPS)] + [1.0],
     interpolation="zero",
