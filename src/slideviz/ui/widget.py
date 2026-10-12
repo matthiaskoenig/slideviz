@@ -95,11 +95,14 @@ LUMEN_RECORD = "necrosis_lumen.json"
 # the share of necrotic tissue that is DAB positive is shown from this much necrosis on, as reported
 NECROTIC_SHOWN_PCT = 5.0
 
-# gradient steps from pale to dark brown; step 0 and outside the tissue clear, so the slide below shows
-PALE, BROWN = (0.925, 0.925, 0.957), (0.545, 0.271, 0.075)
+# gradient steps 1 to 4 from olive to gold, rising in strength; step 0 and outside the tissue clear.
+# Gold stays gold over pink H&E, where brown turns brick red, and under the cyan necrosis it mixes to green.
+STEP_RGB = ((200, 196, 72), (218, 213, 48), (237, 229, 24), (255, 246, 0))
+STEP_ALPHA = (0.56, 0.74, 0.87, 1.0)  # times STEP_OPACITY, so at most half covers the slide
+STEP_OPACITY = 0.5
 STEP_COLOURS = Colormap(
-    [[p + (b - p) * i / (STEPS - 1) for p, b in zip(PALE, BROWN, strict=True)] + [1.0 if i else 0.0]
-     for i in range(STEPS)]
+    [[0.0, 0.0, 0.0, 0.0]]
+    + [[c / 255 for c in rgb] + [alpha] for rgb, alpha in zip(STEP_RGB, STEP_ALPHA, strict=True)]
     + [[0.0, 0.0, 0.0, 0.0]],
     controls=[0.0] + [(i + 0.5) / STEPS for i in range(STEPS)] + [1.0],
     interpolation="zero",
@@ -650,6 +653,7 @@ class SlideList(QWidget):
                 translate=(pixel_um / 2, pixel_um / 2),  # napari centres pixels on their indices
                 units="um",
                 colormap=STEP_COLOURS,
+                opacity=STEP_OPACITY,
                 contrast_limits=(0, STEPS),
                 interpolation2d="nearest",  # steps are classes, a blend between two would be a third
                 visible=False,
@@ -705,9 +709,10 @@ class SlideList(QWidget):
             self._worker = None
             self._set_busy(False)
             reference_um = state["reference_um"]
+            # CYP2E1 first, so the see-through necrosis lies on top and their overlap mixes
+            self._load_readouts(slides)
             if reference_um:
                 self._load_predictions(block, reference_um)
-            self._load_readouts(slides)
             if state["unaligned"]:
                 self.status.setText(f"{block}: overlaid, not registered: {', '.join(state['unaligned'])}")
 
