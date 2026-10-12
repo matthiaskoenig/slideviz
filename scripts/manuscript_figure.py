@@ -1,4 +1,4 @@
-"""Manuscript figure on one A4 page: per dose, whole slides, zooms, necrosis and the CYP2E1 gradient, model rows, area.
+"""Manuscript figure on one A4 page: per dose, whole slides, zooms, necrosis and the CYP2E1 gradient, model rows, area and time plots.
 
 Picture rows use the flattening fields in <slides>/flatten/; the segmentations use raw pixels.
 Necrosis leaves out vessel lumina, from the necrosis_lumen.py output in --lumen.
@@ -73,9 +73,17 @@ MARGIN_MM = 8.0
 LABEL_MM = 14.0  # row labels left of the grid
 GAP_MM = 1.0
 TITLE_MM = 6.0
-PLOT_GAP_MM = 11.0
+KEY_GAP_MM = 2.0
+KEY_MM = 5.0  # colour key of the gradient row, under the grid
+PLOT_GAP_MM = 9.0
 PLOT_MM = 38.0
+PLOT_SPACE_MM = 14.0  # between the two plots, room for the right one's axis label
 BOTTOM_MM = 10.0
+
+# necrosis against time: the slides were taken at one time point
+DATA_HOURS = 24
+TIME_MAX_H = 48
+DOSE_SPREAD_H = 0.7  # markers per dose spread around the time point so error bars stay apart
 
 
 def pick_level(levels, level0_um: float, target_um: float) -> int:
@@ -237,8 +245,8 @@ def scale_bar(ax, um_per_px: float, length_um: float, label: str) -> None:
     ax.text(x + length / 2, y - height * 0.03, label, ha="center", va="bottom", fontsize=5)
 
 
-def area_panel(ax, results: Path, lumen_dir: Path) -> None:
-    """Held-out necrotic area without lumina per animal, boxed by dose, shown animals filled."""
+def necrotic_areas(results: Path, lumen_dir: Path) -> dict[int, list[tuple[str, float]]]:
+    """Held-out necrotic area without lumina in percent, per animal, grouped by dose."""
     areas = {row["animal"]: row for row in json.loads((lumen_dir / LUMEN_RECORD).read_text())["slides_areas"]}
     by_dose: dict[int, list[tuple[str, float]]] = {}
     for fold in json.loads(results.read_text())["folds"]:
@@ -248,12 +256,24 @@ def area_panel(ax, results: Path, lumen_dir: Path) -> None:
             raise ValueError(f"{animal}: lumen run area {areas[animal]['area_predicted']} "
                              f"against nested {fold['area_predicted']}")
         by_dose.setdefault(int(animal[:3]), []).append((animal, 100 * areas[animal]["area_predicted_no_lumen"]))
+    return dict(sorted(by_dose.items()))
 
-    doses = sorted(by_dose)
-    ax.boxplot([[v for _, v in by_dose[d]] for d in doses], positions=doses, widths=35,
+
+def dose_colours(doses: list[int]) -> dict[int, tuple]:
+    """One red per dose, light to dark, so the model curves can take the same colours."""
+    reds = plt.get_cmap("Reds")
+    return {dose: reds(0.3 + 0.7 * k / max(1, len(doses) - 1)) for k, dose in enumerate(doses)}
+
+
+def area_panel(ax, by_dose: dict, top: float) -> None:
+    """Necrotic area per animal, boxed by dose with a line through the medians, shown animals filled."""
+    doses = list(by_dose)
+    values = [[v for _, v in by_dose[d]] for d in doses]
+    ax.boxplot(values, positions=doses, widths=35,
                showfliers=False, medianprops={"color": "black"},
                boxprops={"linewidth": 0.8}, whiskerprops={"linewidth": 0.8},
                capprops={"linewidth": 0.8})
+    ax.plot(doses, [np.median(v) for v in values], color="black", lw=0.8, zorder=2)
     rng = np.random.default_rng(0)
     for dose in doses:
         for animal, value in by_dose[dose]:
@@ -261,11 +281,55 @@ def area_panel(ax, results: Path, lumen_dir: Path) -> None:
             ax.scatter(dose + rng.uniform(-10, 10), value, s=10, zorder=3,
                        facecolor="black" if chosen else "white", edgecolor="black", lw=0.6)
     ax.set_xlim(-40, 540)
+    ax.set_ylim(-2, top)
     ax.set_xticks(doses)
     ax.set_xlabel("APAP dose [mg/kg]", fontsize=7)
     ax.set_ylabel("Necrotic area [% of tissue]", fontsize=7)
     ax.tick_params(labelsize=6)
     ax.spines[["top", "right"]].set_visible(False)
+
+
+def time_panel(ax, by_dose: dict, top: float) -> None:
+    """Necrotic area against time after dosing: the data as mean and SD per dose; the model curves are to come."""
+    colours = dose_colours(list(by_dose))
+    middle = (len(by_dose) - 1) / 2
+    for k, (dose, animals) in enumerate(by_dose.items()):
+        values = np.array([v for _, v in animals])
+        ax.errorbar(DATA_HOURS + (k - middle) * DOSE_SPREAD_H, values.mean(), yerr=values.std(ddof=1),
+                    fmt="o", ms=3, color=colours[dose], ecolor=colours[dose], elinewidth=0.8, capsize=1.5,
+                    label=f"{dose} mg/kg")
+    ax.text(0.03, 0.97, "model curves: placeholder", transform=ax.transAxes, ha="left", va="top",
+            fontsize=5, color="#888888")
+    ax.set_xlim(0, TIME_MAX_H)
+    ax.set_ylim(-2, top)
+    ax.set_xticks(range(0, TIME_MAX_H + 1, 12))
+    ax.set_xlabel("Time after APAP [h]", fontsize=7)
+    ax.set_ylabel("Necrotic area [% of tissue]", fontsize=7)
+    ax.tick_params(labelsize=6)
+    ax.legend(fontsize=5, frameon=False, loc="upper right", handlelength=1)
+    ax.spines[["top", "right"]].set_visible(False)
+
+
+def key_panel(ax, base: np.ndarray) -> None:
+    """Colour key of the gradient row, each swatch mixed over the H&E colour as in the panels."""
+    def over(rgba: np.ndarray, below: np.ndarray) -> np.ndarray:
+        """One see-through colour laid over another."""
+        return rgba[3] * rgba[:3] + (1 - rgba[3]) * below
+
+    call = np.array([*CALL_RGB, CALL_OPACITY])
+    swatches = [([over(STEP_RGBA[step], base) for step in range(1, len(STEP_RGB) + 1)], "CYP2E1, local low to high"),
+                ([over(call, base)], "necrotic"),
+                ([over(call, over(STEP_RGBA[len(STEP_RGB)], base))], "necrotic and CYP2E1 high")]
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.set_axis_off()
+    x, width = 0.0, 0.03
+    for colours, label in swatches:
+        for colour in colours:
+            ax.add_patch(Rectangle((x, 0.15), width, 0.7, facecolor=colour, edgecolor="none"))
+            x += width
+        ax.text(x + 0.008, 0.5, label, va="center", fontsize=6)
+        x += 0.008 + 0.0075 * len(label) + 0.03
 
 
 def overlay(ax, image: np.ndarray, mask: np.ndarray, colour: str) -> None:
@@ -324,7 +388,7 @@ def draw(blocks: dict, results: Path, lumen_dir: Path, out: Path) -> None:
     """The whole figure on one A4 page, panels placed in millimetres so the grid stays tight."""
     rows, columns = len(ROWS), len(blocks)
     page_width, page_height = PAGE_MM
-    fixed = TITLE_MM + (rows - 1) * GAP_MM + PLOT_GAP_MM + PLOT_MM + BOTTOM_MM
+    fixed = TITLE_MM + (rows - 1) * GAP_MM + KEY_GAP_MM + KEY_MM + PLOT_GAP_MM + PLOT_MM + BOTTOM_MM
     by_height = (page_height - 2 * MARGIN_MM - fixed) / rows
     by_width = (page_width - 2 * MARGIN_MM - LABEL_MM - (columns - 1) * GAP_MM) / columns
     panel = min(by_height, by_width)
@@ -351,8 +415,18 @@ def draw(blocks: dict, results: Path, lumen_dir: Path, out: Path) -> None:
                 if row in (2, 3, 4, 5):
                     scale_bar(ax, data["zoom_um_per_px"], 200, "200 µm")
 
-    plot_top = MARGIN_MM + TITLE_MM + rows * panel + (rows - 1) * GAP_MM + PLOT_GAP_MM
-    area_panel(fig.add_axes(rect(origin, plot_top, grid_width, PLOT_MM)), results, lumen_dir)
+    grid_bottom = MARGIN_MM + TITLE_MM + rows * panel + (rows - 1) * GAP_MM
+    # the key's swatches are mixed over the plain H&E of the first dose, the colour the gradient row lies on
+    first = next(iter(blocks.values()))["he"].reshape(-1, 3)
+    base = np.median(first[first.mean(axis=1) < 230], axis=0) / 255
+    key_panel(fig.add_axes(rect(origin, grid_bottom + KEY_GAP_MM, grid_width, KEY_MM)), base)
+
+    by_dose = necrotic_areas(results, lumen_dir)
+    top = 1.08 * max(v for animals in by_dose.values() for _, v in animals) + 2  # both plots on one scale
+    plot_top = grid_bottom + KEY_GAP_MM + KEY_MM + PLOT_GAP_MM
+    plot_width = (grid_width - PLOT_SPACE_MM) / 2
+    area_panel(fig.add_axes(rect(origin, plot_top, plot_width, PLOT_MM)), by_dose, top)
+    time_panel(fig.add_axes(rect(origin + plot_width + PLOT_SPACE_MM, plot_top, plot_width, PLOT_MM)), by_dose, top)
 
     for suffix in ("png", "pdf"):
         fig.savefig(out / f"necrosis_figure.{suffix}", dpi=400)
