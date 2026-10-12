@@ -1,4 +1,4 @@
-"""Manuscript figure: per dose, whole H&E, zooms with necrosis and CYP2E1 segmentation, model rows, necrotic area.
+"""Manuscript figure on one A4 page: per dose, whole slides, zooms, necrosis and the CYP2E1 gradient, model rows, area.
 
 Picture rows use the flattening fields in <slides>/flatten/; the segmentations use raw pixels.
 Necrosis leaves out vessel lumina, from the necrosis_lumen.py output in --lumen.
@@ -17,13 +17,17 @@ from pathlib import Path
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.colors import ListedColormap
 from matplotlib.patches import Rectangle
 from scipy.ndimage import map_coordinates
 
 from slideviz.analysis import flatten
-from slideviz.analysis.dab import glass_colour, relative_readout
-from slideviz.analysis.prediction import read_lumen
+from slideviz.analysis.dab import (
+    glass_colour,
+    gradient_steps,
+    relative_position,
+    relative_readout,
+)
+from slideviz.analysis.prediction import CALL_OPACITY, CALL_RGB, read_lumen
 from slideviz.analysis.tissue import mask_from_level
 from slideviz.analysis.tissue import pick_level as outline_level
 from slideviz.analysis.warp import load_field, nonrigid_levels
@@ -47,28 +51,31 @@ READOUT_MARGIN_UM = 600.0  # more than one readout window, so the field matches 
 THUMB_EDGE_PX = 1200
 THUMB_PAD = 1.04  # each slide fills its square up to this thin white border
 
-ROWS = ("H&E", "H&E", "Necrosis\nsegmentation", "CYP2E1", "CYP2E1\nsegmentation",
+ROWS = ("H&E", "CYP2E1", "H&E", "CYP2E1", "Necrosis\nsegmentation", "CYP2E1\ngradient,\nnecrosis",
         "Model\nCYP2E1", "Model\nnecrosis")
-# negative or surviving, positive or necrotic, outside tissue
-NECROSIS_COLOURS = ListedColormap(["#ececf4", "#c0392b", "white"])
-CYP2E1_COLOURS = ListedColormap(["#ececf4", "#8b4513", "white"])
-# drawn on the stain; CYP2E1 brown on the brown stain would vanish, so it is blue there
 NECROSIS_OVERLAY = "#c0392b"
-CYP2E1_OVERLAY = "#1f5fbf"
 OVERLAY_ALPHA = 0.4
-STYLES = ("panels", "overlay")
+# the viewer's CYP2E1 gradient (STEP_RGB, STEP_ALPHA, STEP_OPACITY in ui/widget.py): steps 1 to 4 olive
+# to gold, step 0 and no tissue clear
+STEP_RGB = ((200, 196, 72), (218, 213, 48), (237, 229, 24), (255, 246, 0))
+STEP_ALPHA = (0.56, 0.74, 0.87, 1.0)
+STEP_OPACITY = 0.5
+STEP_RGBA = np.array([(0.0, 0.0, 0.0, 0.0)]
+                     + [(*(c / 255 for c in rgb), alpha * STEP_OPACITY)
+                        for rgb, alpha in zip(STEP_RGB, STEP_ALPHA, strict=True)]
+                     + [(0.0, 0.0, 0.0, 0.0)], np.float32)
 LUMEN_RECORD = "necrosis_lumen.json"  # the lumen run's areas, beside its lumen files
 
-# page layout in mm; the panel size follows from the height, the width from the panels
+# page layout in mm: one A4 page, the panel size follows from the room the rows leave
 MM = 1 / 25.4
-HEIGHT_MM = 245
+PAGE_MM = (210.0, 297.0)
+MARGIN_MM = 8.0
 LABEL_MM = 14.0  # row labels left of the grid
 GAP_MM = 1.0
 TITLE_MM = 6.0
 PLOT_GAP_MM = 11.0
 PLOT_MM = 38.0
 BOTTOM_MM = 10.0
-RIGHT_MM = 1.0
 
 
 def pick_level(levels, level0_um: float, target_um: float) -> int:
@@ -122,7 +129,7 @@ def lumen_field(lumen: tuple[np.ndarray, float], top_left: tuple[int, int], size
 
 
 def cyp2e1_field(warped: list, he: list, um: float, spot: tuple[int, int]) -> tuple[np.ndarray, float]:
-    """The relative CYP2E1 readout over the zoom field (0 negative, 1 positive, 2 excluded) and its um/px."""
+    """The CYP2E1 gradient steps over the zoom field (0 to STEPS - 1, STEPS excluded) and its um/px."""
     level = pick_level(he, um, READOUT_UM_PER_PX)
     factor = he[0].shape[1] / he[level].shape[1]
     half = int((ZOOM_UM / 2 + READOUT_MARGIN_UM) / (um * factor))
@@ -138,10 +145,11 @@ def cyp2e1_field(warped: list, he: list, um: float, spot: tuple[int, int]) -> tu
     to_coarse = he[level].shape[1] / coarse.shape[1]
     outline_crop = outline[int(top / to_coarse):int(np.ceil(bottom / to_coarse)),
                            int(left / to_coarse):int(np.ceil(right / to_coarse))]
-    positive, _, _ = relative_readout(rgb, glass_colour(coarse, outline), outline_crop, um * factor)
+    positive, smoothed, levels = relative_readout(rgb, glass_colour(coarse, outline), outline_crop, um * factor)
+    steps = gradient_steps(relative_position(smoothed, positive != 2, levels))
 
     zoom = int(ZOOM_UM / 2 / (um * factor))
-    return positive[r - top - zoom:r - top + zoom, c - left - zoom:c - left + zoom], um * factor
+    return steps[r - top - zoom:r - top + zoom, c - left - zoom:c - left + zoom], um * factor
 
 
 def flattening(slides: Path, stem: str) -> flatten.Flattening:
@@ -152,8 +160,18 @@ def flattening(slides: Path, stem: str) -> flatten.Flattening:
     return flatten.load(path)
 
 
+def square(image: np.ndarray, tissue: np.ndarray, box: tuple[int, int, int, int], side: int) -> np.ndarray:
+    """The tissue inside box (top, left, height, width) centred on a white square of edge `side`."""
+    top, left, height, width = box
+    canvas = np.full((side, side, 3), 255, np.uint8)
+    shown = np.where(tissue[..., None], image, 255)[top:top + height, left:left + width]
+    row, col = (side - height) // 2, (side - width) // 2
+    canvas[row:row + height, col:col + width] = shown
+    return canvas
+
+
 def read_block(slides: Path, field_scores: Path, lumen_dir: Path, block: str, spot: tuple[int, int]) -> dict:
-    """The whole H&E thumbnail, the zooms in H&E and registered CYP2E1, and both segmentations."""
+    """Whole H&E and CYP2E1 thumbnails, the zooms in H&E and registered CYP2E1, necrosis and gradient."""
     lumen = read_lumen(lumen_dir / f"{block}_lumen.npz")
     if lumen is None:
         raise FileNotFoundError(f"no lumen file for {block} in {lumen_dir}")
@@ -173,31 +191,29 @@ def read_block(slides: Path, field_scores: Path, lumen_dir: Path, block: str, sp
     cyp_shown = nonrigid_levels(cyp_flat, he_shapes, registration, field, um)
 
     thumb_level = max(i for i, level in enumerate(he) if max(level.shape[:2]) >= THUMB_EDGE_PX)
-    tissue = mask_from_level(np.asarray(he[thumb_level]))
-    thumb = np.asarray(he_shown[thumb_level]).copy()
-    thumb[~tissue] = 255
+    he_tissue = mask_from_level(np.asarray(he[thumb_level]))
+    cyp_tissue = mask_from_level(np.asarray(warped[thumb_level]))
     thumb_factor = he[0].shape[1] / he[thumb_level].shape[1]
-    # cropped to the tissue and centred on a square, so every slide fills its panel
-    rows, cols = np.nonzero(tissue)
+    # both sections on one square in the H&E frame, cropped to their joint extent, so the thumbnails line up
+    rows, cols = np.nonzero(he_tissue | cyp_tissue)
     top, left = rows.min(), cols.min()
     height, width = rows.max() + 1 - top, cols.max() + 1 - left
     side = int(max(height, width) * THUMB_PAD)
     shift_r, shift_c = (side - height) // 2 - top, (side - width) // 2 - left
-    canvas = np.full((side, side, 3), 255, np.uint8)
-    canvas[shift_r + top:shift_r + top + height, shift_c + left:shift_c + left + width] = \
-        thumb[top:top + height, left:left + width]
+    box = (top, left, height, width)
 
     level = pick_level(he, um, ZOOM_UM_PER_PX)
     factor = he[0].shape[1] / he[level].shape[1]
     half = int(ZOOM_UM / 2 / (um * factor))
     r, c = int(spot[0] / factor), int(spot[1] / factor)
     window = np.s_[r - half:r + half, c - half:c + half]
-    segmentation, segmentation_um = cyp2e1_field(warped, he, um, spot)
+    steps, steps_um = cyp2e1_field(warped, he, um, spot)
     necrosis = necrosis_field(field_scores / f"{block}_field.json", he, level, (r - half, c - half), 2 * half)
     # vessel lumina are outside the tissue the necrotic area is measured on
     necrosis[lumen_field(lumen, (r - half, c - half), 2 * half, um * factor)] = 2
     return {
-        "thumb": canvas,
+        "he_thumb": square(np.asarray(he_shown[thumb_level]), he_tissue, box, side),
+        "cyp_thumb": square(np.asarray(cyp_shown[thumb_level]), cyp_tissue, box, side),
         "thumb_um_per_px": um * thumb_factor,
         "box": ((spot[1] - ZOOM_UM / 2 / um) / thumb_factor + shift_c,
                 (spot[0] - ZOOM_UM / 2 / um) / thumb_factor + shift_r,
@@ -205,8 +221,8 @@ def read_block(slides: Path, field_scores: Path, lumen_dir: Path, block: str, sp
         "he": np.asarray(he_shown[level][window]),
         "necrosis": necrosis,
         "cyp": np.asarray(cyp_shown[level][window].compute()),
-        "cyp_segmentation": segmentation,
-        "segmentation_um_per_px": segmentation_um,
+        "cyp_steps": steps,
+        "steps_um_per_px": steps_um,
         "zoom_um_per_px": um * factor,
     }
 
@@ -267,25 +283,33 @@ def overlay(ax, image: np.ndarray, mask: np.ndarray, colour: str) -> None:
     ax.set_ylim(h - 0.5, -0.5)
 
 
-def image_panel(ax, data: dict, row: int, style: str) -> None:
+def gradient_overlay(ax, image: np.ndarray, steps: np.ndarray, necrotic: np.ndarray) -> None:
+    """The CYP2E1 steps in gold and the necrotic call in cyan as see-through areas on a stain, as the viewer draws them."""
+    h, w = image.shape[:2]
+    extent = (-0.5, w - 0.5, h - 0.5, -0.5)
+    ax.imshow(image)
+    ax.imshow(STEP_RGBA[steps], extent=extent, interpolation="nearest")
+    call = np.zeros((*necrotic.shape, 4), np.float32)
+    call[necrotic] = (*CALL_RGB, CALL_OPACITY)
+    ax.imshow(call, extent=extent, interpolation="nearest")
+    ax.set_xlim(-0.5, w - 0.5)
+    ax.set_ylim(h - 0.5, -0.5)
+
+
+def image_panel(ax, data: dict, row: int) -> None:
     """One cell of the image grid; the model rows stay empty until simulations exist."""
-    if row == 0:
-        ax.imshow(data["thumb"])
+    if row in (0, 1):
+        ax.imshow(data["he_thumb" if row == 0 else "cyp_thumb"])
         x, y, size = data["box"]
         ax.add_patch(Rectangle((x, y), size, size, fill=False, edgecolor="black", lw=0.6))
-    elif row == 1:
-        ax.imshow(data["he"])
-    elif row == 2 and style == "overlay":
-        overlay(ax, data["he"], data["necrosis"] == 1, NECROSIS_OVERLAY)
     elif row == 2:
-        ax.imshow(data["necrosis"], cmap=NECROSIS_COLOURS, vmin=0, vmax=2, interpolation="nearest")
+        ax.imshow(data["he"])
     elif row == 3:
         ax.imshow(data["cyp"])
-    elif row == 4 and style == "overlay":
-        overlay(ax, data["cyp"], data["cyp_segmentation"] == 1, CYP2E1_OVERLAY)
     elif row == 4:
-        ax.imshow(data["cyp_segmentation"], cmap=CYP2E1_COLOURS, vmin=0, vmax=2,
-                  interpolation="nearest")
+        overlay(ax, data["he"], data["necrosis"] == 1, NECROSIS_OVERLAY)
+    elif row == 5:
+        gradient_overlay(ax, data["he"], data["cyp_steps"], data["necrosis"] == 1)
     else:
         ax.set_facecolor("#f2f2f2")
         ax.text(0.5, 0.5, "placeholder", ha="center", va="center",
@@ -296,47 +320,48 @@ def image_panel(ax, data: dict, row: int, style: str) -> None:
         spine.set_linewidth(0.4)
 
 
-def draw(blocks: dict, style: str, results: Path, lumen_dir: Path, out: Path) -> None:
-    """The whole figure in one style, panels placed in millimetres so the grid stays tight."""
+def draw(blocks: dict, results: Path, lumen_dir: Path, out: Path) -> None:
+    """The whole figure on one A4 page, panels placed in millimetres so the grid stays tight."""
     rows, columns = len(ROWS), len(blocks)
+    page_width, page_height = PAGE_MM
     fixed = TITLE_MM + (rows - 1) * GAP_MM + PLOT_GAP_MM + PLOT_MM + BOTTOM_MM
-    panel = (HEIGHT_MM - fixed) / rows
+    by_height = (page_height - 2 * MARGIN_MM - fixed) / rows
+    by_width = (page_width - 2 * MARGIN_MM - LABEL_MM - (columns - 1) * GAP_MM) / columns
+    panel = min(by_height, by_width)
     grid_width = columns * panel + (columns - 1) * GAP_MM
-    width = LABEL_MM + grid_width + RIGHT_MM
-    fig = plt.figure(figsize=(width * MM, HEIGHT_MM * MM))
+    # the grid and its labels centred across the page
+    origin = (page_width - LABEL_MM - grid_width) / 2 + LABEL_MM
+    fig = plt.figure(figsize=(page_width * MM, page_height * MM))
 
     def rect(left: float, top: float, w: float, h: float) -> list[float]:
-        """A rectangle in mm from the top-left corner, as figure fractions."""
-        return [left / width, (HEIGHT_MM - top - h) / HEIGHT_MM, w / width, h / HEIGHT_MM]
+        """A rectangle in mm from the page's top-left corner, as figure fractions."""
+        return [left / page_width, (page_height - top - h) / page_height, w / page_width, h / page_height]
 
     for col, (dose, data) in enumerate(blocks.items()):
-        left = LABEL_MM + col * (panel + GAP_MM)
-        fig.text((left + panel / 2) / width, (HEIGHT_MM - TITLE_MM + 1.5) / HEIGHT_MM,
+        left = origin + col * (panel + GAP_MM)
+        fig.text((left + panel / 2) / page_width, (page_height - MARGIN_MM - TITLE_MM + 1.5) / page_height,
                  f"{dose} mg/kg", ha="center", va="bottom", fontsize=7)
         for row, label in enumerate(ROWS):
-            ax = fig.add_axes(rect(left, TITLE_MM + row * (panel + GAP_MM), panel, panel))
-            image_panel(ax, data, row, style)
-            if row == 0:  # slides are scaled to fill their squares, so each needs its own bar
+            ax = fig.add_axes(rect(left, MARGIN_MM + TITLE_MM + row * (panel + GAP_MM), panel, panel))
+            image_panel(ax, data, row)
+            if row in (0, 1):  # slides are scaled to fill their squares, so each needs its own bar
                 scale_bar(ax, data["thumb_um_per_px"], 2000, "2 mm")
             if col == 0:
                 ax.set_ylabel(label, fontsize=7)
-                if row in (1, 2, 3):
+                if row in (2, 3, 4, 5):
                     scale_bar(ax, data["zoom_um_per_px"], 200, "200 µm")
-                elif row == 4:
-                    um_per_px = data["zoom_um_per_px" if style == "overlay" else "segmentation_um_per_px"]
-                    scale_bar(ax, um_per_px, 200, "200 µm")
 
-    plot_top = TITLE_MM + rows * panel + (rows - 1) * GAP_MM + PLOT_GAP_MM
-    area_panel(fig.add_axes(rect(LABEL_MM, plot_top, grid_width, PLOT_MM)), results, lumen_dir)
+    plot_top = MARGIN_MM + TITLE_MM + rows * panel + (rows - 1) * GAP_MM + PLOT_GAP_MM
+    area_panel(fig.add_axes(rect(origin, plot_top, grid_width, PLOT_MM)), results, lumen_dir)
 
     for suffix in ("png", "pdf"):
-        fig.savefig(out / f"necrosis_figure_{style}.{suffix}", dpi=400)
+        fig.savefig(out / f"necrosis_figure.{suffix}", dpi=400)
     plt.close(fig)
-    print(f"{style}: {width:.0f} x {HEIGHT_MM} mm, panels {panel:.1f} mm")
+    print(f"A4 {page_width:.0f} x {page_height:.0f} mm, grid {LABEL_MM + grid_width:.0f} mm wide, panels {panel:.1f} mm")
 
 
 def main() -> None:
-    """Read the six blocks once and draw the figure in both styles."""
+    """Read the six blocks once and draw the figure."""
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--slides", type=Path, required=True)
@@ -350,8 +375,7 @@ def main() -> None:
               for dose, (block, spot) in BLOCKS.items()}
 
     args.out.mkdir(parents=True, exist_ok=True)
-    for style in STYLES:
-        draw(blocks, style, args.results, args.lumen, args.out)
+    draw(blocks, args.results, args.lumen, args.out)
     print(f"written to {args.out}")
 
 
