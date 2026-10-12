@@ -24,6 +24,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from slideviz.analysis.dab import STEPS, gradient_steps
 from slideviz.analysis.flatten import flatten_levels
 from slideviz.analysis.flatten import load as load_flattening
 from slideviz.analysis.masked import to_rgba
@@ -78,10 +79,10 @@ NAME_SEPARATOR = " · "
 # what a prediction file is about, when it does not say; steatosis is the planned second
 DEFAULT_LABEL = "necrosis"
 
-# the DAB stains that carry a positive-share readout, keyed as the index writes them
+# the DAB stains that carry a gradient readout, keyed as the index writes them
 DAB_STAINS = ("cyp2e1", "cyp1a2")
 
-# stored positive-share map of a DAB slide, from scripts/cyp2e1_readout.py
+# stored gradient map of a DAB slide, from scripts/cyp2e1_readout.py
 READOUT_SUFFIX = "_readout.npz"
 
 # that run's per-slide numbers, beside the maps
@@ -94,8 +95,15 @@ LUMEN_RECORD = "necrosis_lumen.json"
 # the share of necrotic tissue that is DAB positive is shown from this much necrosis on, as reported
 NECROTIC_SHOWN_PCT = 5.0
 
-# transparent where no cell is positive, brown where all are, so it lies over any stain
-POSITIVE_COLOURS = Colormap([[0.55, 0.27, 0.07, 0.0], [0.55, 0.27, 0.07, 1.0]], name="dab positive")
+# gradient steps from pale to dark brown; clear outside the tissue
+PALE, BROWN = (0.925, 0.925, 0.957), (0.545, 0.271, 0.075)
+STEP_COLOURS = Colormap(
+    [[p + (b - p) * i / (STEPS - 1) for p, b in zip(PALE, BROWN, strict=True)] + [1.0] for i in range(STEPS)]
+    + [[0.0, 0.0, 0.0, 0.0]],
+    controls=[0.0] + [(i + 0.5) / STEPS for i in range(STEPS)] + [1.0],
+    interpolation="zero",
+    name="dab gradient",
+)
 
 # Filter label to the column it restricts
 FILTERS = {"Species": "species", "Stain": "stain", "Dose": "dose_mg_per_kg"}
@@ -427,7 +435,7 @@ class SlideList(QWidget):
         return self._lumen_areas
 
     def _readout_lines(self, slides: list) -> list[str]:
-        """Info lines with the CYP2E1-positive share of each DAB slide in the block."""
+        """Info lines with the positive share and gradient steps of each DAB slide in the block."""
         record = self._readout_record()
         measured = record.get("slides_measured", {})
         lines = []
@@ -436,13 +444,21 @@ class SlideList(QWidget):
             if row["stain"] not in DAB_STAINS or found is None:
                 continue
             stain = STAIN_NAMES.get(row["stain"], row["stain"].upper())
+            necrotic_shown = (found.get("positive_necrotic_pct") is not None
+                              and found.get("necrotic_pct", 0) >= NECROTIC_SHOWN_PCT)
             lines.append(f"<br><b>{stain} positive</b> (readout, {record.get('written', '')[:10]})")
             if found.get("positive_surviving_pct") is not None:
                 lines.append(f"{found['positive_surviving_pct']:.1f}% of surviving tissue")
-            if (found.get("positive_necrotic_pct") is not None
-                    and found.get("necrotic_pct", 0) >= NECROTIC_SHOWN_PCT):
+            if necrotic_shown:
                 lines.append(f"{found['positive_necrotic_pct']:.1f}% of necrotic tissue")
             lines.append(f"{found['positive_pct']:.1f}% of all tissue")
+            steps = [(found.get("steps_surviving_pct"), "surviving"),
+                     (found.get("steps_necrotic_pct") if necrotic_shown else None, "necrotic"),
+                     (found.get("steps_pct"), "all")]
+            if any(shares for shares, _ in steps):
+                lines.append(f"<b>{stain} gradient</b>, % in steps 0 (low) to {STEPS - 1} (high)")
+                lines.extend(f"{' · '.join(f'{v:.0f}' for v in shares)} of {what} tissue"
+                             for shares, what in steps if shares)
         return lines
 
     def _selected(self) -> tuple[str, str] | None:
@@ -621,7 +637,7 @@ class SlideList(QWidget):
         return len(layers)
 
     def _load_readouts(self, slides: list) -> int:
-        """Add the stored positive-share map of each DAB slide, on its H&E partner's grid."""
+        """Add the stored gradient map of each DAB slide, on its H&E partner's grid."""
         import numpy as np
 
         directory = settings.predictions_dir()
@@ -638,8 +654,8 @@ class SlideList(QWidget):
                 continue
             try:
                 with np.load(path) as stored:
-                    shares = np.nan_to_num(stored["positive_share"], nan=0.0)
-                    cell_um = float(stored["um_per_px"])
+                    steps = gradient_steps(stored["position"])
+                    pixel_um = float(stored["um_per_px"])
                     reference = str(stored["reference"])
             except (OSError, ValueError, KeyError) as exc:
                 log.exception("could not load readout %s", path)
@@ -650,15 +666,15 @@ class SlideList(QWidget):
                 log.warning("%s is on %s, not on this block's H&E", path.name, reference)
                 continue
             self.viewer.add_image(
-                shares,
+                steps,
                 name=layer_name(row["serial_block"].removeprefix(BLOCK_PREFIX),
-                                STAIN_NAMES.get(row["stain"], row["stain"].upper()), "positive"),
-                scale=(cell_um, cell_um),
-                translate=(cell_um / 2, cell_um / 2),  # napari centres pixels on their indices
+                                STAIN_NAMES.get(row["stain"], row["stain"].upper()), "gradient"),
+                scale=(pixel_um, pixel_um),
+                translate=(pixel_um / 2, pixel_um / 2),  # napari centres pixels on their indices
                 units="um",
-                colormap=POSITIVE_COLOURS,
-                contrast_limits=(0.0, 1.0),
-                interpolation2d="linear",
+                colormap=STEP_COLOURS,
+                contrast_limits=(0, STEPS),
+                interpolation2d="nearest",  # steps are classes, a blend between two would be a third
                 visible=False,
             )
             added += 1
