@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 
 import numpy as np
-from scipy.ndimage import map_coordinates
+from scipy.ndimage import gaussian_filter, map_coordinates
 
 log = logging.getLogger(__name__)
 
@@ -20,6 +20,8 @@ LUMEN_POOL = 2
 # the necrotic call as a see-through cyan area; over the gold CYP2E1 steps it mixes to green
 CALL_RGB = (0.0, 234 / 255, 248 / 255)
 CALL_OPACITY = 0.42
+# the call's tile corners rounded for display; the drawn area stays within 0.6 points of the counted one
+CALL_ROUND_UM = 20.0
 
 
 def tile_map(rows: list[dict], values: np.ndarray, fill: float = np.nan) -> np.ndarray:
@@ -101,7 +103,7 @@ def add_prediction_layers(
         maps["annotated"], _ = without_lumina(maps["annotated"], tile_um, *lumen)
         # nearest tile, so a pixel is necrotic when it lies in a called tile and mostly outside the lumina
         maps["predicted"], pixel_um = without_lumina(maps["predicted"], tile_um, *lumen, order=0)
-    call = (maps["predicted"] >= 0.5).astype(np.uint8)
+    call = (gaussian_filter(maps["predicted"], CALL_ROUND_UM / pixel_um) >= 0.5).astype(np.uint8)
     common = {
         "scale": (pixel_um, pixel_um),
         "translate": (pixel_um / 2, pixel_um / 2),  # napari centres pixels on their indices
