@@ -129,6 +129,13 @@ def _column(name: str) -> str:
     return name
 
 
+def block_title(row) -> str:
+    """A block as species, substance, dose and animal, e.g. mouse apap, 500 mg/kg, m1."""
+    dose = row["dose_mg_per_kg"]
+    # xxx where the dose is not known yet, matching the placeholder in the filename
+    return f"{row['species']} {row['substance']}, {dose if dose is not None else 'xxx'} mg/kg, {row['animal_id']}"
+
+
 def layer_name(animal: str, what: str, kind: str | None = None) -> str:
     """Return a layer name containing the animal, content, and optional kind."""
     parts = [animal, what] + ([kind] if kind else [])
@@ -357,11 +364,7 @@ class SlideList(QWidget):
             self.info.setText("")
             return
 
-        first = slides[0]
-        dose = first["dose_mg_per_kg"]
-        dose_text = dose if dose is not None else "xxx"
-        title = f"{first['species']} {first['substance']}, {dose_text} mg/kg, {first['animal_id']}"
-        lines = [f"<b>{title}</b>"]
+        lines = [f"<b>{block_title(slides[0])}</b>"]
         for row in slides:
             sidecar = self._sidecar(row)
             if sidecar is None:
@@ -534,7 +537,7 @@ class SlideList(QWidget):
             else:
                 try:
                     self._stain = read_stain_reference(path)
-                    log.info("stain reference: %d slides from %s", len(self._stain[1]), path)
+                    log.debug("stain reference: %d slides from %s", len(self._stain[1]), path)
                 except (OSError, ValueError, KeyError) as exc:
                     log.warning("unreadable stain reference %s: %s", path, exc)
                     self._stain = ()
@@ -713,6 +716,7 @@ class SlideList(QWidget):
             self._load_readouts(slides)
             if reference_um:
                 self._load_predictions(block, reference_um)
+            log.info("opened %s", block_title(slides[0]))
             if state["unaligned"]:
                 self.status.setText(f"{block}: overlaid, not registered: {', '.join(state['unaligned'])}")
 

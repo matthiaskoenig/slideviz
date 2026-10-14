@@ -132,5 +132,5 @@ def add_prediction_layers(
             **common,
         ),
     ]
-    log.info("%d tiles as %.1f um pixels%s", len(rows), pixel_um, ", lumina cut out" if lumen is not None else "")
+    log.debug("%d tiles as %.1f um pixels%s", len(rows), pixel_um, ", lumina cut out" if lumen is not None else "")
     return layers

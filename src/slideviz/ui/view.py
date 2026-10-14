@@ -26,6 +26,12 @@ from slideviz.settings import settings
 
 log = logging.getLogger(__name__)
 
+# computed slide pieces kept for panning back; napari's default is a quarter of the RAM
+DASK_CACHE_GB = 1.0
+# pieces each computing thread works on at once; a single shared pool deadlocks, as the warp
+# computes its source region from inside a piece
+DASK_WORKERS = 4
+
 
 def main() -> None:
     """Index the data directory, then open napari with the slide list docked."""
@@ -70,11 +76,16 @@ def main() -> None:
     # tiles are fetched off the UI thread, for this session only
     os.environ.setdefault("NAPARI_ASYNC", "1")
     with console.status("starting napari"):
+        import dask
         import napari  # imported here, pulling in Qt is slow
+        from napari.utils import resize_dask_cache
 
         from slideviz.ui.widget import SlideList
 
+        dask.config.set(num_workers=DASK_WORKERS)
         viewer = napari.Viewer(title="slideviz")
+        # after the viewer, which applies napari's own cache setting when it starts
+        resize_dask_cache(int(DASK_CACHE_GB * 1e9))
         # --no-reindex has no directory to scope by, so the list falls back to the whole index
         widget = SlideList(viewer, None if args.no_reindex else args.data)
         viewer.window.add_dock_widget(widget, name="Slides", area="right")
