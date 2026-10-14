@@ -31,6 +31,7 @@ from slideviz.analysis.masked import to_rgba
 from slideviz.analysis.prediction import add_prediction_layers, read_lumen, tile_um_of
 from slideviz.analysis.stain import normalise_levels
 from slideviz.analysis.stain_stats import read as read_stain_reference
+from slideviz.analysis.tissue import mask_from_level, pick_level
 from slideviz.analysis.warp import load_field, nonrigid_levels
 from slideviz.data.catalog import query, slide_path
 from slideviz.data.registration import napari_affine
@@ -562,8 +563,13 @@ class SlideList(QWidget):
             levels = pyramids[EVENED_LEVELS]
         if not self.hide_background.isChecked():
             return levels
+        import numpy as np
+
+        # the mask comes from the uncorrected pixels: evening out pales the stained edge, which Otsu then drops
+        source = pyramids[SOURCE_LEVELS]
+        mask = mask_from_level(np.asarray(source[pick_level(source)]))
         # stays lazy: an alpha chunk is built only for the level being drawn
-        return to_rgba(levels)
+        return to_rgba(levels, mask)
 
     def _apply_display(self) -> None:
         """Re-pick every open layer's pyramid, so the checkboxes act on what is already shown."""
@@ -587,7 +593,7 @@ class SlideList(QWidget):
         return None
 
     def _load_predictions(self, block: str, reference_um: float) -> int:
-        """Add annotated and predicted tile maps in the reference stain's frame."""
+        """Add the predicted necrotic area in the reference stain's frame."""
         path = self._prediction_file(block)
         if path is None:
             return 0
@@ -608,7 +614,6 @@ class SlideList(QWidget):
                 self.viewer,
                 path,
                 tile_um_of(path, level_um),
-                annotated_name=layer_name(animal, label, "annotated"),
                 predicted_name=layer_name(animal, label, "predicted"),
                 lumen=lumen,
             )

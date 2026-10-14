@@ -80,56 +80,41 @@ def add_prediction_layers(
     viewer,
     path: Path,
     tile_um: float,
-    annotated_name: str = "annotated",
     predicted_name: str = "predicted",
     visible: bool = False,
     lumen: tuple[np.ndarray, float] | None = None,
 ) -> list:
-    """Add the annotated tile map and the predicted necrotic area to an open viewer in micrometres.
+    """Add the predicted necrotic area to an open viewer in micrometres.
 
-    Maps use absolute tile row and column indices and the reference stain's frame;
-    with a lumen mask and its um/px, they are drawn finer with the lumina cut out.
-    The predicted area is the call at the file's nested cutoff, the area the readout counts.
+    The map uses absolute tile row and column indices and the reference stain's frame;
+    with a lumen mask and its um/px, it is drawn finer with the lumina cut out.
+    The area is the call at the file's nested cutoff, the area the readout counts.
     """
     from napari.utils.colormaps import Colormap
 
-    rows, predicted, annotated = read_predictions(path)
+    rows, predicted, _ = read_predictions(path)
     cutoff = json.loads(path.read_text())["cutoff"]
-    maps = {"annotated": tile_map(rows, annotated, fill=0.0),
-            "predicted": tile_map(rows, (predicted >= cutoff).astype(float), fill=0.0)}
+    grid = tile_map(rows, (predicted >= cutoff).astype(float), fill=0.0)
     # tiles are square and spaced by their own size, so one tile is one pixel at this scale
     pixel_um = tile_um
     if lumen is not None:
-        maps["annotated"], _ = without_lumina(maps["annotated"], tile_um, *lumen)
         # nearest tile, so a pixel is necrotic when it lies in a called tile and mostly outside the lumina
-        maps["predicted"], pixel_um = without_lumina(maps["predicted"], tile_um, *lumen, order=0)
-    call = (gaussian_filter(maps["predicted"], CALL_ROUND_UM / pixel_um) >= 0.5).astype(np.uint8)
-    common = {
-        "scale": (pixel_um, pixel_um),
-        "translate": (pixel_um / 2, pixel_um / 2),  # napari centres pixels on their indices
-        "units": "um",
-        "contrast_limits": (0.0, 1.0),
-        "visible": visible,
-    }
+        grid, pixel_um = without_lumina(grid, tile_um, *lumen, order=0)
+    call = (gaussian_filter(grid, CALL_ROUND_UM / pixel_um) >= 0.5).astype(np.uint8)
     layers = [
-        viewer.add_image(
-            maps["annotated"],
-            name=annotated_name,
-            colormap="green",
-            opacity=0.5,
-            blending="additive",
-            interpolation2d="linear",
-            **common,
-        ),
         viewer.add_image(
             call,
             name=predicted_name,
+            scale=(pixel_um, pixel_um),
+            translate=(pixel_um / 2, pixel_um / 2),  # napari centres pixels on their indices
+            units="um",
             colormap=Colormap([[0.0, 0.0, 0.0, 0.0], [*CALL_RGB, 1.0]], controls=[0.0, 0.5, 1.0],
                               interpolation="zero", name="necrotic call"),
+            contrast_limits=(0.0, 1.0),
             opacity=CALL_OPACITY,
             blending="translucent_no_depth",
             interpolation2d="nearest",  # a yes/no map, a blend between the two would be a third value
-            **common,
+            visible=visible,
         ),
     ]
     log.debug("%d tiles as %.1f um pixels%s", len(rows), pixel_um, ", lumina cut out" if lumen is not None else "")
