@@ -14,7 +14,6 @@ import argparse
 import json
 from pathlib import Path
 
-import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Rectangle
@@ -56,8 +55,6 @@ THUMB_PAD = 1.04  # each slide fills its square up to this thin white border
 
 ROWS = ("H&E", "CYP2E1", "H&E", "CYP2E1", "Necrosis\nsegmentation", "CYP2E1\ngradient,\nnecrosis",
         "Model\nCYP2E1", "Model\nnecrosis")
-NECROSIS_OVERLAY = "#c0392b"
-OVERLAY_ALPHA = 0.4
 # the gradient steps' colours (analysis/dab.py) per step value, step 0 and no tissue clear
 STEP_RGBA = np.array([(0.0, 0.0, 0.0, 0.0)]
                      + [(*(c / 255 for c in rgb), alpha * STEP_OPACITY)
@@ -331,27 +328,13 @@ def key_panel(ax, base: np.ndarray) -> None:
         x += 0.008 + 0.0075 * len(label) + 0.03
 
 
-def overlay(ax, image: np.ndarray, mask: np.ndarray, colour: str) -> None:
-    """A stain with a translucent fill and an outline where `mask` is set, stretched to the image."""
+def area_overlay(ax, image: np.ndarray, necrotic: np.ndarray, steps: np.ndarray | None = None) -> None:
+    """See-through areas on a stain as the viewer draws them: CYP2E1 steps in gold when given, the necrotic call in cyan on top."""
     h, w = image.shape[:2]
     extent = (-0.5, w - 0.5, h - 0.5, -0.5)
     ax.imshow(image)
-    fill = np.zeros((*mask.shape, 4), np.float32)
-    fill[mask] = (*matplotlib.colors.to_rgb(colour), OVERLAY_ALPHA)
-    ax.imshow(fill, extent=extent, interpolation="nearest")
-    ys = np.linspace(0, h - 1, mask.shape[0])
-    xs = np.linspace(0, w - 1, mask.shape[1])
-    ax.contour(xs, ys, mask.astype(float), levels=[0.5], colors=colour, linewidths=0.5)
-    ax.set_xlim(-0.5, w - 0.5)
-    ax.set_ylim(h - 0.5, -0.5)
-
-
-def gradient_overlay(ax, image: np.ndarray, steps: np.ndarray, necrotic: np.ndarray) -> None:
-    """The CYP2E1 steps in gold and the necrotic call in cyan as see-through areas on a stain, as the viewer draws them."""
-    h, w = image.shape[:2]
-    extent = (-0.5, w - 0.5, h - 0.5, -0.5)
-    ax.imshow(image)
-    ax.imshow(STEP_RGBA[steps], extent=extent, interpolation="nearest")
+    if steps is not None:
+        ax.imshow(STEP_RGBA[steps], extent=extent, interpolation="nearest")
     call = np.zeros((*necrotic.shape, 4), np.float32)
     call[necrotic] = (*CALL_RGB, CALL_OPACITY)
     ax.imshow(call, extent=extent, interpolation="nearest")
@@ -370,9 +353,9 @@ def image_panel(ax, data: dict, row: int) -> None:
     elif row == 3:
         ax.imshow(data["cyp"])
     elif row == 4:
-        overlay(ax, data["he"], data["necrosis"] == 1, NECROSIS_OVERLAY)
+        area_overlay(ax, data["he"], data["necrosis"] == 1)
     elif row == 5:
-        gradient_overlay(ax, data["he"], data["cyp_steps"], data["necrosis"] == 1)
+        area_overlay(ax, data["he"], data["necrosis"] == 1, data["cyp_steps"])
     else:
         ax.set_facecolor("#f2f2f2")
         ax.text(0.5, 0.5, "placeholder", ha="center", va="center",
