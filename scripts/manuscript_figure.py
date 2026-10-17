@@ -22,6 +22,9 @@ from scipy.ndimage import map_coordinates
 
 from slideviz.analysis import flatten
 from slideviz.analysis.dab import (
+    STEP_ALPHA,
+    STEP_OPACITY,
+    STEP_RGB,
     glass_colour,
     gradient_steps,
     relative_position,
@@ -55,11 +58,7 @@ ROWS = ("H&E", "CYP2E1", "H&E", "CYP2E1", "Necrosis\nsegmentation", "CYP2E1\ngra
         "Model\nCYP2E1", "Model\nnecrosis")
 NECROSIS_OVERLAY = "#c0392b"
 OVERLAY_ALPHA = 0.4
-# the viewer's CYP2E1 gradient (STEP_RGB, STEP_ALPHA, STEP_OPACITY in ui/widget.py): steps 1 to 4 olive
-# to gold, step 0 and no tissue clear
-STEP_RGB = ((200, 196, 72), (218, 213, 48), (237, 229, 24), (255, 246, 0))
-STEP_ALPHA = (0.56, 0.74, 0.87, 1.0)
-STEP_OPACITY = 0.5
+# the gradient steps' colours (analysis/dab.py) per step value, step 0 and no tissue clear
 STEP_RGBA = np.array([(0.0, 0.0, 0.0, 0.0)]
                      + [(*(c / 255 for c in rgb), alpha * STEP_OPACITY)
                         for rgb, alpha in zip(STEP_RGB, STEP_ALPHA, strict=True)]

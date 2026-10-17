@@ -54,6 +54,13 @@ STEPS = 5  # equal steps of the position
 POSITION_SCALE = 250  # stored units for the whole low-to-high range
 NO_TISSUE = 255  # stored position outside the tissue
 
+# How the viewer and the figure draw the steps: 1 to 4 from olive to gold, rising in strength; step 0 and
+# outside the tissue clear. Gold stays gold over pink H&E, where brown turns brick red, and under the cyan
+# necrosis it mixes to green.
+STEP_RGB = ((200, 196, 72), (218, 213, 48), (237, 229, 24), (255, 246, 0))
+STEP_ALPHA = (0.56, 0.74, 0.87, 1.0)  # times STEP_OPACITY, so at most half covers the slide
+STEP_OPACITY = 0.5
+
 
 def glass_like(od: np.ndarray) -> np.ndarray:
     """Pixels whose total optical density is close to the glass."""

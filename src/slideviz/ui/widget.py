@@ -24,7 +24,13 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from slideviz.analysis.dab import STEPS, gradient_steps
+from slideviz.analysis.dab import (
+    STEP_ALPHA,
+    STEP_OPACITY,
+    STEP_RGB,
+    STEPS,
+    gradient_steps,
+)
 from slideviz.analysis.flatten import flatten_levels
 from slideviz.analysis.flatten import load as load_flattening
 from slideviz.analysis.masked import to_rgba
@@ -96,11 +102,7 @@ LUMEN_RECORD = "necrosis_lumen.json"
 # the share of necrotic tissue that is DAB positive is shown from this much necrosis on, as reported
 NECROTIC_SHOWN_PCT = 5.0
 
-# gradient steps 1 to 4 from olive to gold, rising in strength; step 0 and outside the tissue clear.
-# Gold stays gold over pink H&E, where brown turns brick red, and under the cyan necrosis it mixes to green.
-STEP_RGB = ((200, 196, 72), (218, 213, 48), (237, 229, 24), (255, 246, 0))
-STEP_ALPHA = (0.56, 0.74, 0.87, 1.0)  # times STEP_OPACITY, so at most half covers the slide
-STEP_OPACITY = 0.5
+# the gradient steps' colours (analysis/dab.py) as a napari colormap, one colour per step
 STEP_COLOURS = Colormap(
     [[0.0, 0.0, 0.0, 0.0]]
     + [[c / 255 for c in rgb] + [alpha] for rgb, alpha in zip(STEP_RGB, STEP_ALPHA, strict=True)]
