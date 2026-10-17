@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Rectangle
 from scipy.ndimage import map_coordinates
+from skimage.color import lab2rgb, rgb2lab
 
 from slideviz.analysis import flatten
 from slideviz.analysis.dab import (
@@ -80,6 +81,8 @@ BOTTOM_MM = 10.0
 DATA_HOURS = 24
 TIME_MAX_H = 48
 DOSE_SPREAD_H = 0.7  # markers per dose spread around the time point so error bars stay apart
+# doses light to dark in teal, the necrosis hue; the lightest is 2.3:1 against white
+DOSE_LIGHT, DOSE_DARK = (64, 186, 204), (6, 62, 76)
 
 
 def pick_level(levels, level0_um: float, target_um: float) -> int:
@@ -256,9 +259,10 @@ def necrotic_areas(results: Path, lumen_dir: Path) -> dict[int, list[tuple[str, 
 
 
 def dose_colours(doses: list[int]) -> dict[int, tuple]:
-    """One red per dose, light to dark, so the model curves can take the same colours."""
-    reds = plt.get_cmap("Reds")
-    return {dose: reds(0.3 + 0.7 * k / max(1, len(doses) - 1)) for k, dose in enumerate(doses)}
+    """One teal per dose, light to dark and evenly spaced in CIELAB, so the model curves can take the same colours."""
+    light, dark = (rgb2lab(np.array([[rgb]]) / 255)[0, 0] for rgb in (DOSE_LIGHT, DOSE_DARK))
+    return {dose: tuple(np.clip(lab2rgb(((1 - t) * light + t * dark)[None, None])[0, 0], 0, 1))
+            for dose, t in zip(doses, np.linspace(0, 1, len(doses)), strict=True)}
 
 
 def area_panel(ax, by_dose: dict, top: float) -> None:
