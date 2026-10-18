@@ -23,7 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
-from manuscript_figure import necrosis_field
+from manuscript_figure import field_score
 from matplotlib import font_manager
 from PIL import Image, ImageDraw, ImageFont
 from scipy.ndimage import uniform_filter
@@ -34,6 +34,7 @@ from slideviz.analysis.annotation import (
     read_overview,
     to_level,
 )
+from slideviz.analysis.edge_snap import guided_filter
 from slideviz.analysis.prediction import CALL_OPACITY, CALL_RGB, read_lumen
 from slideviz.analysis.tissue import mask_from_level, pick_level
 from slideviz.io.reader import open_slide
@@ -43,6 +44,10 @@ PAGE = (1754, 1240)  # A4 landscape at 150 dpi
 MARGIN = 40
 FLIP_PX = 1100  # edge of each flip-page image
 
+# edge snapping for E and F, chosen by eye on three fields (18 Oct): 8 and 16 um looked alike, 8 keeps more detail
+SNAP_UM = 8.0
+SNAP_EPS = 0.01
+
 # pick_fields.py's reasons, short enough for the table
 CHOSEN_BY = {"manuscript figure zoom": "figure zoom", "most necrosis edge": "most edge",
              "no necrosis edge, nearest the tissue centre": "tissue centre"}
@@ -51,6 +56,8 @@ METHODS = {
     "A": "today: one call per 75 um tile, on the tile grid",
     "B": "75 um tiles every 15 um, one call per tile",
     "D": "75 um tiles every 15 um, one call per 2.7 um patch, averaged over the tiles that see it",
+    "E": f"D's score snapped to the H&E's edges (guided filter, {SNAP_UM:.0f} um window)",
+    "F": f"B's score snapped to the H&E's edges (guided filter, {SNAP_UM:.0f} um window)",
 }
 
 
@@ -86,8 +93,8 @@ def tile_calls(prediction: dict, top: int, left: int, size: int) -> np.ndarray:
     return called[np.ix_(rows.clip(0, shape[0] - 1), cols.clip(0, shape[1] - 1))] & inside
 
 
-def patch_calls(path: Path, top: int, left: int, size: int) -> tuple[np.ndarray, dict]:
-    """The per-patch map's call per pixel (mean score at the head's cutoff), and the map's record."""
+def patch_score(path: Path, top: int, left: int, size: int) -> tuple[np.ndarray, dict]:
+    """The per-patch map's mean score per pixel over a square, 0 where no tile covered it, and the map's record."""
     stored = np.load(path)
     meta = json.loads(str(stored["meta"]))
     origin = meta["origin_level_rc"]
@@ -98,7 +105,7 @@ def patch_calls(path: Path, top: int, left: int, size: int) -> tuple[np.ndarray,
     y0, x0, y1, x1 = max(0, y), max(0, x), min(mean.shape[0], y + size), min(mean.shape[1], x + size)
     if y1 > y0 and x1 > x0:
         window[y0 - y:y1 - y, x0 - x:x1 - x] = mean[y0:y1, x0:x1]
-    return np.nan_to_num(window, nan=0.0) >= meta["cutoff"], meta
+    return np.nan_to_num(window, nan=0.0), meta
 
 
 def overlap_score(truth: np.ndarray, called: np.ndarray) -> tuple[float | None, float | None]:
@@ -310,7 +317,16 @@ def main() -> None:
                     for p in export.get(f"{field['slide']}_s0.png", {"polygons": []})["polygons"]]
         drawn = (rasterise(polygons, (size, size)) if polygons else np.zeros((size, size), bool)) & tissue
 
-        d_call, d_meta = patch_calls(args.patches / f"{animal}_patch_field.npz", top, left, size)
+        # the scores over the field and a margin, so the edge snapping sees past the field's border
+        pad = 2 * (radius := round(SNAP_UM / um))
+        if top < pad or left < pad or top + size + pad > shape[0] or left + size + pad > shape[1]:
+            raise SystemExit(f"{animal}: the field lies within {pad} px of the slide's edge")
+        inner = np.s_[pad:pad + size, pad:pad + size]
+        guide = np.asarray(levels[level][top - pad:top + size + pad, left - pad:left + size + pad])[..., :3] / 255
+        d_score, d_meta = patch_score(args.patches / f"{animal}_patch_field.npz", top - pad, left - pad, size + 2 * pad)
+        b_score, b_weight, b_cutoff = field_score(args.overlap / f"{animal}_field.json", levels, level,
+                                                  (top - pad, left - pad), size + 2 * pad)
+        b_score = np.where(b_weight >= 0.5, b_score, 0.0)  # no call where too few tissue tiles stand behind it
         overlap = json.loads((args.overlap / f"{animal}_field.json").read_text())
         if d_meta["level"] != level:
             raise SystemExit(f"{animal}: the per-patch map is on level {d_meta['level']}, the tiles on {level}")
@@ -319,8 +335,10 @@ def main() -> None:
                 raise SystemExit(f"{animal}: {name} was made for another field than --fields gives")
         calls = {
             "A": tile_calls(prediction, top, left, size),
-            "B": necrosis_field(args.overlap / f"{animal}_field.json", levels, level, (top, left), size) == 1,
-            "D": d_call,
+            "B": (b_score >= b_cutoff)[inner],
+            "D": (d_score >= d_meta["cutoff"])[inner],
+            "E": (guided_filter(guide, d_score, radius, SNAP_EPS) >= d_meta["cutoff"])[inner],
+            "F": (guided_filter(guide, b_score, radius, SNAP_EPS) >= b_cutoff)[inner],
         }
         calls = {code: call & tissue for code, call in calls.items()}
 
@@ -356,7 +374,8 @@ def main() -> None:
                      "dsc": {c: s[0] for c, s in scores.items()}, "iou": {c: s[1] for c, s in scores.items()},
                      "tissue_px": int(tissue.sum()), "zoom_level0_top_left_size": [z_top, z_left, z_size],
                      "zoom_where_maps_differ": differ,
-                     "cutoffs": {"A": prediction["cutoff"], "B": overlap["cutoff"], "D": d_meta["cutoff"]},
+                     "cutoffs": {"A": prediction["cutoff"], "B": b_cutoff, "D": d_meta["cutoff"],
+                                 "E": d_meta["cutoff"], "F": b_cutoff},
                      "inputs_written": {"A": prediction["written"], "B": overlap["written"],
                                         "D": d_meta.get("written"), "D_code": d_meta.get("code")}})
         print(f"{animal}: drawn {area['drawn']:.1%}, " + ", ".join(f"{c} {area[c]:.1%}" for c in calls), flush=True)
@@ -371,6 +390,10 @@ def main() -> None:
         "zoom_rule": (f"the {ZOOM_UM:.0f} um window holding the most tissue pixels the methods call differently, "
                       "of equal ones the nearest to those pixels' middle; the field centre where all agree"),
         "geometry": "levels mapped by their power-of-two factors, coarse pixel q centred on level pixel factor * q",
+        "edge_snap": {"filter": "colour guided filter (He, Sun, Tang 2013), slideviz.analysis.edge_snap",
+                      "guide": "the H&E's RGB at the tiles' level, 0 to 1", "radius_um": SNAP_UM, "eps": SNAP_EPS,
+                      "applied_to": "E: D's mean score; F: B's blended score; each at its own cutoff",
+                      "margin": "computed over the field plus twice the radius, then cut to the field"},
         "metric_caveat": "DSC and IoU against polygons that stop short of the necrosis edge, for information only",
         "mean_over_drawn_fields": {
             "n": len(drawn_rows),

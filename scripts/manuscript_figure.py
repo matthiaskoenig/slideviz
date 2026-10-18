@@ -108,6 +108,13 @@ def necrosis_field(scores: Path, he: list, level: int, top_left: tuple[int, int]
     Scores come from overlapping tiles (ml/predict_field.py); each pixel blends the four
     nearest tile centres, counting only those with tissue.
     """
+    blended, weight, cutoff = field_score(scores, he, level, top_left, size)
+    necrotic = (blended >= cutoff).astype(np.uint8)
+    return np.where(weight >= 0.5, necrotic, 2)
+
+
+def field_score(scores: Path, he: list, level: int, top_left: tuple[int, int], size: int) -> tuple:
+    """The blended held-out score over a square field, the share of tissue tiles behind it, and the cutoff."""
     record = json.loads(scores.read_text())
     field = record["field"]
     probability = np.zeros(field["grid_shape"], np.float32)
@@ -123,8 +130,7 @@ def necrosis_field(scores: Path, he: list, level: int, top_left: tuple[int, int]
     grid = np.meshgrid(rows, cols, indexing="ij")
     weight = map_coordinates(present, grid, order=1, mode="nearest")
     blended = map_coordinates(probability * present, grid, order=1, mode="nearest") / np.maximum(weight, 1e-6)
-    necrotic = (blended >= record["cutoff"]).astype(np.uint8)
-    return np.where(weight >= 0.5, necrotic, 2)
+    return blended, weight, record["cutoff"]
 
 
 def lumen_field(lumen: tuple[np.ndarray, float], top_left: tuple[int, int], size: int, zoom_um: float) -> np.ndarray:
