@@ -21,7 +21,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from slideviz.data.schema import COLUMNS, Slide, create_table_sql
+from slideviz.data.schema import COLUMNS, DERIVED, REQUIRED, Slide, create_table_sql
 from slideviz.log import setup
 from slideviz.settings import settings
 
@@ -87,9 +87,10 @@ def read_sidecars(directory: Path,
 
 
 def _drop_if_stale(conn: sqlite3.Connection) -> None:
-    """Drop the table when its columns no longer match COLUMNS."""
-    existing = [r[1] for r in conn.execute("PRAGMA table_info(slides)")]
-    if existing and existing != COLUMNS:
+    """Drop the table when its columns or their NOT NULL marks no longer match the model."""
+    existing = [(r[1], bool(r[3])) for r in conn.execute("PRAGMA table_info(slides)")]
+    expected = [(name, name in REQUIRED or name in DERIVED) for name in COLUMNS]
+    if existing and existing != expected:
         conn.execute("DROP TABLE slides")
 
 
@@ -198,10 +199,11 @@ def main() -> None:
     for row in query(SUMMARY_SQL, db_path=db):
         # scene count only where it differs, so single-scene groups read as before
         scenes = "" if row["n_scenes"] == row["n"] else f"  ({row['n_scenes']} scenes)"
-        # xxx where the dose is not known yet, matching the placeholder in the filename
+        # substance and dose are left out for slides that carry none
         dose = row["dose_mg_per_kg"]
-        log.info("  %s %s %3s mg/kg %-7s %d%s", row["species"], row["substance"],
-                 dose if dose is not None else "xxx", row["stain"], row["n"], scenes)
+        dose_text = f"{dose:>3} mg/kg" if dose is not None else ""
+        log.info("  %s %s %s %-7s %d%s", row["species"], row["substance"] or "", dose_text,
+                 row["stain"], row["n"], scenes)
 
 
 if __name__ == "__main__":

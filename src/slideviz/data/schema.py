@@ -114,8 +114,8 @@ class Slide(BaseModel):
 
     file: Name
     species: Species
-    substance: Name
-    dose_mg_per_kg: int | None = Field(default=None, ge=0)  # the rat filenames carry no dose
+    substance: Name | None = None  # the treatment, e.g. apap; rat slides carry none
+    dose_mg_per_kg: int | None = Field(default=None, ge=0)  # rat slides carry none
     animal_id: Name
     stain: Stain
     modality: Modality

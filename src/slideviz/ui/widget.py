@@ -133,10 +133,10 @@ def _column(name: str) -> str:
 
 
 def block_title(row) -> str:
-    """A block as species, substance, dose and animal, e.g. mouse apap, 500 mg/kg, m1."""
+    """A block as species, substance, dose and animal, e.g. mouse apap, 500 mg/kg, m1; rat, mdo26 without the two."""
     dose = row["dose_mg_per_kg"]
-    # xxx where the dose is not known yet, matching the placeholder in the filename
-    return f"{row['species']} {row['substance']}, {dose if dose is not None else 'xxx'} mg/kg, {row['animal_id']}"
+    head = " ".join(part for part in (row["species"], row["substance"]) if part)
+    return ", ".join([head, *([f"{dose} mg/kg"] if dose is not None else []), row["animal_id"]])
 
 
 def layer_name(animal: str, what: str, kind: str | None = None) -> str:
@@ -346,14 +346,10 @@ class SlideList(QWidget):
 
     @staticmethod
     def _label(row) -> str:
-        """One list entry per block: species, substance, dose and animal."""
+        """One list entry per block: species, substance, dose and animal, blank where a slide carries none."""
         dose = row["dose_mg_per_kg"]
-        return (
-            f"{row['species']:<6} {row['substance']} "  # species first
-            # xxx where the dose is not known yet, matching the placeholder in the filename
-            f"{dose if dose is not None else 'xxx':>3} mg/kg  "
-            f"{row['animal_id']}"
-        )
+        dose_text = f"{dose:>3} mg/kg" if dose is not None else ""
+        return f"{row['species']:<6} {row['substance'] or ''} {dose_text}  {row['animal_id']}"
 
     def _show_info(self) -> None:
         """Fill the info panel with what the sidecars and predictions hold for a block."""
