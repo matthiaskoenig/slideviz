@@ -71,11 +71,15 @@ def main() -> None:
     if not field_meta.get("patches") or field_meta["patches"]["grid"] != heads["grid"].tolist():
         raise SystemExit(f"{args.field_cache} holds no patch descriptions on the heads' grid")
     train_meta = json.loads((args.embeddings / "embeddings_meta.json").read_text())
-    if (field_meta["model"], field_meta["input_px"], field_meta["transform"]) != (
-            str(heads["encoder"]), train_meta["input_px"], train_meta["transform"]):
-        raise SystemExit("the field descriptions come from another encoder or input size than the heads'")
+    same = ("input_px", "transform", "normalize", "stain_matched", "stain_reference")
+    if field_meta["model"] != str(heads["encoder"]) or any(field_meta.get(k) != train_meta.get(k) for k in same):
+        raise SystemExit("the field descriptions were made differently from the training ones: encoder, "
+                         "input size, transform, normalisation or stain matching")
     if (args.field_cache / "tiles.txt").read_text().split() != [r["tile"] for r in rows]:
         raise SystemExit("the field cache does not follow the field manifest's tile order")
+    # tile names carry grid positions, not places, so only the export's stamp ties the cache to these tiles
+    if field_meta.get("source_manifest_written") != manifest["written"]:
+        raise SystemExit("the field cache was embedded from another export of the field tiles")
     if {(r["level"], r["size_px"]) for r in rows} - trained_on:
         raise SystemExit(f"field tiles are not cut like the training tiles {sorted(trained_on)}")
     grid = field_meta["patches"]["grid"][0]
@@ -91,6 +95,8 @@ def main() -> None:
     for animal in manifest["fields"]:
         k = names.index(animal)
         part = np.flatnonzero(train_animals == animal)[:CHUNK]
+        if not part.size:
+            raise SystemExit(f"{args.embeddings} holds no training tiles of {animal} to check its head on")
         again = score(train_patches, part, heads, k).astype(stored.dtype)
         differ = int((again != stored[part]).sum())
         if differ:
@@ -99,12 +105,27 @@ def main() -> None:
         checks[animal] = {"tiles": int(part.size), "patches_different": differ}
     print(f"=== {len(checks)} heads reproduce their stored scores bit for bit ===", flush=True)
 
+    inputs = {
+        "heads": str(args.heads),
+        "heads_code": str(heads["code"]),
+        "heads_written": results["written"],
+        "embeddings": str(args.embeddings),
+        "embeddings_written": train_meta["written"],
+        "field_tiles": str(args.field_tiles),
+        "field_tiles_written": manifest["written"],
+        "field_cache": str(args.field_cache),
+        "field_cache_written": field_meta["written"],
+    }
+    run_stamp = {"written": datetime.now(UTC).isoformat(timespec="seconds"), "code": code_version()}
+
     args.out.mkdir(parents=True, exist_ok=True)
     fields = {}
     for animal, geometry in manifest["fields"].items():
         k = names.index(animal)
         cutoff = float(heads["cutoff"][k])
         own = np.flatnonzero(field_animals == animal)
+        if len(own) != geometry["n_tiles"]:
+            raise SystemExit(f"{animal}: {len(own)} tiles in the manifest against the field's {geometry['n_tiles']}")
         size = rows[own[0]]["size_px"]
         top, left = min(rows[i]["y"] for i in own), min(rows[i]["x"] for i in own)
         shape = (max(rows[i]["y"] for i in own) + size - top, max(rows[i]["x"] for i in own) + size - left)
@@ -122,52 +143,50 @@ def main() -> None:
                 count[window] += 1
 
         seen = count > 0
-        mean = np.where(seen, total / np.maximum(count, 1), np.nan).astype(np.float16)
-        vote_share = np.where(seen, votes / np.maximum(count, 1), np.nan).astype(np.float16)
+        mean = np.where(seen, total / np.maximum(count, 1), np.nan).astype(np.float32)
+        vote_share = np.where(seen, votes / np.maximum(count, 1), np.nan).astype(np.float32)
+
+        # the field itself, from the first tile centre to the last; the map reaches half a tile beyond it
+        first = np.round(np.array(geometry["first_centre"]) - [top, left]).astype(int)
+        span = (geometry["grid_shape"][0] - 1) * geometry["stride_px"]
+        inside = np.s_[first[0]:first[0] + span, first[1]:first[1] + span]
+        counted = seen[inside]
         record = {
             "animal": animal,
             "slide": geometry["slide"],
             "head": f"heads.npz index {k}, fitted without {animal}",
             "cutoff": cutoff,
             "field": geometry,
-            "origin_level_px": [int(top), int(left)],
+            "origin_level_rc": [int(top), int(left)],
+            "field_box_in_map_rc": [int(first[0]), int(first[1]), int(span)],
             "level": int(rows[own[0]]["level"]),
             "um_per_px": geometry["um_per_px"],
             "n_tiles": len(own),
             "tiles_per_pixel": {"min_seen": int(count[seen].min()), "max": int(count.max())},
-            "called_share_mean": round(float((mean[seen] >= cutoff).mean()), 4),
-            "called_share_vote": round(float((vote_share[seen] >= 0.5).mean()), 4),
+            "called_share_mean": round(float((mean[inside][counted] >= cutoff).mean()), 4),
+            "called_share_vote": round(float((2 * votes[inside][counted] > count[inside][counted]).mean()), 4),
         }
-        np.savez_compressed(args.out / f"{animal}_patch_field.npz", mean=mean, vote_share=vote_share,
-                            count=count.astype(np.uint8), meta=json.dumps(record))
+        np.savez_compressed(args.out / f"{animal}_patch_field.npz", mean=mean, vote_share=vote_share, count=count,
+                            meta=json.dumps({**record, **run_stamp, "inputs": inputs}))
         fields[animal] = record
         print(f"{animal}: {len(own):,} tiles, {shape[0]} x {shape[1]} px, up to {record['tiles_per_pixel']['max']} "
               f"tiles a pixel, called {record['called_share_mean']:.1%} by the mean, "
               f"{record['called_share_vote']:.1%} by the vote", flush=True)
 
     run = {
-        "written": datetime.now(UTC).isoformat(timespec="seconds"),
-        "code": code_version(),
+        **run_stamp,
         "map": ("per level-1 pixel, the mean of the patch scores of every field tile covering it, each tile scored "
                 "by the head fitted without its animal; vote_share is the share of those tiles whose patch score "
                 "reaches the head's cutoff"),
         "cutoff_note": ("the cutoff was chosen on single tiles of the training grid; called_share_mean applies it to "
-                        "the mean, called_share_vote takes a majority of single-tile calls; for information, "
-                        "over every covered pixel, glass and lumina included"),
-        "files": {"<animal>_patch_field.npz": ("mean and vote_share (float16, NaN where no tile covers), count "
-                                               "(tiles per pixel), meta (this record's field entry)")},
+                        "the mean, called_share_vote a strict majority of single-tile calls (vote_share > 0.5); for "
+                        "information, over the field's covered pixels, glass and lumina included"),
+        "files": {"<animal>_patch_field.npz": ("mean and vote_share (float32, NaN where no tile covers), count "
+                                               "(tiles per pixel), meta (this record's field entry, the run's "
+                                               "stamp and inputs)")},
         "checks": checks,
         "fields": fields,
-        "inputs": {
-            "heads": str(args.heads),
-            "heads_code": str(heads["code"]),
-            "heads_written": results["written"],
-            "embeddings": str(args.embeddings),
-            "field_tiles": str(args.field_tiles),
-            "field_tiles_written": manifest["written"],
-            "field_cache": str(args.field_cache),
-            "field_cache_written": field_meta["written"],
-        },
+        "inputs": inputs,
     }
     (args.out / "patch_fields.json").write_text(json.dumps(run, indent=1) + "\n")
     print(f"=== {len(fields)} fields written to {args.out} ===")
