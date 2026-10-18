@@ -3,7 +3,8 @@
     uv run python embed_tiles.py --tiles /data/michelle/mouse/tiles \
         --out /data/michelle/mouse/embeddings
 
-Use --stain-reference to colour-match tiles before encoding.
+Use --stain-reference to colour-match tiles before encoding, and --patches to also keep
+the encoder's description of every patch in a tile, for a necrosis map finer than the tile.
 """
 
 from __future__ import annotations
@@ -29,6 +30,8 @@ MODEL = "hf-hub:1aurent/vit_small_patch8_224.lunit_dino"
 INPUT_PX = 224
 
 DTYPE = torch.float32
+# half precision halves the patch file, about 75 GB for the 124k training tiles
+PATCH_DTYPE = np.float16
 BATCH = 256
 WORKERS = 16
 
@@ -85,6 +88,8 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=WORKERS)
     parser.add_argument("--stain-reference", type=Path,
                        help="stain reference JSON from stain_stats.py; omit to embed raw tiles")
+    parser.add_argument("--patches", action="store_true",
+                       help="also write patches.npy, the last layer's description of every patch")
     args = parser.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -98,6 +103,16 @@ def main() -> None:
     parameters = sum(p.numel() for p in encoder.parameters())
     print(f"  {parameters:,} parameters, input {INPUT_PX}px")
     print(f"  {len(rows):,} tiles across {len(manifest['animals'])} animals")
+
+    # the encoder's output is its prefix tokens (here the summary) followed by one token per
+    # patch, row by row from the tile's top left
+    prefix, grid, dim = encoder.num_prefix_tokens, tuple(encoder.patch_embed.grid_size), encoder.num_features
+    patches = None
+    if args.patches:
+        patches = np.lib.format.open_memmap(args.out / "patches.npy", mode="w+", dtype=PATCH_DTYPE,
+                                            shape=(len(rows), *grid, dim))
+        print(f"  keeping {grid[0]}x{grid[1]} patches of {dim}, "
+              f"{patches.nbytes / 1e9:.1f} GB to {args.out / 'patches.npy'}")
 
     target, per_slide, reference_written = (None, {}, None)
     if args.stain_reference:
@@ -126,7 +141,17 @@ def main() -> None:
     print(f"=== embedding on {args.device} ===")
     with torch.inference_mode():
         for batch, index in loader:
-            out = encoder(batch.to(args.device, dtype=DTYPE, non_blocking=True))
+            batch = batch.to(args.device, dtype=DTYPE, non_blocking=True)
+            if patches is None:
+                out = encoder(batch)
+            else:
+                # one pass for both: encoder(batch) is forward_head of these tokens
+                tokens = encoder.forward_features(batch)
+                if tokens.shape[1] != prefix + grid[0] * grid[1]:
+                    raise ValueError(f"{tokens.shape[1]} tokens, expected {prefix} + {grid[0]}x{grid[1]}")
+                out = encoder.forward_head(tokens)
+                patches[index.numpy()] = (tokens[:, prefix:].reshape(len(batch), *grid, dim)
+                                          .to(torch.float16).cpu().numpy())
             embeddings.append(out.float().cpu().numpy())
             order += index.tolist()
             if len(order) % (args.batch * 10) == 0 or len(order) == len(rows):
@@ -142,6 +167,8 @@ def main() -> None:
         raise ValueError("tiles came back out of manifest order")
 
     np.save(args.out / "embeddings.npy", matrix)
+    if patches is not None:
+        patches.flush()
     # a fraction, not a class: the threshold is the training stage's choice
     np.save(args.out / "necrosis.npy", np.array([r["necrosis"] for r in rows], dtype=np.float32))
     np.save(args.out / "tissue.npy", np.array([r["tissue"] for r in rows], dtype=np.float32))
@@ -168,6 +195,16 @@ def main() -> None:
         "stain_matched": bool(args.stain_reference),
         "stain_reference": str(args.stain_reference) if args.stain_reference else None,
         "stain_reference_written": reference_written,
+        "patches": {
+            "file": "patches.npy",
+            "shape": ["tile", "row", "col", "dim"],
+            "grid": list(grid),
+            "dim": dim,
+            "dtype": np.dtype(PATCH_DTYPE).name,
+            "layer": "last block after the final norm",
+            "prefix_tokens_dropped": prefix,  # the summary, which is embeddings.npy
+            "order": "row r from the tile's top, column c from its left",
+        } if patches is not None else None,
         "device": args.device,
         "source_manifest": str(args.tiles / "manifest.json"),
         "seconds": round(elapsed, 1),
