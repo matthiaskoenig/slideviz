@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,7 +32,7 @@ INPUT_PX = 224
 
 DTYPE = torch.float32
 # half precision halves the patch file, about 75 GB for the 124k training tiles
-PATCH_DTYPE = np.float16
+PATCH_DTYPE = torch.float16
 BATCH = 256
 WORKERS = 16
 
@@ -104,16 +105,6 @@ def main() -> None:
     print(f"  {parameters:,} parameters, input {INPUT_PX}px")
     print(f"  {len(rows):,} tiles across {len(manifest['animals'])} animals")
 
-    # the encoder's output is its prefix tokens (here the summary) followed by one token per
-    # patch, row by row from the tile's top left
-    prefix, grid, dim = encoder.num_prefix_tokens, tuple(encoder.patch_embed.grid_size), encoder.num_features
-    patches = None
-    if args.patches:
-        patches = np.lib.format.open_memmap(args.out / "patches.npy", mode="w+", dtype=PATCH_DTYPE,
-                                            shape=(len(rows), *grid, dim))
-        print(f"  keeping {grid[0]}x{grid[1]} patches of {dim}, "
-              f"{patches.nbytes / 1e9:.1f} GB to {args.out / 'patches.npy'}")
-
     target, per_slide, reference_written = (None, {}, None)
     if args.stain_reference:
         target, per_slide = read_reference(args.stain_reference)
@@ -125,6 +116,18 @@ def main() -> None:
         print(f"=== stain matching against {args.stain_reference.name} ===")
         print(f"  target L {target['mean'][0]:.2f}  a {target['mean'][1]:.2f}  "
               f"b {target['mean'][2]:.2f}, {len(per_slide)} slides")
+
+    # the encoder's output is its prefix tokens (here one, the summary) followed by one token
+    # per patch, row by row from the tile's top left
+    patches, final = None, args.out / "patches.npy"
+    if args.patches:
+        prefix, grid, dim = encoder.num_prefix_tokens, tuple(encoder.patch_embed.grid_size), encoder.num_features
+        # written under this run's own name and moved into place at the end, so a failed run
+        # leaves an earlier patch file and its meta as they were
+        partial = args.out / f"patches.npy.{os.getpid()}.partial"
+        patches = np.lib.format.open_memmap(partial, mode="w+", dtype=str(PATCH_DTYPE).removeprefix("torch."),
+                                            shape=(len(rows), *grid, dim))
+        print(f"  keeping {grid[0]}x{grid[1]} patches of {dim}, {patches.nbytes / 1e9:.1f} GB to {final}")
 
     dataset = TileSet(
         args.tiles, rows, build_transform(config["mean"], config["std"]), target, per_slide
@@ -151,7 +154,7 @@ def main() -> None:
                     raise ValueError(f"{tokens.shape[1]} tokens, expected {prefix} + {grid[0]}x{grid[1]}")
                 out = encoder.forward_head(tokens)
                 patches[index.numpy()] = (tokens[:, prefix:].reshape(len(batch), *grid, dim)
-                                          .to(torch.float16).cpu().numpy())
+                                          .to(PATCH_DTYPE).cpu().numpy())
             embeddings.append(out.float().cpu().numpy())
             order += index.tolist()
             if len(order) % (args.batch * 10) == 0 or len(order) == len(rows):
@@ -169,6 +172,9 @@ def main() -> None:
     np.save(args.out / "embeddings.npy", matrix)
     if patches is not None:
         patches.flush()
+        os.replace(partial, final)
+    elif final.exists():
+        final.unlink()  # an earlier run's patches, which no longer match these tiles
     # a fraction, not a class: the threshold is the training stage's choice
     np.save(args.out / "necrosis.npy", np.array([r["necrosis"] for r in rows], dtype=np.float32))
     np.save(args.out / "tissue.npy", np.array([r["tissue"] for r in rows], dtype=np.float32))
@@ -200,13 +206,20 @@ def main() -> None:
             "shape": ["tile", "row", "col", "dim"],
             "grid": list(grid),
             "dim": dim,
-            "dtype": np.dtype(PATCH_DTYPE).name,
-            "layer": "last block after the final norm",
-            "prefix_tokens_dropped": prefix,  # the summary, which is embeddings.npy
+            "dtype": patches.dtype.name,
+            "layer": f"last block, then {type(encoder.norm).__name__}",
+            "prefix_tokens_dropped": prefix,
+            "summary_pool": encoder.global_pool,  # token: embeddings.npy is the first prefix token
             "order": "row r from the tile's top, column c from its left",
         } if patches is not None else None,
+        "tile_um": manifest.get("tile_um"),
         "device": args.device,
+        # the outputs move by about 0.1 % between batch sizes (TF32 convolutions), and are
+        # byte-identical between runs at the same one
+        "batch": args.batch,
+        "cudnn_tf32": torch.backends.cudnn.allow_tf32,
         "source_manifest": str(args.tiles / "manifest.json"),
+        "source_manifest_written": manifest.get("written"),
         "seconds": round(elapsed, 1),
         "torch": torch.__version__,
         "timm": timm.__version__,
