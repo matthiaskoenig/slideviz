@@ -103,3 +103,18 @@ def tissue_mask(
 def tissue_area_mm2(mask: np.ndarray, um_per_px: float) -> float:
     """Tissue area in square millimetres."""
     return float(mask.sum()) * (um_per_px / 1000.0) ** 2
+
+
+def pyramid_factor(fine_width: int, coarse_width: int) -> int:
+    """The power of two between two pyramid levels: each level halves the one above."""
+    return 2 ** round(np.log2(fine_width / coarse_width))
+
+
+# Measured on the slides (18 Oct): a coarser level sits (factor - 1) / 2 level pixels up and left of a plain
+# factor-wide box, the same across the slide, as halving by pyrDown gives; mapping by the ratio of the widths
+# drifts from that by up to 13 level-1 px at the coarsest outline level
+def on_level(mask: np.ndarray, factor: int, top: int, left: int, shape_rc: tuple[int, int]) -> np.ndarray:
+    """A level's pixels from (top, left) over shape_rc on a coarser level's mask, coarse pixel q centred on factor * q."""
+    rows = ((np.arange(top, top + shape_rc[0]) + factor // 2) // factor).clip(0, mask.shape[0] - 1)
+    cols = ((np.arange(left, left + shape_rc[1]) + factor // 2) // factor).clip(0, mask.shape[1] - 1)
+    return mask[np.ix_(rows, cols)]

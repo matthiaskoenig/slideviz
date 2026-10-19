@@ -31,6 +31,19 @@ def score(patches: np.ndarray, part: np.ndarray, heads: np.lib.npyio.NpzFile, k:
     return (1 / (1 + np.exp(-logit))).astype(np.float32)
 
 
+def check_head(heads: np.lib.npyio.NpzFile, k: int, animal: str, train_patches: np.ndarray,
+               train_animals: np.ndarray, stored: np.ndarray) -> dict:
+    """Head k on its animal's first training chunk, which train_patch_head.py scored in one piece; stops unless bit for bit."""
+    part = np.flatnonzero(train_animals == animal)[:CHUNK]
+    if not part.size:
+        raise SystemExit(f"the training cache holds no tiles of {animal} to check its head on")
+    differ = int((score(train_patches, part, heads, k).astype(stored.dtype) != stored[part]).sum())
+    if differ:
+        raise SystemExit(f"{animal}: the head reproduces its stored scores on {part.size} tiles with {differ} "
+                         "patches different, nothing written")
+    return {"tiles": int(part.size), "patches_different": differ}
+
+
 def pixel_patch(size_px: int, grid: int) -> np.ndarray:
     """The patch row (or column) each tile pixel's centre falls in, with patch edges at r * size_px / grid."""
     return ((np.arange(size_px) + 0.5) * grid / size_px).astype(int)
@@ -90,19 +103,8 @@ def main() -> None:
     field_patches = np.load(args.field_cache / "patches.npy", mmap_mode="r")
     field_animals = np.array([r["animal"] for r in rows])
 
-    # each head on its own animal's first training chunk, which train_patch_head.py scored in one piece
-    checks = {}
-    for animal in manifest["fields"]:
-        k = names.index(animal)
-        part = np.flatnonzero(train_animals == animal)[:CHUNK]
-        if not part.size:
-            raise SystemExit(f"{args.embeddings} holds no training tiles of {animal} to check its head on")
-        again = score(train_patches, part, heads, k).astype(stored.dtype)
-        differ = int((again != stored[part]).sum())
-        if differ:
-            raise SystemExit(f"{animal}: the head reproduces its stored scores on {part.size} tiles with {differ} "
-                             "patches different, nothing written")
-        checks[animal] = {"tiles": int(part.size), "patches_different": differ}
+    checks = {animal: check_head(heads, names.index(animal), animal, train_patches, train_animals, stored)
+              for animal in manifest["fields"]}
     print(f"=== {len(checks)} heads reproduce their stored scores bit for bit ===", flush=True)
 
     inputs = {

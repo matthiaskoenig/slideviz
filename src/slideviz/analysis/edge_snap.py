@@ -12,6 +12,10 @@ from __future__ import annotations
 import numpy as np
 from scipy.ndimage import uniform_filter
 
+# the necrosis call's settings (option E, her pick 19 Oct): 8 and 16 um looked alike by eye, 8 keeps more detail
+NECROSIS_RADIUS_UM = 8.0
+NECROSIS_EPS = 0.01
+
 
 def window_mean(values: np.ndarray, radius: int) -> np.ndarray:
     """The mean over a (2 * radius + 1) square around every pixel, per channel, the border mirrored."""

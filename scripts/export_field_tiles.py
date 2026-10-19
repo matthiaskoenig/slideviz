@@ -3,9 +3,11 @@
     uv run python scripts/export_field_tiles.py --slides <APAP_tiff> --out <dir> \
         --field 281mg_m1 4250 12750 --field 500mg_m1 4250 19890 [--size-um 1000] [--stride-um 15] \
         [--tile-um 75 --target-um-per-px 0.5]
+    uv run python scripts/export_field_tiles.py --slides <APAP_tiff> --out <dir> --slide 281mg_m1
 
-A field is an animal and its centre in H&E level-0 px (row, col). Tiles are cut as for
-training (same size, level and tissue rule; --tile-um and --target-um-per-px as given to
+A field is an animal and its centre in H&E level-0 px (row, col); --slide takes a whole slide
+instead, as the square around its tissue and a tile beyond. Tiles are cut as for training
+(same size, level and tissue rule; --tile-um and --target-um-per-px as given to
 export_tiles.py) but every --stride-um; the manifest reads like export_tiles.py's, so
 ml/embed_tiles.py embeds it unchanged.
 """
@@ -33,6 +35,19 @@ from slideviz.io.reader import open_slide
 
 SIZE_UM = 1000.0
 STRIDE_UM = 15.0  # below one hepatocyte, so the outline is placed finer than a cell
+
+
+def tissue_square(slides: Path, animal: str, tile_um: float) -> tuple[tuple[int, int], float]:
+    """Centre in level-0 px and edge in um of the square around a slide's tissue, a tile beyond each side."""
+    info, levels = open_slide(slides / f"mouse_apap_{animal}_he.ome.tiff")
+    coarse = pick_level(levels)
+    mask = mask_from_level(np.asarray(levels[coarse]))
+    factor = 2 ** round(np.log2(levels[0].shape[1] / levels[coarse].shape[1]))  # each level halves the one above
+    rows, cols = np.nonzero(mask)
+    top, bottom = rows.min() * factor - factor, (rows.max() + 1) * factor
+    left, right = cols.min() * factor - factor, (cols.max() + 1) * factor
+    size_um = max(bottom - top, right - left) * info.pixel_size_um + 2 * tile_um
+    return (round((top + bottom) / 2), round((left + right) / 2)), size_um
 
 
 def export_field(slides: Path, animal: str, centre: tuple[int, int], size_um: float, stride_um: float,
@@ -64,6 +79,7 @@ def export_field(slides: Path, animal: str, centre: tuple[int, int], size_um: fl
     slide = path.name.split(".")[0]
     (out / "tiles" / animal).mkdir(parents=True, exist_ok=True)
     rows = []
+    digits = max(3, len(str(count - 1)))  # three for a 1 mm field, as before; more across a whole slide
     for i, y in enumerate(ys):
         for j, x in enumerate(xs):
             if y < top or x < left or y + size_px > bottom or x + size_px > right:
@@ -71,7 +87,7 @@ def export_field(slides: Path, animal: str, centre: tuple[int, int], size_um: fl
             tissue = coverage(mask, (height, width), int(y), int(x), size_px)
             if tissue < MIN_TISSUE:
                 continue
-            name = f"{animal}/{animal}_f{i:03d}_{j:03d}.png"
+            name = f"{animal}/{animal}_f{i:0{digits}d}_{j:0{digits}d}.png"
             Image.fromarray(region[y - top:y - top + size_px, x - left:x - left + size_px]).save(
                 out / "tiles" / name)
             rows.append({
@@ -106,20 +122,26 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--slides", type=Path, required=True, help="directory of OME-TIFFs")
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--field", nargs=3, action="append", required=True,
+    parser.add_argument("--field", nargs=3, action="append", default=[],
                         metavar=("ANIMAL", "ROW", "COL"), help="centre in H&E level-0 px")
+    parser.add_argument("--slide", action="append", default=[], metavar="ANIMAL",
+                        help="the whole slide, as the square around its tissue")
     parser.add_argument("--size-um", type=float, default=SIZE_UM)
     parser.add_argument("--stride-um", type=float, default=STRIDE_UM)
     parser.add_argument("--tile-um", type=float, default=TILE_UM, help="as given to export_tiles.py")
     parser.add_argument("--target-um-per-px", type=float, default=TARGET_UM_PER_PX, help="as given to export_tiles.py")
     args = parser.parse_args()
+    if not args.field and not args.slide:
+        parser.error("give at least one --field or --slide")
 
+    wanted = [(animal, (int(row), int(col)), args.size_um, False) for animal, row, col in args.field]
+    wanted += [(animal, *tissue_square(args.slides, animal, args.tile_um), True) for animal in args.slide]
     rows, fields = [], {}
-    for animal, row, col in args.field:
-        found, geometry = export_field(args.slides, animal, (int(row), int(col)), args.size_um,
-                                       args.stride_um, args.out, args.tile_um, args.target_um_per_px)
+    for animal, centre, size_um, whole in wanted:
+        found, geometry = export_field(args.slides, animal, centre, size_um, args.stride_um, args.out,
+                                       args.tile_um, args.target_um_per_px)
         rows += found
-        fields[animal] = geometry
+        fields[animal] = {**geometry, "whole_slide": whole}
 
     manifest = {
         "written": datetime.now(UTC).isoformat(timespec="seconds"),

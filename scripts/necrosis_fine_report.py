@@ -35,9 +35,14 @@ from slideviz.analysis.annotation import (
     read_overview,
     to_level,
 )
-from slideviz.analysis.edge_snap import guided_filter
+from slideviz.analysis.edge_snap import NECROSIS_EPS, NECROSIS_RADIUS_UM, guided_filter
 from slideviz.analysis.prediction import CALL_OPACITY, CALL_RGB, read_lumen
-from slideviz.analysis.tissue import mask_from_level, pick_level
+from slideviz.analysis.tissue import (
+    mask_from_level,
+    on_level,
+    pick_level,
+    pyramid_factor,
+)
 from slideviz.io.reader import open_slide
 
 ZOOM_UM = 250.0
@@ -45,9 +50,9 @@ PAGE = (1754, 1240)  # A4 landscape at 150 dpi
 MARGIN = 40
 FLIP_PX = 1100  # edge of each flip-page image
 
-# edge snapping for E and F, chosen by eye on three fields (18 Oct): 8 and 16 um looked alike, 8 keeps more detail
-SNAP_UM = 8.0
-SNAP_EPS = 0.01
+# edge snapping for E and F, the necrosis call's settings
+SNAP_UM = NECROSIS_RADIUS_UM
+SNAP_EPS = NECROSIS_EPS
 
 # pick_fields.py's reasons, short enough for the table
 CHOSEN_BY = {"manuscript figure zoom": "figure zoom", "most necrosis edge": "most edge",
@@ -67,21 +72,6 @@ METHODS = {
 def font(size: int) -> ImageFont.FreeTypeFont:
     """matplotlib's bundled sans serif at a pixel size."""
     return ImageFont.truetype(font_manager.findfont("DejaVu Sans"), size)
-
-
-def pyramid_factor(fine_width: int, coarse_width: int) -> int:
-    """The power of two between two pyramid levels: each level halves the one above."""
-    return 2 ** round(np.log2(fine_width / coarse_width))
-
-
-# Measured on the slides (18 Oct): a coarser level sits (factor - 1) / 2 level pixels up and left of a plain
-# factor-wide box, the same across the slide, as halving by pyrDown gives; mapping by the ratio of the widths
-# drifts from that by up to 13 level-1 px at the coarsest outline level
-def on_level(mask: np.ndarray, factor: int, top: int, left: int, size: int) -> np.ndarray:
-    """A square of a level's pixels on a coarser level's mask, coarse pixel q centred on level pixel factor * q."""
-    rows = ((np.arange(top, top + size) + factor // 2) // factor).clip(0, mask.shape[0] - 1)
-    cols = ((np.arange(left, left + size) + factor // 2) // factor).clip(0, mask.shape[1] - 1)
-    return mask[np.ix_(rows, cols)]
 
 
 def tile_calls(prediction: dict, top: int, left: int, size: int) -> np.ndarray:
@@ -315,8 +305,8 @@ def main() -> None:
         rgb = np.asarray(levels[level][top:top + size, left:left + size])[..., :3]
         outline = mask_from_level(np.asarray(levels[pick_level(levels)]))
         lumen, _ = read_lumen(args.lumen / f"{animal}_lumen.npz")
-        tissue = (on_level(outline, pyramid_factor(shape[1], outline.shape[1]), top, left, size)
-                  & ~on_level(lumen, pyramid_factor(shape[1], lumen.shape[1]), top, left, size))
+        tissue = (on_level(outline, pyramid_factor(shape[1], outline.shape[1]), top, left, (size, size))
+                  & ~on_level(lumen, pyramid_factor(shape[1], lumen.shape[1]), top, left, (size, size)))
 
         overview = read_overview(args.overviews / f"{field['slide']}_s0.json")
         polygons = [to_level(cvat_polygons(p["points"]), overview["um_per_px"], um) - [top, left]
