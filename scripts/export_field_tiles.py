@@ -1,11 +1,13 @@
 """Overlapping tiles over square fields of H&E slides, for a necrosis map finer than the tile grid.
 
     uv run python scripts/export_field_tiles.py --slides <APAP_tiff> --out <dir> \
-        --field 281mg_m1 4250 12750 --field 500mg_m1 4250 19890 [--size-um 1000] [--stride-um 15]
+        --field 281mg_m1 4250 12750 --field 500mg_m1 4250 19890 [--size-um 1000] [--stride-um 15] \
+        [--tile-um 75 --target-um-per-px 0.5]
 
 A field is an animal and its centre in H&E level-0 px (row, col). Tiles are cut as for
-training (same size, level and tissue rule) but every --stride-um; the manifest reads
-like export_tiles.py's, so ml/embed_tiles.py embeds it unchanged.
+training (same size, level and tissue rule; --tile-um and --target-um-per-px as given to
+export_tiles.py) but every --stride-um; the manifest reads like export_tiles.py's, so
+ml/embed_tiles.py embeds it unchanged.
 """
 
 from __future__ import annotations
@@ -19,7 +21,13 @@ import numpy as np
 from PIL import Image
 
 from slideviz.analysis.export_tiles import dose_of
-from slideviz.analysis.tiling import MIN_TISSUE, TILE_UM, coverage, pick_level_um
+from slideviz.analysis.tiling import (
+    MIN_TISSUE,
+    TARGET_UM_PER_PX,
+    TILE_UM,
+    coverage,
+    pick_level_um,
+)
 from slideviz.analysis.tissue import mask_from_level, pick_level
 from slideviz.io.reader import open_slide
 
@@ -27,15 +35,16 @@ SIZE_UM = 1000.0
 STRIDE_UM = 15.0  # below one hepatocyte, so the outline is placed finer than a cell
 
 
-def export_field(slides: Path, animal: str, centre: tuple[int, int], size_um: float,
-                 stride_um: float, out: Path) -> tuple[list[dict], dict]:
+def export_field(slides: Path, animal: str, centre: tuple[int, int], size_um: float, stride_um: float,
+                 out: Path, tile_um: float = TILE_UM, target_um_per_px: float = TARGET_UM_PER_PX,
+                 ) -> tuple[list[dict], dict]:
     """Write one field's overlapping tiles; return their manifest rows and the field's geometry."""
     path = slides / f"mouse_apap_{animal}_he.ome.tiff"
     info, levels = open_slide(path)
-    level = pick_level_um(levels, info.pixel_size_um)
+    level = pick_level_um(levels, info.pixel_size_um, target_um_per_px)
     to_level = levels[0].shape[1] / levels[level].shape[1]
     um_per_px = info.pixel_size_um * to_level
-    size_px = round(TILE_UM / um_per_px)
+    size_px = round(tile_um / um_per_px)
     stride_px = max(1, round(stride_um / um_per_px))
     height, width = levels[level].shape[:2]
     mask = mask_from_level(np.asarray(levels[pick_level(levels)]))
@@ -76,6 +85,7 @@ def export_field(slides: Path, animal: str, centre: tuple[int, int], size_um: fl
         "slide": slide,
         "centre_level0_rc": list(centre),
         "size_um": size_um,
+        "tile_um": tile_um,
         "level": level,
         "um_per_px": um_per_px,
         "size_px": size_px,
@@ -100,12 +110,14 @@ def main() -> None:
                         metavar=("ANIMAL", "ROW", "COL"), help="centre in H&E level-0 px")
     parser.add_argument("--size-um", type=float, default=SIZE_UM)
     parser.add_argument("--stride-um", type=float, default=STRIDE_UM)
+    parser.add_argument("--tile-um", type=float, default=TILE_UM, help="as given to export_tiles.py")
+    parser.add_argument("--target-um-per-px", type=float, default=TARGET_UM_PER_PX, help="as given to export_tiles.py")
     args = parser.parse_args()
 
     rows, fields = [], {}
     for animal, row, col in args.field:
-        found, geometry = export_field(args.slides, animal, (int(row), int(col)),
-                                       args.size_um, args.stride_um, args.out)
+        found, geometry = export_field(args.slides, animal, (int(row), int(col)), args.size_um,
+                                       args.stride_um, args.out, args.tile_um, args.target_um_per_px)
         rows += found
         fields[animal] = geometry
 
@@ -117,7 +129,8 @@ def main() -> None:
         "label": "necrosis",
         "label_is_fraction": True,
         "unlabelled": True,
-        "tile_um": TILE_UM,
+        "tile_um": args.tile_um,
+        "target_um_per_px": args.target_um_per_px,
         "min_tissue": MIN_TISSUE,
         "fields": fields,
         "tiles": rows,
