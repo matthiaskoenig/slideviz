@@ -3,6 +3,7 @@
     uv run --no-sync --with matplotlib python scripts/necrosis_fine_report.py --slides /data/michelle/slides \
         --fields <pick_fields.py output> --tiles /data/michelle/slides/predictions \
         --overlap <predict_field.py output> --patches <predict_field_patches.py output> \
+        --overlap40 <predict_field.py output on 40 um tiles> --pixels <pixel_classifier.py output> \
         --lumen /data/michelle/necrosis_lumen_2026-10-11 \
         --annotations /data/michelle/slides/annotations/cvat_polygons.json \
         --overviews /data/michelle/slides/annotation_overviews --out <dir>
@@ -55,9 +56,11 @@ CHOSEN_BY = {"manuscript figure zoom": "figure zoom", "most necrosis edge": "mos
 METHODS = {
     "A": "today: one call per 75 um tile, on the tile grid",
     "B": "75 um tiles every 15 um, one call per tile",
+    "C": "40 um tiles every 8 um, one call per tile (a 40 um model, trained like A's)",
     "D": "75 um tiles every 15 um, one call per 2.7 um patch, averaged over the tiles that see it",
     "E": f"D's score snapped to the H&E's edges (guided filter, {SNAP_UM:.0f} um window)",
     "F": f"B's score snapped to the H&E's edges (guided filter, {SNAP_UM:.0f} um window)",
+    "G": "pixel classifier: colour, edge and texture measures per pixel, 0.4 to 7 um, and a random forest",
 }
 
 
@@ -93,13 +96,13 @@ def tile_calls(prediction: dict, top: int, left: int, size: int) -> np.ndarray:
     return called[np.ix_(rows.clip(0, shape[0] - 1), cols.clip(0, shape[1] - 1))] & inside
 
 
-def patch_score(path: Path, top: int, left: int, size: int) -> tuple[np.ndarray, dict]:
-    """The per-patch map's mean score per pixel over a square, 0 where no tile covered it, and the map's record."""
+def map_score(path: Path, key: str, top: int, left: int, size: int) -> tuple[np.ndarray, dict]:
+    """A stored score map's value per pixel over a square, 0 where the map has none, and the map's record."""
     stored = np.load(path)
     meta = json.loads(str(stored["meta"]))
     origin = meta["origin_level_rc"]
     y, x = top - origin[0], left - origin[1]
-    mean = stored["mean"]
+    mean = stored[key]
     # no call where the field reaches past the map, as where no tile covered a pixel
     window = np.full((size, size), np.nan, np.float32)
     y0, x0, y1, x1 = max(0, y), max(0, x), min(mean.shape[0], y + size), min(mean.shape[1], x + size)
@@ -277,6 +280,8 @@ def main() -> None:
     parser.add_argument("--tiles", type=Path, required=True, help="nested tile predictions (A)")
     parser.add_argument("--overlap", type=Path, required=True, help="predict_field.py output (B)")
     parser.add_argument("--patches", type=Path, required=True, help="predict_field_patches.py output (D)")
+    parser.add_argument("--overlap40", type=Path, required=True, help="predict_field.py output on 40 um tiles (C)")
+    parser.add_argument("--pixels", type=Path, required=True, help="pixel_classifier.py output (G)")
     parser.add_argument("--lumen", type=Path, required=True, help="necrosis_lumen.py output")
     parser.add_argument("--annotations", type=Path, required=True)
     parser.add_argument("--overviews", type=Path, required=True)
@@ -291,6 +296,7 @@ def main() -> None:
     needed = [path for animal, field in chosen["fields"].items() for path in (
         args.slides / f"{field['slide']}.ome.tiff", args.tiles / f"{animal}_predictions.json",
         args.overlap / f"{animal}_field.json", args.patches / f"{animal}_patch_field.npz",
+        args.overlap40 / f"{animal}_field.json", args.pixels / f"{animal}_pixel_field.npz",
         args.lumen / f"{animal}_lumen.npz", args.overviews / f"{field['slide']}_s0.json")]
     if missing := [str(path) for path in needed if not path.exists()]:
         raise SystemExit("missing inputs, nothing drawn:\n  " + "\n  ".join(missing))
@@ -323,22 +329,30 @@ def main() -> None:
             raise SystemExit(f"{animal}: the field lies within {pad} px of the slide's edge")
         inner = np.s_[pad:pad + size, pad:pad + size]
         guide = np.asarray(levels[level][top - pad:top + size + pad, left - pad:left + size + pad])[..., :3] / 255
-        d_score, d_meta = patch_score(args.patches / f"{animal}_patch_field.npz", top - pad, left - pad, size + 2 * pad)
+        d_score, d_meta = map_score(args.patches / f"{animal}_patch_field.npz", "mean", top - pad, left - pad,
+                                    size + 2 * pad)
+        g_score, g_meta = map_score(args.pixels / f"{animal}_pixel_field.npz", "score", top, left, size)
+        c_score, c_weight, c_cutoff = field_score(args.overlap40 / f"{animal}_field.json", levels, level,
+                                                  (top, left), size)
+        overlap40 = json.loads((args.overlap40 / f"{animal}_field.json").read_text())
         b_score, b_weight, b_cutoff = field_score(args.overlap / f"{animal}_field.json", levels, level,
                                                   (top - pad, left - pad), size + 2 * pad)
         b_score = np.where(b_weight >= 0.5, b_score, 0.0)  # no call where too few tissue tiles stand behind it
         overlap = json.loads((args.overlap / f"{animal}_field.json").read_text())
-        if d_meta["level"] != level:
-            raise SystemExit(f"{animal}: the per-patch map is on level {d_meta['level']}, the tiles on {level}")
-        for name, record in (("B", overlap), ("D", d_meta)):
+        for name, record in (("D", d_meta), ("G", g_meta)):
+            if record["level"] != level:
+                raise SystemExit(f"{animal}: {name}'s map is on level {record['level']}, the tiles on {level}")
+        for name, record in (("B", overlap), ("C", overlap40), ("D", d_meta), ("G", g_meta)):
             if (record["field"]["centre_level0_rc"], record["slide"]) != (field["centre_level0_rc"], field["slide"]):
                 raise SystemExit(f"{animal}: {name} was made for another field than --fields gives")
         calls = {
             "A": tile_calls(prediction, top, left, size),
             "B": (b_score >= b_cutoff)[inner],
+            "C": (c_score >= c_cutoff) & (c_weight >= 0.5),
             "D": (d_score >= d_meta["cutoff"])[inner],
             "E": (guided_filter(guide, d_score, radius, SNAP_EPS) >= d_meta["cutoff"])[inner],
             "F": (guided_filter(guide, b_score, radius, SNAP_EPS) >= b_cutoff)[inner],
+            "G": g_score >= g_meta["cutoff"],
         }
         calls = {code: call & tissue for code, call in calls.items()}
 
@@ -374,9 +388,9 @@ def main() -> None:
                      "dsc": {c: s[0] for c, s in scores.items()}, "iou": {c: s[1] for c, s in scores.items()},
                      "tissue_px": int(tissue.sum()), "zoom_level0_top_left_size": [z_top, z_left, z_size],
                      "zoom_where_maps_differ": differ,
-                     "cutoffs": {"A": prediction["cutoff"], "B": b_cutoff, "D": d_meta["cutoff"],
-                                 "E": d_meta["cutoff"], "F": b_cutoff},
-                     "inputs_written": {"A": prediction["written"], "B": overlap["written"],
+                     "cutoffs": {"A": prediction["cutoff"], "B": b_cutoff, "C": c_cutoff, "D": d_meta["cutoff"],
+                                 "E": d_meta["cutoff"], "F": b_cutoff, "G": g_meta["cutoff"]},
+                     "inputs_written": {"A": prediction["written"], "B": overlap["written"], "C": overlap40["written"],
                                         "D": d_meta.get("written"), "D_code": d_meta.get("code")}})
         print(f"{animal}: drawn {area['drawn']:.1%}, " + ", ".join(f"{c} {area[c]:.1%}" for c in calls), flush=True)
 
