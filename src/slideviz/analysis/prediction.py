@@ -1,6 +1,6 @@
-"""Utilities for displaying per-tile predictions in napari.
+"""Utilities for displaying per-tile predictions in napari, and for reading the per-pixel necrosis call maps.
 
-Maps use one pixel per tile and are scaled to slide coordinates in micrometres.
+Tile maps use one pixel per tile and are scaled to slide coordinates in micrometres.
 """
 
 from __future__ import annotations
@@ -12,7 +12,13 @@ from pathlib import Path
 import numpy as np
 from scipy.ndimage import gaussian_filter, map_coordinates
 
+from slideviz.analysis.tissue import pyramid_factor
+
 log = logging.getLogger(__name__)
+
+# necrosis_slides.py call maps: 1 necrotic, 0 not, this value where nothing was measured (glass, lumen, no tile)
+CALL_NOT_MEASURED = 255
+CALL_BAND_ROWS = 256  # level rows binned at a time, which keeps the temporary arrays to tens of MB
 
 # lumen-grid pixels per map pixel when lumina are cut out, ~3.5 um, so vessels show as holes
 LUMEN_POOL = 2
@@ -59,6 +65,42 @@ def read_lumen(path: Path) -> tuple[np.ndarray, float] | None:
         return None
     with np.load(path) as stored:
         return stored["lumen"], float(stored["lumen_um"])
+
+
+def read_calls(path: Path, key: str = "call_E") -> tuple[np.ndarray, dict]:
+    """A necrosis_slides.py call map and its record."""
+    with np.load(path) as stored:
+        return stored[key], json.loads(str(stored["meta"]))
+
+
+def calls_on_level(
+    path: Path, level_shapes: list[tuple[int, int]], index: int, key: str = "call_E"
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Necrotic and measured masks of a call map on H&E level `index`, each pixel by the majority of the calls in it."""
+    calls, meta = read_calls(path, key)
+    factor = pyramid_factor(level_shapes[meta["level"]][1], level_shapes[index][1])
+    height, width = level_shapes[index]
+    top, left = meta["origin_level_rc"]
+    necrotic, measured = np.zeros((height, width), bool), np.zeros((height, width), bool)
+    # call pixel p falls in level pixel (p + factor // 2) // factor, the exact mapping tissue.on_level uses
+    # the other way; a band of level rows reads its call rows into a canvas starting at that offset
+    first_col = -(factor // 2)
+    c0, c1 = max(first_col - left, 0), min(first_col + width * factor - left, calls.shape[1])
+    for q0 in range(0, height, CALL_BAND_ROWS):
+        q1 = min(q0 + CALL_BAND_ROWS, height)
+        first_row = q0 * factor - factor // 2
+        r0, r1 = max(first_row - top, 0), min(first_row + (q1 - q0) * factor - top, calls.shape[0])
+        if r1 <= r0 or c1 <= c0:
+            continue
+        band = np.full(((q1 - q0) * factor, width * factor), CALL_NOT_MEASURED, np.uint8)
+        rows = slice(top + r0 - first_row, top + r1 - first_row)
+        band[rows, left + c0 - first_col:left + c1 - first_col] = calls[r0:r1, c0:c1]
+        blocks = band.reshape(q1 - q0, factor, width, factor)
+        counted = (blocks != CALL_NOT_MEASURED).sum(axis=(1, 3))
+        called = (blocks == 1).sum(axis=(1, 3))
+        measured[q0:q1] = 2 * counted >= factor * factor
+        necrotic[q0:q1] = measured[q0:q1] & (2 * called >= counted)
+    return necrotic, measured, meta
 
 
 def without_lumina(
