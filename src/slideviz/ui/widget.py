@@ -34,13 +34,7 @@ from slideviz.analysis.dab import (
 from slideviz.analysis.flatten import flatten_levels
 from slideviz.analysis.flatten import load as load_flattening
 from slideviz.analysis.masked import to_rgba
-from slideviz.analysis.prediction import (
-    add_call_layer,
-    add_prediction_layers,
-    call_level,
-    read_lumen,
-    tile_um_of,
-)
+from slideviz.analysis.prediction import add_call_layer, call_level
 from slideviz.analysis.stain import normalise_levels
 from slideviz.analysis.stain_stats import read as read_stain_reference
 from slideviz.analysis.tissue import mask_from_level, pick_level
@@ -83,11 +77,11 @@ FALLBACK_COLOUR = "yellow"
 # how a stain is written in the layer list, where the index's lowercase key reads badly
 STAIN_NAMES = {"he": "H&E", "cyp2e1": "CYP2E1", "cyp1a2": "CYP1A2", "hmgb1": "HMGB1"}
 
-# separates the parts of a layer name: animal, then what it shows, then which kind
+# separates the parts of a layer name: animal, then what it shows
 NAME_SEPARATOR = " · "
 
-# what a prediction file is about, when it does not say; steatosis is the planned second
-DEFAULT_LABEL = "necrosis"
+# what the necrosis map's layer is called
+NECROSIS_NAME = "necrosis"
 
 # the DAB stains that carry a gradient readout, keyed as the index writes them
 DAB_STAINS = ("cyp2e1", "cyp1a2")
@@ -101,10 +95,6 @@ READOUT_RECORDS = "cyp2e1_readout*.json"
 # necrosis_slides.py output beside the predictions: the necrosis map per animal and the run's areas
 NECROSIS_SUFFIX = "_necrosis.npz"
 NECROSIS_RECORD = "necrosis_slides.json"
-
-# necrosis_lumen.py output beside the predictions: one lumen file per animal and the run's areas
-LUMEN_SUFFIX = "_lumen.npz"
-LUMEN_RECORD = "necrosis_lumen.json"
 
 # the share of necrotic tissue that is DAB positive is shown from this much necrosis on, as reported
 NECROTIC_SHOWN_PCT = 5.0
@@ -201,7 +191,6 @@ class SlideList(QWidget):
         self.directory = str(directory.resolve()) if directory else None
         self._stain = None  # read on first use, then kept
         self._readout = None  # the readout run's numbers, read on first use, then kept
-        self._lumen_areas = None  # necrotic areas without lumina per animal, read on first use, then kept
         self._necrosis_areas = None  # the necrosis run's areas per animal, read on first use, then kept
         self._map_worker = None  # the necrosis map being placed on the H&E pyramid
         # level shapes of the block's reference slide, the grid a non-rigid layer is drawn on
@@ -399,26 +388,10 @@ class SlideList(QWidget):
 
         animal = animal_name(block, slides[0]["substance"])
         mapped = self._necrosis_record().get(animal)
-        prediction = self._prediction_file(animal)
         if mapped is not None:
             lines.append(f"<br><b>Necrosis</b> (necrosis map, {mapped['written'][:10]})")
             drawn = f", drawn {mapped['area_drawn']:.1%}" if mapped.get("area_drawn") is not None else ""
             lines.append(f"{mapped['area_E']:.1%} of tissue without lumina{drawn}")
-        elif prediction is not None:
-            try:
-                record = json.loads(prediction.read_text())
-                written = record.get("written", "")[:10]  # the model output's date
-                lines.append(f"<br><b>Necrosis</b> (prediction file, {written})")
-                areas = self._lumen_record().get(animal)
-                if areas is not None:
-                    lines.append(f"annotated {areas['area_annotated_no_lumen']:.1%}, "
-                                 f"predicted {areas['area_predicted_no_lumen']:.1%} of tissue without lumina")
-                else:
-                    lines.append(f"annotated {record['area_annotated']:.1%}, "
-                                 f"predicted {record['area_predicted']:.1%} of tissue")
-            # a half-written prediction file should not take the panel down
-            except (OSError, ValueError, KeyError) as exc:
-                log.warning("unreadable prediction file %s: %s", prediction, exc)
         lines.extend(self._readout_lines(slides))
         self.info.setText("<br>".join(lines))
 
@@ -452,20 +425,6 @@ class SlideList(QWidget):
                 except (OSError, ValueError, KeyError) as exc:
                     log.warning("unreadable necrosis record %s: %s", path, exc)
         return self._necrosis_areas
-
-    def _lumen_record(self) -> dict:
-        """Necrotic areas without lumina per animal, from the lumen run's record, read once and kept."""
-        if self._lumen_areas is None:
-            self._lumen_areas = {}
-            directory = settings.predictions_dir()
-            path = directory / LUMEN_RECORD if directory is not None else None
-            if path is not None and path.exists():
-                try:
-                    rows = json.loads(path.read_text())["slides_areas"]
-                    self._lumen_areas = {row["animal"]: row for row in rows}
-                except (OSError, ValueError, KeyError) as exc:
-                    log.warning("unreadable lumen record %s: %s", path, exc)
-        return self._lumen_areas
 
     def _readout_lines(self, slides: list) -> list[str]:
         """Info lines with the CYP2E1-positive share of each DAB slide in the block."""
@@ -626,26 +585,12 @@ class SlideList(QWidget):
         path = directory / f"{animal}{NECROSIS_SUFFIX}" if directory is not None else None
         return path if path is not None and path.exists() else None
 
-    @staticmethod
-    def _prediction_file(animal: str) -> Path | None:
-        """The tile model output for one animal, when a prediction directory is configured."""
-        directory = settings.predictions_dir()
-        if directory is None or not directory.is_dir():
-            return None
-        # an unannotated slide writes its own name, so try both
-        for suffix in ("_predictions.json", "_unlabelled_predictions.json"):
-            path = directory / f"{animal}{suffix}"
-            if path.exists():
-                return path
-        return None
-
     def _load_necrosis(self, animal: str, reference_um: float) -> None:
-        """Add the necrosis map, placed on the H&E pyramid off the UI thread; the tile predictions where none exists."""
+        """Add the necrosis map, placed on the H&E pyramid off the UI thread; no necrosis layer where there is none."""
         path = self._necrosis_map(animal)
         if path is None or not self._reference_shapes:
-            self._load_predictions(animal, reference_um)
             return
-        name = layer_name(animal, DEFAULT_LABEL)
+        name = layer_name(animal, NECROSIS_NAME)
         self._set_busy(True)  # no other block opens or clears before the map arrives
         self._show_activity(f"{animal}: placing the necrosis map")
         worker = placed_map(path, list(self._reference_shapes), reference_um)
@@ -659,37 +604,6 @@ class SlideList(QWidget):
         """Free the controls once the necrosis map is in."""
         self._map_worker = None
         self._set_busy(False)
-
-    def _load_predictions(self, animal: str, reference_um: float) -> int:
-        """Add the predicted necrotic area from the tile model in the reference stain's frame."""
-        path = self._prediction_file(animal)
-        if path is None:
-            return 0
-        try:
-            record = json.loads(path.read_text())
-            label = record.get("label", DEFAULT_LABEL)
-            level_um = reference_um * 2 ** record["level"]
-            try:
-                lumen = read_lumen(path.parent / f"{animal}{LUMEN_SUFFIX}")
-            # a broken lumen file costs the cut-out only, the maps still load
-            except (OSError, ValueError, KeyError) as exc:
-                log.warning("unreadable lumen file for %s: %s", animal, exc)
-                lumen = None
-            if lumen is None:
-                log.info("no lumen file for %s, necrosis maps keep the lumina", animal)
-            layers = add_prediction_layers(
-                self.viewer,
-                path,
-                tile_um_of(path, level_um),
-                predicted_name=layer_name(animal, label),
-                lumen=lumen,
-            )
-        # a truncated or half-written prediction file should not take the viewer down
-        except (OSError, ValueError, KeyError) as exc:
-            log.exception("could not load predictions from %s", path)
-            self.status.setText(f"{path.name}: {type(exc).__name__}: {exc}")
-            return 0
-        return len(layers)
 
     def _load_readouts(self, slides: list) -> int:
         """Add the stored gradient map of each DAB slide, on its H&E partner's grid."""
