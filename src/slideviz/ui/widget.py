@@ -151,10 +151,9 @@ def animal_name(block: str, substance: str | None) -> str:
     return block.removeprefix(f"{substance}_") if substance else block
 
 
-def layer_name(animal: str, what: str, kind: str | None = None) -> str:
-    """Return a layer name containing the animal, content, and optional kind."""
-    parts = [animal, what] + ([kind] if kind else [])
-    return NAME_SEPARATOR.join(parts)
+def layer_name(animal: str, what: str) -> str:
+    """A layer name from the animal and what the layer shows: a stain, or a readout such as necrosis."""
+    return NAME_SEPARATOR.join([animal, what])
 
 
 def registration_lines(registration: Registration) -> list[str]:
@@ -509,7 +508,7 @@ class SlideList(QWidget):
         pyramids = {key: self._matched(p, slide_key) for key, p in pyramids.items()}
         stain = STAIN_NAMES.get(row["stain"], row["stain"].upper())
         # a scene number only means something on the files that hold more than one
-        what = f"{stain} s{scene}" if info.n_scenes > 1 else stain
+        what = f"{stain} stain s{scene}" if info.n_scenes > 1 else f"{stain} stain"
         name = layer_name(animal_name(row["serial_block"], row["substance"]), what)
         if registration is None:
             self._reference_shapes = [level.shape[:2] for level in levels]
@@ -646,7 +645,7 @@ class SlideList(QWidget):
         if path is None or not self._reference_shapes:
             self._load_predictions(animal, reference_um)
             return
-        name = layer_name(animal, DEFAULT_LABEL, "map")
+        name = layer_name(animal, DEFAULT_LABEL)
         self._set_busy(True)  # no other block opens or clears before the map arrives
         self._show_activity(f"{animal}: placing the necrosis map")
         worker = placed_map(path, list(self._reference_shapes), reference_um)
@@ -682,7 +681,7 @@ class SlideList(QWidget):
                 self.viewer,
                 path,
                 tile_um_of(path, level_um),
-                predicted_name=layer_name(animal, label, "predicted"),
+                predicted_name=layer_name(animal, label),
                 lumen=lumen,
             )
         # a truncated or half-written prediction file should not take the viewer down
@@ -724,7 +723,7 @@ class SlideList(QWidget):
             self.viewer.add_image(
                 steps,
                 name=layer_name(animal_name(row["serial_block"], row["substance"]),
-                                STAIN_NAMES.get(row["stain"], row["stain"].upper()), "gradient"),
+                                STAIN_NAMES.get(row["stain"], row["stain"].upper())),
                 # a pyramid level's pixel q is centred on level-0 pixel factor * q, where napari puts it with no shift
                 scale=(pixel_um, pixel_um),
                 units="um",
