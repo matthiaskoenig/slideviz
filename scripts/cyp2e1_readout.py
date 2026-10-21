@@ -1,4 +1,4 @@
-"""CYP2E1-positive area and its gradient on the H&E grid, split by predicted necrosis."""
+"""CYP2E1-positive area and its gradient on the H&E grid, split by the necrosis map."""
 
 from __future__ import annotations
 
@@ -24,13 +24,14 @@ from slideviz.analysis.dab import (
     relative_position,
     relative_readout,
 )
+from slideviz.analysis.prediction import calls_on_level
 from slideviz.analysis.tissue import mask_from_level, pick_level
 from slideviz.analysis.warp import load_field, nonrigid_levels
 from slideviz.data.schema import Registration
 from slideviz.io.reader import open_slide
 
 WORK_UM = 1.8  # working resolution; the nearest pyramid level is used and the map is stored at it
-NECROTIC_MIN_PX = 1000  # fewer necrotic pixels give no necrotic readout
+NECROTIC_MIN_SHARE = 0.01  # below 1 % of the covered tissue necrotic (specks on the controls), no necrotic readout
 DAB_SETTINGS = ("GLASS_OD", "SMOOTH_UM", "WINDOW_UM", "STEP_UM", "CELL_UM", "LOW_Q", "HIGH_Q",
                 "MIDPOINT", "CONTRAST_MIN", "WINDOW_TISSUE_MIN", "STEPS", "POSITION_SCALE", "NO_TISSUE")
 TISSUE_SETTINGS = ("LUMEN_OPEN_UM", "LUMEN_MIN_UM2", "RIM_UM")
@@ -57,24 +58,6 @@ def level_near(levels: list, pixel_size_um: float, target_um: float) -> int:
     """Index of the level whose pixel size is closest to target_um."""
     sizes = [pixel_size_um * levels[0].shape[1] / level.shape[1] for level in levels]
     return min(range(len(levels)), key=lambda i: abs(sizes[i] - target_um))
-
-
-def necrosis_on(record: dict, shape: tuple[int, int], he: list, index: int) -> tuple[np.ndarray, np.ndarray]:
-    """Predicted necrosis above the nested cutoff, and tile coverage, on H&E level `index`."""
-    size, level = record["size_px"], record["level"]
-    tiles = record["tiles"]
-    necrotic = np.zeros((max(t["row"] for t in tiles) + 1, max(t["col"] for t in tiles) + 1), bool)
-    covered = np.zeros_like(necrotic)
-    for t in tiles:
-        necrotic[t["row"], t["col"]] = t["predicted"] >= record["cutoff"]
-        covered[t["row"], t["col"]] = True
-    # level `index` pixels to tile indices, through the prediction's own level
-    scale = he[level].shape[1] / he[index].shape[1] / size
-    rows = np.minimum((np.arange(shape[0]) * scale).astype(int), necrotic.shape[0] - 1)
-    cols = np.minimum((np.arange(shape[1]) * scale).astype(int), necrotic.shape[1] - 1)
-    inside = ((np.arange(shape[0]) * scale) < necrotic.shape[0])[:, None] & (
-        (np.arange(shape[1]) * scale) < necrotic.shape[1])[None, :]
-    return necrotic[np.ix_(rows, cols)] & inside, covered[np.ix_(rows, cols)] & inside
 
 
 def percent(part: np.ndarray, whole: np.ndarray) -> float | None:
@@ -119,7 +102,7 @@ def readout(rgb: np.ndarray, glass: np.ndarray, outline: np.ndarray, um_per_px: 
         necrotic, covered = necrosis
         surviving = in_tissue & covered & ~necrotic
         dead = in_tissue & covered & necrotic
-        enough = dead.sum() >= NECROTIC_MIN_PX
+        enough = dead.sum() >= NECROTIC_MIN_SHARE * (in_tissue & covered).sum()
         pixels |= {
             "covered": int((in_tissue & covered).sum()),
             "surviving": int(surviving.sum()),
@@ -142,7 +125,7 @@ def readout(rgb: np.ndarray, glass: np.ndarray, outline: np.ndarray, um_per_px: 
 
 def measure(job: tuple) -> dict:
     """One CYP2E1 slide: readout and gradient on its H&E partner's grid, raw and optionally flattened."""
-    cyp_stem, slides, prediction, out, flattened, provenance = job
+    cyp_stem, slides, calls, out, flattened, provenance = job
     side = sidecar(slides, cyp_stem)
     registration = Registration.model_validate(side["registration"])
     field = load_field(slides, registration)
@@ -159,8 +142,11 @@ def measure(job: tuple) -> dict:
     coarse = np.asarray(warped[pick_level(warped)])
     outline = mask_from_level(coarse)
     glass = glass_colour(coarse, outline)
-    record = json.loads(prediction.read_text()) if prediction is not None else None
-    necrosis = necrosis_on(record, he_shapes[index], he, index) if record is not None else None
+    necrosis, calls_meta = None, None
+    if calls is not None:
+        # the necrosis map on the readout's level; measured there is tissue the map covers, without lumina
+        necrotic, measured, calls_meta = calls_on_level(calls, he_shapes, index)
+        necrosis = (necrotic, measured)
 
     numbers, positive, position = readout(np.asarray(warped[index]), glass, outline, um_per_px, necrosis)
     row = {
@@ -168,8 +154,8 @@ def measure(job: tuple) -> dict:
         "dose_mg_per_kg": side.get("dose_mg_per_kg"),
         "serial_block": side.get("serial_block"),
         "registration": [registration.method, registration.nonrigid.method],
-        "predictions": prediction.name if prediction is not None else None,
-        "necrosis_cutoff": record["cutoff"] if record is not None else None,
+        "necrosis_map": calls.name if calls is not None else None,
+        "necrosis_cutoff": calls_meta["cutoff"] if calls_meta is not None else None,
         **numbers,
     }
 
@@ -194,7 +180,7 @@ def measure(job: tuple) -> dict:
         "slide": cyp_stem,
         "reference": registration.reference,
         "registration": row["registration"],
-        "predictions": row["predictions"],
+        "necrosis_map": row["necrosis_map"],
         "map": f"position between the window's low (0) and high ({POSITION_SCALE}) DAB, {NO_TISSUE} outside the tissue",
         "written": datetime.now(UTC).isoformat(timespec="seconds"),
         **provenance,
@@ -245,7 +231,7 @@ def main() -> None:
     """Measure every CYP2E1 slide in --slides and write maps, numbers and settings."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--slides", type=Path, required=True)
-    parser.add_argument("--predictions", type=Path, help="nested necrosis predictions")
+    parser.add_argument("--necrosis", type=Path, help="necrosis_slides.py output: the necrosis map per H&E slide")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--blocks", nargs="*", help="only stems containing one of these")
     parser.add_argument("--workers", type=int, default=10)
@@ -255,13 +241,12 @@ def main() -> None:
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 
-    predictions = {}
-    if args.predictions:
-        for path in sorted(args.predictions.glob("*_predictions.json")):
-            record = json.loads(path.read_text())
-            if "cutoff" not in record:
-                raise SystemExit(f"{path} has no nested cutoff; use the nested prediction files")
-            predictions[record["slide"]] = path
+    calls, necrosis_run = {}, None
+    if args.necrosis:
+        necrosis_run = json.loads((args.necrosis / "necrosis_slides.json").read_text())
+        calls = {row["slide"]: args.necrosis / f"{row['animal']}_necrosis.npz" for row in necrosis_run["slides"]}
+        if missing := [str(path) for path in calls.values() if not path.exists()]:
+            raise SystemExit("necrosis maps listed but missing:\n  " + "\n  ".join(missing))
 
     code = code_version()
     settings = ({name: getattr(dab, name) for name in DAB_SETTINGS}
@@ -272,7 +257,7 @@ def main() -> None:
         if args.blocks and not any(block in stem for block in args.blocks):
             continue
         reference = sidecar(args.slides, stem)["registration"]["reference"]
-        jobs.append((stem, args.slides, predictions.get(reference), args.out, args.flattened,
+        jobs.append((stem, args.slides, calls.get(reference), args.out, args.flattened,
                      {"code": code, "settings": settings}))
     if not jobs:
         raise SystemExit(f"no CYP2E1 slides in {args.slides}")
@@ -288,7 +273,9 @@ def main() -> None:
         "written": datetime.now(UTC).isoformat(timespec="seconds"),
         "code": code,
         "slides": str(args.slides),
-        "predictions": str(args.predictions) if args.predictions else None,
+        "necrosis": {"maps": str(args.necrosis), "written": necrosis_run["written"], "code": necrosis_run["code"],
+                     "split": "necrotic where most of the map's measured pixels in a working pixel are necrotic"}
+        if necrosis_run is not None else None,
         "flattened": str(args.slides / FLATTEN_DIR) if args.flattened else None,
         "method": "relative DAB readout and its gradient on the H&E grid, rigid plus non-rigid registration",
         "stain_vectors": "Ruifrok and Johnston 2001, skimage.color.hed_from_rgb",
