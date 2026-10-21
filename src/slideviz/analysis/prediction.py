@@ -28,6 +28,17 @@ CALL_RGB = (0.0, 234 / 255, 248 / 255)
 CALL_OPACITY = 0.42
 # the call's tile corners rounded for display; the drawn area stays within 0.6 points of the counted one
 CALL_ROUND_UM = 20.0
+# a necrosis call map is shown on the H&E level nearest this, about 80 MB for a mouse slide
+CALL_SHOWN_UM = 0.9
+# how napari draws a necrotic call: 1 in see-through cyan, 0 clear, no blend between the two
+CALL_LOOK = {
+    "colormap": {"colors": [[0.0, 0.0, 0.0, 0.0], [*CALL_RGB, 1.0]], "controls": [0.0, 0.5, 1.0],
+                 "interpolation": "zero", "name": "necrotic call"},
+    "contrast_limits": (0.0, 1.0),
+    "opacity": CALL_OPACITY,
+    "blending": "translucent_no_depth",
+    "interpolation2d": "nearest",  # a yes/no map, a blend between the two would be a third value
+}
 
 
 def tile_map(rows: list[dict], values: np.ndarray, fill: float = np.nan) -> np.ndarray:
@@ -132,8 +143,6 @@ def add_prediction_layers(
     with a lumen mask and its um/px, it is drawn finer with the lumina cut out.
     The area is the call at the file's nested cutoff, the area the readout counts.
     """
-    from napari.utils.colormaps import Colormap
-
     rows, predicted, _ = read_predictions(path)
     cutoff = json.loads(path.read_text())["cutoff"]
     grid = tile_map(rows, (predicted >= cutoff).astype(float), fill=0.0)
@@ -150,14 +159,30 @@ def add_prediction_layers(
             scale=(pixel_um, pixel_um),
             translate=(pixel_um / 2, pixel_um / 2),  # napari centres pixels on their indices
             units="um",
-            colormap=Colormap([[0.0, 0.0, 0.0, 0.0], [*CALL_RGB, 1.0]], controls=[0.0, 0.5, 1.0],
-                              interpolation="zero", name="necrotic call"),
-            contrast_limits=(0.0, 1.0),
-            opacity=CALL_OPACITY,
-            blending="translucent_no_depth",
-            interpolation2d="nearest",  # a yes/no map, a blend between the two would be a third value
             visible=visible,
+            **CALL_LOOK,
         ),
     ]
     log.debug("%d tiles as %.1f um pixels%s", len(rows), pixel_um, ", lumina cut out" if lumen is not None else "")
     return layers
+
+
+def call_level(path: Path, level_shapes: list[tuple[int, int]], level0_um: float) -> tuple[np.ndarray, float]:
+    """A necrosis call map's necrotic mask on the H&E level nearest CALL_SHOWN_UM, and that level's um/px."""
+    sizes = [level0_um * level_shapes[0][1] / shape[1] for shape in level_shapes]
+    index = min(range(len(sizes)), key=lambda i: abs(sizes[i] - CALL_SHOWN_UM))
+    necrotic, _, _ = calls_on_level(path, level_shapes, index)
+    return necrotic.astype(np.uint8), level0_um * pyramid_factor(level_shapes[0][1], level_shapes[index][1])
+
+
+def add_call_layer(viewer, necrotic: np.ndarray, um: float, name: str, visible: bool = False) -> object:
+    """Add a necrotic mask on one H&E pyramid level to an open viewer as the see-through necrotic area."""
+    return viewer.add_image(
+        necrotic,
+        name=name,
+        scale=(um, um),
+        # level pixel q is centred on level-0 pixel factor * q, where napari puts it with no shift
+        units="um",
+        visible=visible,
+        **CALL_LOOK,
+    )
