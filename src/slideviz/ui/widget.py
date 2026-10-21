@@ -34,7 +34,13 @@ from slideviz.analysis.dab import (
 from slideviz.analysis.flatten import flatten_levels
 from slideviz.analysis.flatten import load as load_flattening
 from slideviz.analysis.masked import to_rgba
-from slideviz.analysis.prediction import add_prediction_layers, read_lumen, tile_um_of
+from slideviz.analysis.prediction import (
+    add_call_layer,
+    add_prediction_layers,
+    call_level,
+    read_lumen,
+    tile_um_of,
+)
 from slideviz.analysis.stain import normalise_levels
 from slideviz.analysis.stain_stats import read as read_stain_reference
 from slideviz.analysis.tissue import mask_from_level, pick_level
@@ -70,9 +76,6 @@ EVENED_LEVELS = "slideviz_evened_levels"
 # a slide's flattening fields sit in this folder beside it, as <stem>_flatten.npz
 FLATTEN_DIR = "flatten"
 
-# a block's name carries this prefix, a prediction file's animal does not
-BLOCK_PREFIX = "apap_"
-
 # one colour per stain, so an overlay reads as two channels instead of two pictures
 STAIN_COLOURS = {"he": "green", "cyp2e1": "magenta", "cyp1a2": "magenta", "hmgb1": "cyan"}
 FALLBACK_COLOUR = "yellow"
@@ -92,8 +95,12 @@ DAB_STAINS = ("cyp2e1", "cyp1a2")
 # stored gradient map of a DAB slide, from scripts/cyp2e1_readout.py
 READOUT_SUFFIX = "_readout.npz"
 
-# that run's per-slide numbers, beside the maps
-READOUT_RECORD = "cyp2e1_readout.json"
+# that run's per-slide numbers, beside the maps; a rerun is added under a dated name, and the newest is shown
+READOUT_RECORDS = "cyp2e1_readout*.json"
+
+# necrosis_slides.py output beside the predictions: the necrosis map per animal and the run's areas
+NECROSIS_SUFFIX = "_necrosis.npz"
+NECROSIS_RECORD = "necrosis_slides.json"
 
 # necrosis_lumen.py output beside the predictions: one lumen file per animal and the run's areas
 LUMEN_SUFFIX = "_lumen.npz"
@@ -139,6 +146,11 @@ def block_title(row) -> str:
     return ", ".join([head, *([f"{dose} mg/kg"] if dose is not None else []), row["animal_id"]])
 
 
+def animal_name(block: str, substance: str | None) -> str:
+    """A block's animal as prediction files name it: the block without its substance prefix (apap_281mg_m1)."""
+    return block.removeprefix(f"{substance}_") if substance else block
+
+
 def layer_name(animal: str, what: str, kind: str | None = None) -> str:
     """Return a layer name containing the animal, content, and optional kind."""
     parts = [animal, what] + ([kind] if kind else [])
@@ -170,6 +182,12 @@ def registration_lines(registration: Registration) -> list[str]:
     return lines
 
 
+@thread_worker
+def placed_map(path: Path, level_shapes: list[tuple[int, int]], level0_um: float) -> tuple:
+    """The necrosis map on the H&E pyramid level it is shown on, off the UI thread."""
+    return call_level(path, level_shapes, level0_um)
+
+
 class SlideList(QWidget):
     """Slide picker docked into the napari window."""
 
@@ -185,6 +203,8 @@ class SlideList(QWidget):
         self._stain = None  # read on first use, then kept
         self._readout = None  # the readout run's numbers, read on first use, then kept
         self._lumen_areas = None  # necrotic areas without lumina per animal, read on first use, then kept
+        self._necrosis_areas = None  # the necrosis run's areas per animal, read on first use, then kept
+        self._map_worker = None  # the necrosis map being placed on the H&E pyramid
         # level shapes of the block's reference slide, the grid a non-rigid layer is drawn on
         self._reference_shapes: list[tuple[int, int]] = []
 
@@ -378,13 +398,19 @@ class SlideList(QWidget):
                 lines.append(f"<br><b>{STAIN_NAMES.get(row['stain'], row['stain'].upper())}</b>")
                 lines.extend(details)
 
-        prediction = self._prediction_file(block)
-        if prediction is not None:
+        animal = animal_name(block, slides[0]["substance"])
+        mapped = self._necrosis_record().get(animal)
+        prediction = self._prediction_file(animal)
+        if mapped is not None:
+            lines.append(f"<br><b>Necrosis</b> (necrosis map, {mapped['written'][:10]})")
+            drawn = f", drawn {mapped['area_drawn']:.1%}" if mapped.get("area_drawn") is not None else ""
+            lines.append(f"{mapped['area_E']:.1%} of tissue without lumina{drawn}")
+        elif prediction is not None:
             try:
                 record = json.loads(prediction.read_text())
                 written = record.get("written", "")[:10]  # the model output's date
                 lines.append(f"<br><b>Necrosis</b> (prediction file, {written})")
-                areas = self._lumen_record().get(block.removeprefix(BLOCK_PREFIX))
+                areas = self._lumen_record().get(animal)
                 if areas is not None:
                     lines.append(f"annotated {areas['area_annotated_no_lumen']:.1%}, "
                                  f"predicted {areas['area_predicted_no_lumen']:.1%} of tissue without lumina")
@@ -398,17 +424,35 @@ class SlideList(QWidget):
         self.info.setText("<br>".join(lines))
 
     def _readout_record(self) -> dict:
-        """The CYP2E1 readout run's record from the prediction directory, read once and kept."""
+        """The newest CYP2E1 readout run's record from the prediction directory, read once and kept."""
         if self._readout is None:
             self._readout = {}
             directory = settings.predictions_dir()
-            path = directory / READOUT_RECORD if directory is not None else None
-            if path is not None and path.exists():
+            paths = sorted(directory.glob(READOUT_RECORDS)) if directory is not None and directory.is_dir() else []
+            for path in paths:
                 try:
-                    self._readout = json.loads(path.read_text())
+                    record = json.loads(path.read_text())
                 except (OSError, ValueError) as exc:
                     log.warning("unreadable readout record %s: %s", path, exc)
+                    continue
+                if record.get("written", "") > self._readout.get("written", ""):
+                    self._readout = record
         return self._readout
+
+    def _necrosis_record(self) -> dict:
+        """The necrosis run's areas per animal, each with the run's date, read once and kept."""
+        if self._necrosis_areas is None:
+            self._necrosis_areas = {}
+            directory = settings.predictions_dir()
+            path = directory / NECROSIS_RECORD if directory is not None else None
+            if path is not None and path.exists():
+                try:
+                    record = json.loads(path.read_text())
+                    self._necrosis_areas = {row["animal"]: row | {"written": record["written"]}
+                                            for row in record["slides"]}
+                except (OSError, ValueError, KeyError) as exc:
+                    log.warning("unreadable necrosis record %s: %s", path, exc)
+        return self._necrosis_areas
 
     def _lumen_record(self) -> dict:
         """Necrotic areas without lumina per animal, from the lumen run's record, read once and kept."""
@@ -466,7 +510,7 @@ class SlideList(QWidget):
         stain = STAIN_NAMES.get(row["stain"], row["stain"].upper())
         # a scene number only means something on the files that hold more than one
         what = f"{stain} s{scene}" if info.n_scenes > 1 else stain
-        name = layer_name(row["serial_block"].removeprefix(BLOCK_PREFIX), what)
+        name = layer_name(animal_name(row["serial_block"], row["substance"]), what)
         if registration is None:
             self._reference_shapes = [level.shape[:2] for level in levels]
         affine = None
@@ -577,12 +621,18 @@ class SlideList(QWidget):
             layer.data = self._levels_for(layer.metadata)
 
     @staticmethod
-    def _prediction_file(block: str) -> Path | None:
-        """The model output for one block, when a prediction directory is configured."""
+    def _necrosis_map(animal: str) -> Path | None:
+        """The necrosis map for one animal, when the prediction directory holds one."""
+        directory = settings.predictions_dir()
+        path = directory / f"{animal}{NECROSIS_SUFFIX}" if directory is not None else None
+        return path if path is not None and path.exists() else None
+
+    @staticmethod
+    def _prediction_file(animal: str) -> Path | None:
+        """The tile model output for one animal, when a prediction directory is configured."""
         directory = settings.predictions_dir()
         if directory is None or not directory.is_dir():
             return None
-        animal = block.removeprefix(BLOCK_PREFIX)
         # an unannotated slide writes its own name, so try both
         for suffix in ("_predictions.json", "_unlabelled_predictions.json"):
             path = directory / f"{animal}{suffix}"
@@ -590,12 +640,32 @@ class SlideList(QWidget):
                 return path
         return None
 
-    def _load_predictions(self, block: str, reference_um: float) -> int:
-        """Add the predicted necrotic area in the reference stain's frame."""
-        path = self._prediction_file(block)
+    def _load_necrosis(self, animal: str, reference_um: float) -> None:
+        """Add the necrosis map, placed on the H&E pyramid off the UI thread; the tile predictions where none exists."""
+        path = self._necrosis_map(animal)
+        if path is None or not self._reference_shapes:
+            self._load_predictions(animal, reference_um)
+            return
+        name = layer_name(animal, DEFAULT_LABEL, "map")
+        self._set_busy(True)  # no other block opens or clears before the map arrives
+        self._show_activity(f"{animal}: placing the necrosis map")
+        worker = placed_map(path, list(self._reference_shapes), reference_um)
+        worker.returned.connect(lambda placed: add_call_layer(self.viewer, *placed, name=name))
+        worker.errored.connect(lambda exc: self.status.setText(f"{path.name}: {type(exc).__name__}: {exc}"))
+        worker.finished.connect(self._map_done)  # emitted after an error too
+        self._map_worker = worker
+        worker.start()
+
+    def _map_done(self) -> None:
+        """Free the controls once the necrosis map is in."""
+        self._map_worker = None
+        self._set_busy(False)
+
+    def _load_predictions(self, animal: str, reference_um: float) -> int:
+        """Add the predicted necrotic area from the tile model in the reference stain's frame."""
+        path = self._prediction_file(animal)
         if path is None:
             return 0
-        animal = block.removeprefix(BLOCK_PREFIX)
         try:
             record = json.loads(path.read_text())
             label = record.get("label", DEFAULT_LABEL)
@@ -653,10 +723,10 @@ class SlideList(QWidget):
                 continue
             self.viewer.add_image(
                 steps,
-                name=layer_name(row["serial_block"].removeprefix(BLOCK_PREFIX),
+                name=layer_name(animal_name(row["serial_block"], row["substance"]),
                                 STAIN_NAMES.get(row["stain"], row["stain"].upper()), "gradient"),
+                # a pyramid level's pixel q is centred on level-0 pixel factor * q, where napari puts it with no shift
                 scale=(pixel_um, pixel_um),
-                translate=(pixel_um / 2, pixel_um / 2),  # napari centres pixels on their indices
                 units="um",
                 colormap=STEP_COLOURS,
                 opacity=STEP_OPACITY,
@@ -686,10 +756,10 @@ class SlideList(QWidget):
     def _load_block(self, directory: str, block: str) -> None:
         """Open every stain of one block off the UI thread, adding each as it is ready."""
         slides = self._block_slides(directory, block)
-        if not slides or self._worker is not None:
+        if not slides or self._worker is not None or self._map_worker is not None:
             return
 
-        animal = block.removeprefix(BLOCK_PREFIX)
+        animal = animal_name(block, slides[0]["substance"])
         state = {"reference_um": None, "unaligned": [], "done": 0}
         self._reference_shapes = []  # another block's reference must not carry over
         self.status.setText("")  # the status line only carries this load's problems
@@ -718,7 +788,7 @@ class SlideList(QWidget):
             # CYP2E1 first, so the see-through necrosis lies on top and their overlap mixes
             self._load_readouts(slides)
             if reference_um:
-                self._load_predictions(block, reference_um)
+                self._load_necrosis(animal, reference_um)
             log.info("opened %s", block_title(slides[0]))
             if state["unaligned"]:
                 self.status.setText(f"{block}: overlaid, not registered: {', '.join(state['unaligned'])}")
@@ -746,7 +816,7 @@ class SlideList(QWidget):
 
     def _poll_pixels(self) -> None:
         """Show a busy bar while napari is still fetching pixels for any layer."""
-        if self._worker is not None:
+        if self._worker is not None or self._map_worker is not None:
             return
         waiting = [layer for layer in self.viewer.layers if not layer.loaded]
         if not waiting:
