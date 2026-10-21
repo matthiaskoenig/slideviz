@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "VALIS registration of serial sections, run in its own environment"
 requires-python = ">=3.12"
 dependencies = [
+    "certifi>=2026.10.19",  # GHSA-6q48-6c7w-9gw2: emSign roots with compromised intermediates
     "pyvips[binary]>=3.1.1",
     "valis-wsi>=1.2.0",
 ]
