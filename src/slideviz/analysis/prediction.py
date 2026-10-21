@@ -1,33 +1,21 @@
-"""Utilities for displaying per-tile predictions in napari, and for reading the per-pixel necrosis call maps.
-
-Tile maps use one pixel per tile and are scaled to slide coordinates in micrometres.
-"""
+"""The per-pixel necrosis call maps: read, placed on an H&E pyramid level, shown in napari; and the lumen masks."""
 
 from __future__ import annotations
 
 import json
-import logging
 from pathlib import Path
 
 import numpy as np
-from scipy.ndimage import gaussian_filter, map_coordinates
 
 from slideviz.analysis.tissue import pyramid_factor
-
-log = logging.getLogger(__name__)
 
 # necrosis_slides.py call maps: 1 necrotic, 0 not, this value where nothing was measured (glass, lumen, no tile)
 CALL_NOT_MEASURED = 255
 CALL_BAND_ROWS = 256  # level rows binned at a time, which keeps the temporary arrays to tens of MB
 
-# lumen-grid pixels per map pixel when lumina are cut out, ~3.5 um, so vessels show as holes
-LUMEN_POOL = 2
-
 # the necrotic call as a see-through cyan area; over the gold CYP2E1 steps it mixes to green
 CALL_RGB = (0.0, 234 / 255, 248 / 255)
 CALL_OPACITY = 0.42
-# the call's tile corners rounded for display; the drawn area stays within 0.6 points of the counted one
-CALL_ROUND_UM = 20.0
 # a necrosis call map is shown on the H&E level nearest this, about 80 MB for a mouse slide
 CALL_SHOWN_UM = 0.9
 # how napari draws a necrotic call: 1 in see-through cyan, 0 clear, no blend between the two
@@ -39,35 +27,6 @@ CALL_LOOK = {
     "blending": "translucent_no_depth",
     "interpolation2d": "nearest",  # a yes/no map, a blend between the two would be a third value
 }
-
-
-def tile_map(rows: list[dict], values: np.ndarray, fill: float = np.nan) -> np.ndarray:
-    """One value per tile as an array indexed by tile row and column."""
-    if len(rows) != len(values):
-        raise ValueError(f"{len(rows)} tiles against {len(values)} values")
-    height = max(r["row"] for r in rows) + 1
-    width = max(r["col"] for r in rows) + 1
-    grid = np.full((height, width), fill, dtype=float)
-    for row, value in zip(rows, values, strict=True):
-        grid[row["row"], row["col"]] = value
-    return grid
-
-
-def read_predictions(path: Path) -> tuple[list[dict], np.ndarray, np.ndarray]:
-    """A prediction file's tile rows, predicted scores and annotated fractions."""
-    record = json.loads(path.read_text())
-    rows = record["tiles"]
-    return (
-        rows,
-        np.array([t["predicted"] for t in rows], dtype=float),
-        np.array([t["necrosis"] for t in rows], dtype=float),
-    )
-
-
-def tile_um_of(path: Path, level_um_per_px: float) -> float:
-    """Return the tile width in micrometres from the grid's pixel size."""
-    record = json.loads(path.read_text())
-    return record["size_px"] * level_um_per_px
 
 
 def read_lumen(path: Path) -> tuple[np.ndarray, float] | None:
@@ -112,59 +71,6 @@ def calls_on_level(
         measured[q0:q1] = 2 * counted >= factor * factor
         necrotic[q0:q1] = measured[q0:q1] & (2 * called >= counted)
     return necrotic, measured, meta
-
-
-def without_lumina(
-    tiles: np.ndarray, tile_um: float, lumen: np.ndarray, lumen_um: float, order: int = 1
-) -> tuple[np.ndarray, float]:
-    """A tile map resampled onto the pooled lumen grid with the lumina cut out, and its um/px; order 0 keeps tiles whole."""
-    height, width = lumen.shape[0] // LUMEN_POOL, lumen.shape[1] // LUMEN_POOL
-    pooled = lumen[:height * LUMEN_POOL, :width * LUMEN_POOL].reshape(height, LUMEN_POOL, width, LUMEN_POOL)
-    open_share = 1.0 - pooled.mean(axis=(1, 3))
-    um = lumen_um * LUMEN_POOL
-    # tile centres sit at (index + 0.5) * tile_um, so linear sampling matches the tile map's own blending
-    rows = (np.arange(height) + 0.5) * um / tile_um - 0.5
-    cols = (np.arange(width) + 0.5) * um / tile_um - 0.5
-    values = map_coordinates(tiles, np.meshgrid(rows, cols, indexing="ij"), order=order, mode="constant", cval=0.0)
-    return (values * open_share).astype(np.float32), um
-
-
-def add_prediction_layers(
-    viewer,
-    path: Path,
-    tile_um: float,
-    predicted_name: str = "predicted",
-    visible: bool = False,
-    lumen: tuple[np.ndarray, float] | None = None,
-) -> list:
-    """Add the predicted necrotic area to an open viewer in micrometres.
-
-    The map uses absolute tile row and column indices and the reference stain's frame;
-    with a lumen mask and its um/px, it is drawn finer with the lumina cut out.
-    The area is the call at the file's nested cutoff, the area the readout counts.
-    """
-    rows, predicted, _ = read_predictions(path)
-    cutoff = json.loads(path.read_text())["cutoff"]
-    grid = tile_map(rows, (predicted >= cutoff).astype(float), fill=0.0)
-    # tiles are square and spaced by their own size, so one tile is one pixel at this scale
-    pixel_um = tile_um
-    if lumen is not None:
-        # nearest tile, so a pixel is necrotic when it lies in a called tile and mostly outside the lumina
-        grid, pixel_um = without_lumina(grid, tile_um, *lumen, order=0)
-    call = (gaussian_filter(grid, CALL_ROUND_UM / pixel_um) >= 0.5).astype(np.uint8)
-    layers = [
-        viewer.add_image(
-            call,
-            name=predicted_name,
-            scale=(pixel_um, pixel_um),
-            translate=(pixel_um / 2, pixel_um / 2),  # napari centres pixels on their indices
-            units="um",
-            visible=visible,
-            **CALL_LOOK,
-        ),
-    ]
-    log.debug("%d tiles as %.1f um pixels%s", len(rows), pixel_um, ", lumina cut out" if lumen is not None else "")
-    return layers
 
 
 def call_level(path: Path, level_shapes: list[tuple[int, int]], level0_um: float) -> tuple[np.ndarray, float]:
