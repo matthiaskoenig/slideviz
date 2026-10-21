@@ -19,6 +19,7 @@ classifiers = [
 ]
 
 dependencies = [
+    "certifi>=2026.10.19",  # GHSA-6q48-6c7w-9gw2: emSign roots with compromised intermediates
     "dask>=2026.7.1",
     "imagecodecs>=2026.8.16",
     "napari[pyqt6]>=0.8.0",
