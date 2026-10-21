@@ -20,6 +20,7 @@ from qtpy.QtWidgets import (
     QListWidgetItem,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -250,11 +251,17 @@ class SlideList(QWidget):
         clear.clicked.connect(self._clear)
 
         self.status = QLabel()
+        self.status.setWordWrap(True)  # long messages wrap instead of widening the dock
+        # the busy line and bar share one row whose room stays reserved when idle, so nothing above moves
         self.activity = QLabel()
-        for label in (self.status, self.activity):
-            label.setWordWrap(True)  # long messages wrap instead of widening the dock
+        self.activity.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)  # cut, not widened
         self.progress = QProgressBar()
         self.progress.setTextVisible(False)
+        self.progress.setMaximumWidth(120)
+        for part in (self.activity, self.progress):
+            policy = part.sizePolicy()
+            policy.setRetainSizeWhenHidden(True)
+            part.setSizePolicy(policy)
         self._show_activity(None)
         self._buttons = (load, add, clear)
         self._worker = None  # the block being opened, one at a time
@@ -292,8 +299,10 @@ class SlideList(QWidget):
         layout.addWidget(self.even_staining)
         layout.addLayout(turn)
         layout.addLayout(buttons)
-        layout.addWidget(self.activity)
-        layout.addWidget(self.progress)
+        busy = QHBoxLayout()
+        busy.addWidget(self.activity, stretch=1)
+        busy.addWidget(self.progress)
+        layout.addLayout(busy)
         layout.addWidget(self.status)
 
         self._pixels = QTimer(self)
