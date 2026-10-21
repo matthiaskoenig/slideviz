@@ -20,6 +20,7 @@ from qtpy.QtWidgets import (
     QListWidgetItem,
     QProgressBar,
     QPushButton,
+    QSlider,
     QVBoxLayout,
     QWidget,
 )
@@ -76,6 +77,10 @@ FALLBACK_COLOUR = "yellow"
 
 # how a stain is written in the layer list, where the index's lowercase key reads badly
 STAIN_NAMES = {"he": "H&E", "cyp2e1": "CYP2E1", "cyp1a2": "CYP1A2", "hmgb1": "HMGB1"}
+
+# where a layer keeps its own placement (its registration, or none), so turning the view composes on top of it
+BASE_AFFINE = "slideviz_base_affine"
+TURN_STEP = 90  # degrees per press of a turn button
 
 # separates the parts of a layer name: animal, then what it shows
 NAME_SEPARATOR = " · "
@@ -134,6 +139,15 @@ def block_title(row) -> str:
     dose = row["dose_mg_per_kg"]
     head = " ".join(part for part in (row["species"], row["substance"]) if part)
     return ", ".join([head, *([f"{dose} mg/kg"] if dose is not None else []), row["animal_id"]])
+
+
+def turned(angle: float):
+    """The 2D affine that turns the view by `angle` degrees clockwise on screen about the world origin."""
+    import numpy as np
+
+    c, s = np.cos(np.radians(angle)), np.sin(np.radians(angle))
+    # world axes are (row, col) with rows running down the screen
+    return np.array([[c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]])
 
 
 def animal_name(block: str, substance: str | None) -> str:
@@ -249,12 +263,34 @@ class SlideList(QWidget):
         for button in (load, add, clear):
             buttons.addWidget(button)
 
+        # the 2D camera cannot turn, so every layer is turned about the world origin and the camera follows
+        self._angle = 0
+        self.angle = QSlider(Qt.Orientation.Horizontal)
+        self.angle.setRange(-180, 180)
+        self.angle.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.angle.setTickInterval(TURN_STEP)
+        self.angle.setToolTip("Turn the view clockwise by this angle; the pixels are not changed")
+        self.angle.valueChanged.connect(self._turn_to)
+        self.angle_shown = QLabel("0\u00b0")
+        self.angle_shown.setMinimumWidth(40)
+        left, right = QPushButton("\u27f2 90"), QPushButton("\u27f3 90")
+        left.setToolTip("Turn the view 90 degrees counterclockwise")
+        right.setToolTip("Turn the view 90 degrees clockwise")
+        left.clicked.connect(lambda: self._turn_by(-TURN_STEP))
+        right.clicked.connect(lambda: self._turn_by(TURN_STEP))
+        turn = QHBoxLayout()
+        turn.addWidget(QLabel("Turn"))
+        for control in (left, self.angle, right, self.angle_shown):
+            turn.addWidget(control)
+        self.viewer.layers.events.inserted.connect(self._place_new)
+
         layout = QVBoxLayout(self)  # passing self installs it as this widget's layout
         layout.addLayout(filters)
         layout.addWidget(self.list)
         layout.addWidget(self.info)
         layout.addWidget(self.hide_background)
         layout.addWidget(self.even_staining)
+        layout.addLayout(turn)
         layout.addLayout(buttons)
         layout.addWidget(self.activity)
         layout.addWidget(self.progress)
@@ -744,6 +780,37 @@ class SlideList(QWidget):
         self.progress.setVisible(text is not None)
         if text is not None:
             self.activity.setText(text)
+
+    def _turn_by(self, step: int) -> None:
+        """Turn the view by a number of degrees clockwise, through the slider so both stay in step."""
+        self.angle.setValue((self.angle.value() + step + 180) % 360 - 180)
+
+    def _turn_to(self, angle: int) -> None:
+        """Turn every layer to `angle` and the camera with them, so the spot in the middle stays there."""
+        import numpy as np
+
+        step = turned(angle - self._angle)
+        self._angle = angle
+        self.angle_shown.setText(f"{angle}\u00b0")
+        for layer in self.viewer.layers:
+            if BASE_AFFINE in layer.metadata:  # layers from before this widget keep their place
+                self._place(layer)
+        centre = list(self.viewer.camera.center)
+        centre[-2:] = (step @ np.array([*centre[-2:], 1.0]))[:2]
+        self.viewer.camera.center = tuple(centre)
+
+    def _place(self, layer) -> None:
+        """Lay the view's turn over a layer's own placement."""
+        layer.affine = turned(self._angle) @ layer.metadata[BASE_AFFINE]
+
+    def _place_new(self, event) -> None:
+        """Keep a new layer's own placement, then turn it with the view."""
+        layer = event.value
+        if layer.ndim != 2:  # the turn is 2D; anything else is left as it comes
+            return
+        layer.metadata[BASE_AFFINE] = layer.affine.affine_matrix.copy()
+        if self._angle:
+            self._place(layer)
 
     def _replace(self) -> None:
         """Drop the open layers and show the selected block on its own."""
