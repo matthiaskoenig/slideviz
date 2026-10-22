@@ -2,14 +2,16 @@
 
 Picture rows use the flattening fields in <slides>/flatten/; the segmentations use raw pixels.
 Necrosis is the necrosis map and its areas from the necrosis_slides.py run in --necrosis, vessel lumina left out.
+The time plot takes the simulated curves from --model, the PI's time courses (one zonation pattern, doses D1 to D8).
 
     uv run --with matplotlib python scripts/manuscript_figure.py --slides <APAP_tiff> \
-        --necrosis <necrosis_slides.py output> --out <figures>
+        --necrosis <necrosis_slides.py output> --model <necrosis-dose-timecourses.csv> --out <figures>
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 from pathlib import Path
 
@@ -76,10 +78,14 @@ PLOT_MM = 38.0
 PLOT_SPACE_MM = 14.0  # between the two plots, room for the right one's axis label
 BOTTOM_MM = 10.0
 
-# necrosis against time: the slides were taken at one time point
+# necrosis against time: the slides were taken at one time point, the simulation runs to it
 DATA_HOURS = 24
-TIME_MAX_H = 48
+TIME_MAX_H = 26  # just past the data, whose markers spread around 24 h
+TIME_TICK_H = 6
 DOSE_SPREAD_H = 0.7  # markers per dose spread around the time point so error bars stay apart
+# the simulation (PI, 21 Oct): this zonation pattern; its doses D1 to D8 are not matched to mg/kg, so greys, not teals
+MODEL_PATTERN = "Linear increase"
+MODEL_LIGHT, MODEL_DARK = (200, 200, 200), (40, 40, 40)
 # doses light to dark in teal, the necrosis hue; the lightest is 2.3:1 against white
 DOSE_LIGHT, DOSE_DARK = (64, 186, 204), (6, 62, 76)
 
@@ -267,24 +273,52 @@ def area_panel(ax, by_dose: dict, top: float) -> None:
     ax.spines[["top", "right"]].set_visible(False)
 
 
-def time_panel(ax, by_dose: dict, top: float) -> None:
-    """Necrotic area against time after dosing: the data as mean and SD per dose; the model curves are to come."""
+def read_model(path: Path) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """The simulated curves of MODEL_PATTERN per dose label, as hours and percent of tissue necrotic."""
+    curves: dict[tuple[int, str], list] = {}
+    with path.open() as handle:
+        for row in csv.DictReader(handle):
+            if row["pattern"].split(maxsplit=1)[1] == MODEL_PATTERN:  # "B  Linear increase"
+                curves.setdefault((int(row["dose"]), row["dose_label"]), []).append(
+                    (float(row["time_h"]), float(row["necrosis_percent"])))
+    if not curves:
+        raise ValueError(f"no pattern {MODEL_PATTERN!r} in {path}")
+    return {label: tuple(np.array(sorted(points)).T) for (_, label), points in sorted(curves.items())}
+
+
+def time_panel(ax, by_dose: dict, top: float, model: dict | None = None) -> None:
+    """Necrotic area against time after dosing: the data as mean and SD per dose, the simulated curves in grey."""
+    if model:
+        for (t, y), share in zip(model.values(), np.linspace(0, 1, len(model)), strict=True):
+            grey = [((1 - share) * a + share * b) / 255 for a, b in zip(MODEL_LIGHT, MODEL_DARK, strict=True)]
+            ax.plot(t, y, color=grey, lw=0.8, zorder=1)
+        first, last = next(iter(model)), list(model)[-1]
+        ax.text(0.03, 0.97, f"model, {MODEL_PATTERN.lower()}: {first} light to {last} dark", transform=ax.transAxes,
+                ha="left", va="top", fontsize=5, color="#555555")
+    else:
+        ax.text(0.03, 0.97, "model curves: placeholder", transform=ax.transAxes, ha="left", va="top",
+                fontsize=5, color="#888888")
     colours = dose_colours(list(by_dose))
     middle = (len(by_dose) - 1) / 2
     for k, (dose, animals) in enumerate(by_dose.items()):
         values = np.array([v for _, v in animals])
         ax.errorbar(DATA_HOURS + (k - middle) * DOSE_SPREAD_H, values.mean(), yerr=values.std(ddof=1),
                     fmt="o", ms=3, color=colours[dose], ecolor=colours[dose], elinewidth=0.8, capsize=1.5,
-                    label=f"{dose} mg/kg")
-    ax.text(0.03, 0.97, "model curves: placeholder", transform=ax.transAxes, ha="left", va="top",
-            fontsize=5, color="#888888")
+                    label=f"{dose} mg/kg", zorder=3)
     ax.set_xlim(0, TIME_MAX_H)
     ax.set_ylim(-2, top)
-    ax.set_xticks(range(0, TIME_MAX_H + 1, 12))
+    ax.set_xticks(range(0, DATA_HOURS + 1, TIME_TICK_H))
     ax.set_xlabel("Time after APAP [h]", fontsize=7)
     ax.set_ylabel("Necrotic area [% of tissue]", fontsize=7)
     ax.tick_params(labelsize=6)
-    ax.legend(fontsize=5, frameon=False, loc="upper right", handlelength=1)
+    # above the plot, where the simulated curves leave no room; matplotlib fills columns first, so the doses
+    # are reordered to read across the two rows
+    handles, labels = ax.get_legend_handles_labels()
+    columns = 3
+    rows = -(-len(handles) // columns)
+    order = [r * columns + c for c in range(columns) for r in range(rows) if r * columns + c < len(handles)]
+    ax.legend([handles[i] for i in order], [labels[i] for i in order], fontsize=5, frameon=False, loc="lower left",
+              bbox_to_anchor=(0.0, 1.0), ncol=columns, handlelength=1, columnspacing=1.2, borderaxespad=0.2)
     ax.spines[["top", "right"]].set_visible(False)
 
 
@@ -348,7 +382,7 @@ def image_panel(ax, data: dict, row: int) -> None:
         spine.set_linewidth(0.4)
 
 
-def draw(blocks: dict, necrosis_dir: Path, out: Path) -> None:
+def draw(blocks: dict, necrosis_dir: Path, out: Path, model: dict | None = None) -> None:
     """The whole figure on one A4 page, panels placed in millimetres so the grid stays tight."""
     rows, columns = len(ROWS), len(blocks)
     page_width, page_height = PAGE_MM
@@ -386,11 +420,14 @@ def draw(blocks: dict, necrosis_dir: Path, out: Path) -> None:
     key_panel(fig.add_axes(rect(origin, grid_bottom + KEY_GAP_MM, grid_width, KEY_MM)), base)
 
     by_dose = necrotic_areas(necrosis_dir)
-    top = 1.08 * max(v for animals in by_dose.values() for _, v in animals) + 2  # both plots on one scale
+    highest = max([v for animals in by_dose.values() for _, v in animals]
+                  + [float(y.max()) for _, y in (model or {}).values()])
+    top = 1.08 * highest + 2  # both plots on one scale
     plot_top = grid_bottom + KEY_GAP_MM + KEY_MM + PLOT_GAP_MM
     plot_width = (grid_width - PLOT_SPACE_MM) / 2
     area_panel(fig.add_axes(rect(origin, plot_top, plot_width, PLOT_MM)), by_dose, top)
-    time_panel(fig.add_axes(rect(origin + plot_width + PLOT_SPACE_MM, plot_top, plot_width, PLOT_MM)), by_dose, top)
+    time_panel(fig.add_axes(rect(origin + plot_width + PLOT_SPACE_MM, plot_top, plot_width, PLOT_MM)), by_dose, top,
+               model)
 
     for suffix in ("png", "pdf"):
         fig.savefig(out / f"necrosis_figure.{suffix}", dpi=400)
@@ -404,14 +441,16 @@ def main() -> None:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--slides", type=Path, required=True)
     parser.add_argument("--necrosis", type=Path, required=True, help="necrosis_slides.py output")
+    parser.add_argument("--model", type=Path, help="the PI's simulated necrosis time courses (csv)")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
+    model = read_model(args.model) if args.model else None
 
     blocks = {dose: read_block(args.slides, args.necrosis, block, spot)
               for dose, (block, spot) in BLOCKS.items()}
 
     args.out.mkdir(parents=True, exist_ok=True)
-    draw(blocks, args.necrosis, args.out)
+    draw(blocks, args.necrosis, args.out, model)
     print(f"written to {args.out}")
 
 
