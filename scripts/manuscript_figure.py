@@ -83,11 +83,12 @@ DATA_HOURS = 24
 TIME_MAX_H = 26  # just past the data, whose markers spread around 24 h
 TIME_TICK_H = 6
 DOSE_SPREAD_H = 0.7  # markers per dose spread around the time point so error bars stay apart
-# the simulation (PI, 21 Oct): this zonation pattern; its doses D1 to D8 are not matched to mg/kg, so greys, not teals
+# the simulation (PI, 21 Oct): this zonation pattern; its doses D1 to D8 are not matched to mg/kg, so greys, not blues
 MODEL_PATTERN = "Linear increase"
 MODEL_LIGHT, MODEL_DARK = (200, 200, 200), (40, 40, 40)
-# doses light to dark in teal, the necrosis hue; the lightest is 2.3:1 against white
-DOSE_LIGHT, DOSE_DARK = (64, 186, 204), (6, 62, 76)
+# doses light to dark in the necrosis blue (the call's cyan as it shows over the H&E), at these CIELAB lightnesses;
+# the lightest is 2.4:1 against white
+DOSE_LIGHTNESS = (68.0, 28.0)
 
 
 def pick_level(levels, level0_um: float, target_um: float) -> int:
@@ -242,11 +243,12 @@ def necrotic_areas(necrosis_dir: Path) -> dict[int, list[tuple[str, float]]]:
     return dict(sorted(by_dose.items()))
 
 
-def dose_colours(doses: list[int]) -> dict[int, tuple]:
-    """One teal per dose, light to dark and evenly spaced in CIELAB, so the model curves can take the same colours."""
-    light, dark = (rgb2lab(np.array([[rgb]]) / 255)[0, 0] for rgb in (DOSE_LIGHT, DOSE_DARK))
-    return {dose: tuple(np.clip(lab2rgb(((1 - t) * light + t * dark)[None, None])[0, 0], 0, 1))
-            for dose, t in zip(doses, np.linspace(0, 1, len(doses)), strict=True)}
+def dose_colours(doses: list[int], base: np.ndarray) -> dict[int, tuple]:
+    """One blue per dose, light to dark, in the hue the necrotic call has over the H&E `base`, so plots match panels."""
+    shown = CALL_OPACITY * np.array(CALL_RGB) + (1 - CALL_OPACITY) * base
+    _, a, b = rgb2lab(shown[None, None])[0, 0]
+    return {dose: tuple(np.clip(lab2rgb(np.array([[[lightness, a, b]]]))[0, 0], 0, 1))
+            for dose, lightness in zip(doses, np.linspace(*DOSE_LIGHTNESS, len(doses)), strict=True)}
 
 
 def area_panel(ax, by_dose: dict, top: float) -> None:
@@ -286,7 +288,7 @@ def read_model(path: Path) -> dict[str, tuple[np.ndarray, np.ndarray]]:
     return {label: tuple(np.array(sorted(points)).T) for (_, label), points in sorted(curves.items())}
 
 
-def time_panel(ax, by_dose: dict, top: float, model: dict | None = None) -> None:
+def time_panel(ax, by_dose: dict, top: float, base: np.ndarray, model: dict | None = None) -> None:
     """Necrotic area against time after dosing: the data as mean and SD per dose, the simulated curves in grey."""
     if model:
         for (t, y), share in zip(model.values(), np.linspace(0, 1, len(model)), strict=True):
@@ -298,7 +300,7 @@ def time_panel(ax, by_dose: dict, top: float, model: dict | None = None) -> None
     else:
         ax.text(0.03, 0.97, "model curves: placeholder", transform=ax.transAxes, ha="left", va="top",
                 fontsize=5, color="#888888")
-    colours = dose_colours(list(by_dose))
+    colours = dose_colours(list(by_dose), base)
     middle = (len(by_dose) - 1) / 2
     for k, (dose, animals) in enumerate(by_dose.items()):
         values = np.array([v for _, v in animals])
@@ -427,7 +429,7 @@ def draw(blocks: dict, necrosis_dir: Path, out: Path, model: dict | None = None)
     plot_width = (grid_width - PLOT_SPACE_MM) / 2
     area_panel(fig.add_axes(rect(origin, plot_top, plot_width, PLOT_MM)), by_dose, top)
     time_panel(fig.add_axes(rect(origin + plot_width + PLOT_SPACE_MM, plot_top, plot_width, PLOT_MM)), by_dose, top,
-               model)
+               base, model)
 
     for suffix in ("png", "pdf"):
         fig.savefig(out / f"necrosis_figure.{suffix}", dpi=400)
