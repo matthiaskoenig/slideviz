@@ -289,14 +289,17 @@ def read_model(path: Path) -> dict[str, tuple[np.ndarray, np.ndarray]]:
 
 
 def time_panel(ax, by_dose: dict, top: float, base: np.ndarray, model: dict | None = None) -> None:
-    """Necrotic area against time after dosing: the data as mean and SD per dose, the simulated curves in grey."""
+    """Necrotic area over time: the data as mean and SD per dose, the simulated curves in grey, each with a legend."""
     if model:
+        lines = []
         for (t, y), share in zip(model.values(), np.linspace(0, 1, len(model)), strict=True):
             grey = [((1 - share) * a + share * b) / 255 for a, b in zip(MODEL_LIGHT, MODEL_DARK, strict=True)]
-            ax.plot(t, y, color=grey, lw=0.8, zorder=1)
-        first, last = next(iter(model)), list(model)[-1]
-        ax.text(0.03, 0.97, f"model, {MODEL_PATTERN.lower()}: {first} light to {last} dark", transform=ax.transAxes,
-                ha="left", va="top", fontsize=5, color="#555555")
+            lines.extend(ax.plot(t, y, color=grey, lw=0.8, zorder=1))
+        # its own legend in the empty top left, kept when the data legend is added
+        simulation = ax.legend(lines, list(model), title=f"simulation, {MODEL_PATTERN.lower()}", loc="upper left",
+                               ncol=2, fontsize=5, title_fontsize=5, frameon=False, handlelength=1.5,
+                               columnspacing=1.0, borderaxespad=0.3, alignment="left")
+        ax.add_artist(simulation)
     else:
         ax.text(0.03, 0.97, "model curves: placeholder", transform=ax.transAxes, ha="left", va="top",
                 fontsize=5, color="#888888")
