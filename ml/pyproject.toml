@@ -9,6 +9,7 @@ dependencies = [
     "pillow>=11.0",
     "scikit-image>=0.25",  # rgb2lab/lab2rgb for stain matching, see stain_norm.py
     "scikit-learn>=1.6",
+    "threadpoolctl>=3.5",  # threadpool_limits in train_patch_head.py
     "timm>=1.0.20",
     "torch>=2.6",
     "torchvision>=0.21",

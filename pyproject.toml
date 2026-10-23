@@ -3,7 +3,7 @@ name = "slideviz"
 version = "0.1.0"
 description = "Interactive visualization of whole-slide liver histology and derived spatial readouts"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.14"
 license = "MIT"
 authors = [
     { name = "Michelle Elias", email = "elias.michelle@web.de" },
@@ -24,11 +24,13 @@ dependencies = [
     "imagecodecs>=2026.8.16",
     "napari[pyqt6]>=0.8.0",
     "numpy>=2.0",
+    "pillow>=12.3.0",
     "platformdirs>=4.11.2",
     "pydantic-settings>=2.15.0",
     "pylibczirw>=6.1.0",
     "rich>=15.0.0",
     "scikit-image>=0.25",
+    "scipy>=1.18.0",
     "tifffile>=2026.7.31",
     "zarr>=3.3.0",
 ]
@@ -43,6 +45,3 @@ Repository = "https://github.com/matthiaskoenig/slideviz"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
-
-[dependency-groups]
-dev = []
