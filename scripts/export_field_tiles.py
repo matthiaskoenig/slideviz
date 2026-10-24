@@ -5,11 +5,10 @@
         [--tile-um 75 --target-um-per-px 0.5]
     uv run python scripts/export_field_tiles.py --slides <APAP_tiff> --out <dir> --slide 281mg_m1
 
-A field is an animal and its centre in H&E level-0 px (row, col); --slide takes a whole slide
-instead, as the square around its tissue and a tile beyond. Tiles are cut as for training
-(same size, level and tissue rule; --tile-um and --target-um-per-px as given to
-export_tiles.py) but every --stride-um; the manifest reads like export_tiles.py's, so
-ml/embed_tiles.py embeds it unchanged.
+A field is an animal and its centre in H&E level-0 px (row, col); --slide takes a whole slide, as the
+square around its tissue and a tile beyond each side. Tiles are cut as for training (same size, level and
+tissue rule; --tile-um and --target-um-per-px as given to export_tiles.py), every --stride-um; the tile
+rows carry export_tiles.py's fields, which ml/embed_tiles.py reads.
 """
 
 from __future__ import annotations
@@ -79,7 +78,7 @@ def export_field(slides: Path, animal: str, centre: tuple[int, int], size_um: fl
     slide = path.name.split(".")[0]
     (out / "tiles" / animal).mkdir(parents=True, exist_ok=True)
     rows = []
-    digits = max(3, len(str(count - 1)))  # three for a 1 mm field, as before; more across a whole slide
+    digits = max(3, len(str(count - 1)))  # at least three, more once an index reaches 1000
     for i, y in enumerate(ys):
         for j, x in enumerate(xs):
             if y < top or x < left or y + size_px > bottom or x + size_px > right:

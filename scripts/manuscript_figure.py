@@ -88,7 +88,7 @@ DATA_HOURS = 24
 TIME_MAX_H = 26  # just past the data, whose markers spread around 24 h
 TIME_TICK_H = 6
 DOSE_SPREAD_H = 0.7  # markers per dose spread around the time point so error bars stay apart
-# the simulation (PI, 21 Oct): this zonation pattern; its doses D1 to D8 are not matched to mg/kg, so greys, not blues
+# the PI's simulation: this zonation pattern, its doses D1 to D8 unmatched to mg/kg and drawn in greys
 MODEL_PATTERN = "Linear increase"
 MODEL_LIGHT, MODEL_DARK = (200, 200, 200), (40, 40, 40)
 # doses light to dark in the necrosis blue (the call's cyan as it shows over the H&E), at these CIELAB lightnesses;
@@ -106,7 +106,7 @@ def pick_level(levels, level0_um: float, target_um: float) -> int:
 
 
 def cyp2e1_field(warped: list, he: list, um: float, spot: tuple[int, int]) -> tuple[np.ndarray, float]:
-    """The CYP2E1 gradient steps over the zoom field (0 to STEPS - 1, STEPS excluded) and its um/px."""
+    """The CYP2E1 gradient steps over the zoom field (0 to STEPS - 1, STEPS outside the tissue) and its um/px."""
     level = pick_level(he, um, WORK_UM)
     factor = he[0].shape[1] / he[level].shape[1]
     half = int((ZOOM_UM / 2 + READOUT_MARGIN_UM) / (um * factor))
@@ -220,7 +220,7 @@ def necrotic_areas(necrosis_dir: Path) -> dict[int, list[tuple[str, float]]]:
 
 
 def dose_colours(doses: list[int], base: np.ndarray) -> dict[int, tuple]:
-    """One blue per dose, light to dark, in the hue the necrotic call has over the H&E `base`, so plots match panels."""
+    """One blue per dose, light to dark, in the hue the necrotic call has over the H&E `base`."""
     shown = CALL_OPACITY * np.array(CALL_RGB) + (1 - CALL_OPACITY) * base
     _, a, b = rgb2lab(shown[None, None])[0, 0]
     return {dose: tuple(np.clip(lab2rgb(np.array([[[lightness, a, b]]]))[0, 0], 0, 1))
@@ -364,7 +364,7 @@ def image_panel(ax, data: dict, row: int) -> None:
 
 
 def draw(blocks: dict, necrosis_dir: Path, out: Path, model: dict | None = None) -> None:
-    """The whole figure on one A4 page, panels placed in millimetres so the grid stays tight."""
+    """The whole figure on one A4 page, panels placed in millimetres."""
     rows, columns = len(ROWS), len(blocks)
     page_width, page_height = PAGE_MM
     fixed = TITLE_MM + (rows - 1) * GAP_MM + KEY_GAP_MM + KEY_MM + PLOT_GAP_MM + PLOT_MM + BOTTOM_MM

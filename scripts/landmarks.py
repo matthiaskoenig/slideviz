@@ -162,7 +162,7 @@ def level0_um(slides: Path, slide: str) -> float:
 
 
 def main() -> None:
-    """Place landmarks for one block, or score all placed blocks."""
+    """Place landmarks for one block, cache the views of the named blocks, or score all placed blocks."""
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("command", choices=("place", "score", "cache"))

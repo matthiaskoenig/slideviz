@@ -1,15 +1,16 @@
-"""Necrosis on whole slides: the per-patch map (D) snapped to the H&E's edges (E), on tissue without lumina, and the areas.
+"""The necrosis map on whole slides: per-patch scores snapped to the H&E's edges, on tissue without lumina, and the areas.
 
     uv run python scripts/necrosis_slides.py --slides /data/michelle/slides \
         --maps <predict_slide_patches.py output> --lumen /data/michelle/necrosis_lumen_2026-10-11 \
         --out <dir> --workers 5
 
-E, the readout (her pick, 19 Oct), is D's mean score smoothed with the guided filter on the H&E, at the
-settings of the comparison (slideviz.analysis.edge_snap), run in blocks that overlap by twice the window. A
-pixel is necrotic where its score reaches the cutoff of the head fitted without its animal. Areas count tissue
-the tiles cover: the outline without lumina (the lumen masks of necrosis_lumen.py), levels mapped by their
-exact factors. D's area is kept beside E's as a check, and today's tile model's and the drawn polygons'
-areas (necrosis_lumen.py's, lumina out) for comparison. Writes one call map per slide and a table.
+The necrosis map is the per-patch mean score smoothed with the guided filter on the H&E, at the settings of
+slideviz.analysis.edge_snap, run in blocks that overlap by twice the window. A pixel is necrotic where its
+score reaches the cutoff of the head fitted without its animal. Areas count tissue the tiles cover: the outline
+without lumina (the lumen masks of necrosis_lumen.py), levels mapped by their exact factors. The map is stored as
+call_E and area_E, the map before edge snapping as call_D and area_D, and the tile model's and the drawn
+polygons' areas (necrosis_lumen.py's, lumina out) as area_A_tiles and area_drawn. Writes one call-map file per
+slide and a table.
 """
 
 from __future__ import annotations
@@ -53,7 +54,7 @@ def snapped(score: np.ndarray, level: object, origin: tuple[int, int], radius: i
 
 
 def one_slide(job: tuple) -> dict:
-    """E and D's calls and areas for one slide; writes its call maps."""
+    """One slide's record with the areas of the necrosis map and of the map before edge snapping; writes both call maps."""
     path, slides, lumen_dir, out = job
     stored = np.load(path)
     meta = json.loads(str(stored["meta"]))
@@ -106,7 +107,7 @@ def main() -> None:
     with ProcessPoolExecutor(max(1, min(args.workers, len(paths))), mp_context=get_context("spawn")) as pool:
         rows = list(pool.map(one_slide, [(p, args.slides, args.lumen, args.out) for p in paths]))
 
-    # today's tile model and the drawn polygons, lumina out, from the lumen run
+    # the tile model's and the drawn polygons' areas, lumina out, from the lumen run
     before = {r["animal"]: r for r in json.loads((args.lumen / "necrosis_lumen.json").read_text())["slides_areas"]}
     for row in rows:
         old = before.get(row["animal"], {})
@@ -118,7 +119,8 @@ def main() -> None:
     record = {
         "written": datetime.now(UTC).isoformat(timespec="seconds"),
         "code": code_version(Path(__file__)),
-        "readout": "E: D's per-patch mean score, guided filter on the H&E, at the head's cutoff (her pick, 19 Oct)",
+        "readout": ("the necrosis map (call_E, area_E): per-patch mean score, guided filter on the H&E, "
+                    "at the head's cutoff; call_D, area_D: the map before edge snapping"),
         "edge_snap": {"radius_um": NECROSIS_RADIUS_UM, "eps": NECROSIS_EPS, "block_px": BLOCK,
                       "overlap": "twice the radius on every side"},
         "area": "necrotic share of measured tissue: covered by a tile, inside the outline, outside lumina",

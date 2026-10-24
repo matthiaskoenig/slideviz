@@ -37,7 +37,7 @@ COLOURS = plt.get_cmap("tab10").colors
 
 
 def short(name: str) -> str:
-    """01_TUM -> TUM."""
+    """The class name without its number prefix: 01_TUM -> TUM."""
     return name.split("_", 1)[1]
 
 

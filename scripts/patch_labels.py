@@ -7,13 +7,12 @@
 
 The encoder sees a whole tile resized to 224 px and describes it in 28 x 28 patches, so patch (r, c)
 covers the tile's rows r * size / 28 to (r + 1) * size / 28, edges that fall between pixels (6.07 px at
-170 px). Tissue is the tissue outline without lumina (the 11 Oct lumen rule). A patch is necrotic when
-at least half of it is tissue inside a polygon, not necrotic when it is at least half tissue and its
-centre lies more than --band-um outside every polygon, and left out of training otherwise: the band
-between, since the polygons stop short of the necrosis edge, and patches mostly glass or lumen.
-The fractions behind the labels are written beside them, and the labels are set from those stored
-values, so a different rule needs no rerun. Every tile's patches must average back to its label in
-the manifest, or nothing is written.
+170 px). Tissue is the tissue outline without lumina (necrosis_lumen.py's lumen masks). A patch is labelled
+1 (necrotic) when at least half of it is tissue inside a polygon, 0 when it is at least half tissue and its
+centre lies more than --band-um outside every polygon, and -1 (left out of training) in all other cases: the
+--band-um band around the polygons, and patches mostly glass or lumen. The fractions behind the labels are
+written beside them, and the labels are set from those stored values. Every tile's patches must average back
+to its label in the manifest, or nothing is written.
 """
 
 from __future__ import annotations
@@ -156,7 +155,7 @@ def main() -> None:
         polygons = [p["points"] for p in export[key]["polygons"]] if key in export else []
         jobs.append((slide, [rows[i] for i in indices], polygons, overview, args.slides, args.lumen))
 
-    # a worker the system kills stops the run with an error rather than leaving it waiting
+    # a worker the system kills raises BrokenProcessPool and stops the run
     with ProcessPoolExecutor(max(1, min(args.workers, len(jobs)))) as pool:
         results = list(pool.map(one_slide, jobs))
 
