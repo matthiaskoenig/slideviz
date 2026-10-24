@@ -67,11 +67,7 @@ REFERENCE_STAIN = "he"
 SOURCE_LEVELS = "slideviz_levels"
 EVENED_LEVELS = "slideviz_evened_levels"
 
-# one colour per stain, so an overlay reads as two channels instead of two pictures
-STAIN_COLOURS = {"he": "green", "cyp2e1": "magenta", "cyp1a2": "magenta", "hmgb1": "cyan"}
-FALLBACK_COLOUR = "yellow"
-
-# how a stain is written in the layer list, where the index's lowercase key reads badly
+# how a stain is written in layer names, the info panel and the activity line
 STAIN_NAMES = {"he": "H&E", "cyp2e1": "CYP2E1", "cyp1a2": "CYP1A2", "hmgb1": "HMGB1"}
 
 # where a layer keeps its own placement (its registration, or none), so turning the view composes on top of it
@@ -130,7 +126,7 @@ def stain_name(stain: str) -> str:
 
 
 def _column(name: str) -> str:
-    """Check a column name before it goes into SQL, where it cannot be a parameter."""
+    """The column name, checked against the filter columns before it is written into SQL text."""
     if name not in FILTERS.values():
         raise ValueError(f"not a filter column: {name}")
     return name
@@ -153,7 +149,7 @@ def turned(angle: float):
 
 
 def animal_name(block: str, substance: str | None) -> str:
-    """A block's animal as prediction files name it: the block without its substance prefix (apap_281mg_m1)."""
+    """A block's animal as prediction files name it: the block minus its substance prefix, apap_281mg_m1 to 281mg_m1."""
     return block.removeprefix(f"{substance}_") if substance else block
 
 
@@ -199,11 +195,7 @@ class SlideList(QWidget):
     """Slide picker docked into the napari window."""
 
     def __init__(self, viewer, directory: Path | None = None) -> None:
-        """Build and populate the slide picker.
-
-        If provided, ``directory`` limits slides to that collection; otherwise,
-        all indexed slides are shown.
-        """
+        """Build the slide picker for the slides indexed under `directory`, or every indexed slide when it is None."""
         super().__init__()
         self.viewer = viewer
         self.directory = str(directory.resolve()) if directory else None
@@ -254,10 +246,10 @@ class SlideList(QWidget):
         clear.clicked.connect(self._clear)
 
         self.status = QLabel()
-        self.status.setWordWrap(True)  # long messages wrap instead of widening the dock
+        self.status.setWordWrap(True)  # long messages wrap within the dock width
         # the busy line and bar share one row whose room stays reserved when idle, so nothing above moves
         self.activity = QLabel()
-        self.activity.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)  # cut, not widened
+        self.activity.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)  # cut at the dock width
         self.progress = QProgressBar()
         self.progress.setTextVisible(False)
         self.progress.setMaximumWidth(120)
@@ -273,13 +265,13 @@ class SlideList(QWidget):
         for button in (load, add, clear):
             buttons.addWidget(button)
 
-        # the 2D camera cannot turn, so every layer is turned about the world origin and the camera follows
+        # the 2D camera keeps its orientation, so every layer turns about the world origin and the camera centre follows
         self._angle = 0
         self.angle = QSlider(Qt.Orientation.Horizontal)
         self.angle.setRange(-180, 180)
         self.angle.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.angle.setTickInterval(TURN_STEP)
-        self.angle.setToolTip("Turn the view clockwise by this angle; the pixels are not changed")
+        self.angle.setToolTip("Turn the view clockwise by this angle; the pixels stay as stored")
         self.angle.valueChanged.connect(self._turn_to)
         self.angle_shown = QLabel("0\u00b0")
         self.angle_shown.setMinimumWidth(40)
@@ -320,12 +312,12 @@ class SlideList(QWidget):
         scope, params = self._scope()
         where = f"WHERE {scope[0]}" if scope else ""
         for column, box in self.boxes.items():
-            # scoped too, or a filter would offer values no listed slide has
+            # scoped to the widget's directory, as the list is
             values = query(
                 f"SELECT DISTINCT {_column(column)} FROM slides {where} ORDER BY 1",
                 tuple(params),
             )
-            box.blockSignals(True)  # filling would otherwise fire refresh once per item
+            box.blockSignals(True)  # silent during the refill; refresh() runs once after
             box.clear()
             box.addItem(ANY)
             box.addItems([str(row[0]) for row in values if row[0] is not None])
@@ -344,7 +336,7 @@ class SlideList(QWidget):
         for column, box in self.boxes.items():
             if box.currentText() != ANY:
                 clauses.append(f"{_column(column)} = ?")
-                # cast, rather than leaving an integer column to SQLite's type affinity
+                # cast to the column's type, as the box holds text
                 params.append(FILTER_TYPES[column](box.currentText()))
         return ("WHERE " + " AND ".join(clauses) if clauses else "", tuple(params))
 
@@ -372,7 +364,7 @@ class SlideList(QWidget):
 
     @staticmethod
     def _sidecar(row) -> Slide | None:
-        """A slide's full sidecar, for the fields SQL does not carry."""
+        """A slide's full sidecar with its nested fields such as the registration, or None when absent."""
         path = slide_path(row)
         sidecar = find_sidecar(path.parent, path.name.split(".")[0])
         return Slide(**json.loads(sidecar.read_text())) if sidecar else None
@@ -553,7 +545,6 @@ class SlideList(QWidget):
             scale=(pixel_size_um, pixel_size_um),
             units="um",  # makes the scale bar read in micrometres
             affine=affine,
-            colormap=STAIN_COLOURS.get(row["stain"], FALLBACK_COLOUR),
             opacity=0.7,
             blending="additive",  # so the stains show through each other
             # keep the unmasked pyramids, so the toggles can swap the layer's data without opening the slide again
@@ -617,12 +608,12 @@ class SlideList(QWidget):
         return path if path is not None and path.exists() else None
 
     def _load_necrosis(self, animal: str, reference_um: float) -> None:
-        """Add the necrosis map, placed on the H&E pyramid off the UI thread; no necrosis layer where there is none."""
+        """Add the animal's necrosis map, when one exists, placed on the H&E pyramid off the UI thread."""
         path = self._necrosis_map(animal)
         if path is None or not self._reference_shapes:
             return
         name = layer_name(animal, NECROSIS_NAME)
-        self._set_busy(True)  # no other block opens or clears before the map arrives
+        self._set_busy(True)  # Load, Add, Clear and the list stay locked until the map arrives
         self._show_activity(f"{animal}: placing the necrosis map")
         worker = placed_map(path, list(self._reference_shapes), reference_um)
         worker.returned.connect(lambda placed: add_call_layer(self.viewer, *placed, name=name))
@@ -702,7 +693,7 @@ class SlideList(QWidget):
 
         animal = animal_name(block, slides[0]["substance"])
         state = {"reference_um": None, "unaligned": [], "done": 0}
-        self._reference_shapes = []  # another block's reference must not carry over
+        self._reference_shapes = []  # filled from this block's reference as it opens
         self.status.setText("")  # the status line only carries this load's problems
         self._set_busy(True)
         self._step(animal, slides[0], 0, len(slides))

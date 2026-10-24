@@ -28,8 +28,8 @@ log = logging.getLogger(__name__)
 
 # computed slide pieces kept for panning back; napari's default is a quarter of the RAM
 DASK_CACHE_GB = 1.0
-# pieces each computing thread works on at once; a single shared pool deadlocks, as the warp
-# computes its source region from inside a piece
+# threads in each calling thread's dask pool; the warp computes its source region
+# inside a piece, which deadlocks a single shared pool
 DASK_WORKERS = 4
 
 
@@ -39,11 +39,11 @@ def main() -> None:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,  # keeps docstring layout
     )
-    parser.add_argument("--data", type=Path, default=settings.data,  # --data still wins
+    parser.add_argument("--data", type=Path, default=settings.data,  # SLIDEVIZ_DATA when --data is absent
                         help="directory of slides and their sidecars")
-    # 0.01 s for 40 slides, so this is for when the set is much larger, or the data is away
+    # for a large set, or a slow or unreachable data directory
     parser.add_argument("--no-reindex", action="store_true",
-                        help="open the existing index instead of rebuilding it")
+                        help="skip the rebuild and open the existing index")
     parser.add_argument("--stain-reference", type=Path, default=None,
                         help="stain reference JSON; defaults to stain_reference.json beside --data")
     parser.add_argument("-v", "--verbose", action="store_true", help="log at debug level")
@@ -86,7 +86,7 @@ def main() -> None:
         viewer = napari.Viewer(title="slideviz")
         # after the viewer, which applies napari's own cache setting when it starts
         resize_dask_cache(int(DASK_CACHE_GB * 1e9))
-        # --no-reindex has no directory to scope by, so the list falls back to the whole index
+        # --no-reindex lists the whole index
         widget = SlideList(viewer, None if args.no_reindex else args.data)
         viewer.window.add_dock_widget(widget, name="Slides", area="right")
         viewer.scale_bar.visible = True
