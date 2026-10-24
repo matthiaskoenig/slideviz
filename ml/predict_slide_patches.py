@@ -4,7 +4,7 @@
         --embeddings <its training cache> --tiles <export_field_tiles.py --slide output> \
         --out <dir> --device cuda:0
 
-The whole-slide form of predict_field_patches.py: every tile passes the frozen encoder once, its patch
+Every tile passes the frozen encoder once, its patch
 descriptions are rounded to half precision as the training ones were and scored by the head fitted without
 the slide's animal, and each pixel's map value is the mean of the scores of the tiles covering it. The
 descriptions (about 90 GB a slide) are discarded after scoring. The head must first reproduce its stored
@@ -32,17 +32,54 @@ from embed_tiles import (
     TileSet,
     build_transform,
 )
-from predict_field_patches import (
-    check_head,
-    load_heads,
-    map_frame,
-    mean_map,
-    pixel_patch,
-    score,
-)
 from torch.utils.data import DataLoader
 from train_necrosis import code_version
+from train_patch_head import CHUNK, patch_score  # check_head scores by this chunk
 
+
+def score(patches: np.ndarray, part: np.ndarray, heads: np.lib.npyio.NpzFile, k: int) -> np.ndarray:
+    """Necrosis scores per patch for the tiles in part, by head k, in train_patch_head.py's arithmetic."""
+    return patch_score(patches[part], heads["mean"][k], heads["scale"][k], heads["coef"][k], heads["intercept"][k])
+
+
+def check_head(heads: np.lib.npyio.NpzFile, k: int, animal: str, train_patches: np.ndarray,
+               train_animals: np.ndarray, stored: np.ndarray) -> dict:
+    """Head k on its animal's first training chunk, which train_patch_head.py scored in one piece; stops unless bit for bit."""
+    part = np.flatnonzero(train_animals == animal)[:CHUNK]
+    if not part.size:
+        raise SystemExit(f"the training cache holds no tiles of {animal} to check its head on")
+    differ = int((score(train_patches, part, heads, k).astype(stored.dtype) != stored[part]).sum())
+    if differ:
+        raise SystemExit(f"{animal}: the head reproduces its stored scores on {part.size} tiles with {differ} "
+                         "patches different, nothing written")
+    return {"tiles": int(part.size), "patches_different": differ}
+
+
+def load_heads(heads_dir: Path) -> tuple[np.lib.npyio.NpzFile, dict, list[str], set[tuple[int, int]]]:
+    """The heads, their results record, their animal names and the (level, size_px) pairs their labels were cut at."""
+    heads = np.load(heads_dir / "heads.npz")
+    results = json.loads((heads_dir / "patch_head_results.json").read_text())
+    label_meta = json.loads((Path(results["inputs"]["labels"]) / "patch_labels_meta.json").read_text())
+    trained_on = {(level, size) for level in label_meta["geometry"]["level"] for size in label_meta["geometry"]["size_px"]}
+    return heads, results, heads["animals"].tolist(), trained_on
+
+
+def map_frame(rows: list[dict]) -> tuple[int, int, tuple[int, int], int]:
+    """Top, left, shape and tile size of the map covering these tile rows."""
+    size = rows[0]["size_px"]
+    top, left = min(r["y"] for r in rows), min(r["x"] for r in rows)
+    shape = (max(r["y"] for r in rows) + size - top, max(r["x"] for r in rows) + size - left)
+    return top, left, shape, size
+
+
+def mean_map(total: np.ndarray, count: np.ndarray) -> np.ndarray:
+    """total / count per pixel as float32, NaN where count is 0."""
+    return np.where(count > 0, total / np.maximum(count, 1), np.nan).astype(np.float32)
+
+
+def pixel_patch(size_px: int, grid: int) -> np.ndarray:
+    """The patch row (or column) each tile pixel's centre falls in, with patch edges at r * size_px / grid."""
+    return ((np.arange(size_px) + 0.5) * grid / size_px).astype(int)
 
 def main() -> None:
     """Check the slide's head, embed and score every tile, average onto the slide, and write the map."""

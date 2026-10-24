@@ -8,7 +8,6 @@ Frozen encoder (Lunit ViT-S/8) and linear heads. Own venv, runs on GPU server.
 | `embed_tiles.py`, `stain_norm.py` | slide tiles to cached embeddings (`--patches` keeps the patch descriptions) |
 | `train_necrosis.py`, `predict_slide.py`, `predict_unlabelled.py` | tile head, leave one animal out |
 | `train_patch_head.py`, `predict_slide_patches.py` | the necrosis map: per-patch head over a whole slide |
-| `predict_field.py`, `predict_field_patches.py` | both heads on field tiles, for map comparisons |
 
 Tiles come from `scripts/export_tiles.py` and `scripts/export_field_tiles.py`, labels from
 `scripts/patch_labels.py`; `scripts/necrosis_slides.py` turns the maps into calls and areas.
