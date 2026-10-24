@@ -26,22 +26,27 @@ def image_series(slide: tifffile.TiffFile) -> list[tifffile.TiffPageSeries]:
     return [s for s in slide.series if (s.name or "").lower() not in THUMBNAILS]
 
 
-def _pixel_size_um(page: tifffile.TiffPage) -> float:
-    """Pixel size in micrometres, warning if the two axes disagree."""
+UM_PER_UNIT = {2: 25400.0, 3: 10000.0}  # TIFF ResolutionUnit: inch, centimetre
+
+
+def pixel_size_um(page: tifffile.TiffPage, tolerance: float = 1e-6) -> float:
+    """Pixel size in micrometres from the TIFF resolution tags, warning when the axes differ beyond `tolerance`."""
 
     def resolution(code: int) -> float | None:
+        """Pixels per ResolutionUnit from a rational tag, None when absent or zero."""
         value = page.tags[code].value if code in page.tags else None
-        # TIFF stores resolution as a rational, in ResolutionUnit per pixel
         return value[0] / value[1] if value and value[0] and value[1] else None
 
     x_res, y_res = resolution(282), resolution(283)
     if not x_res:
         raise ValueError(f"{page.parent.filename} has no XResolution")
+    unit = page.tags[296].value if 296 in page.tags else None
+    if unit not in UM_PER_UNIT:
+        raise ValueError(f"{page.parent.filename}: ResolutionUnit {unit}, expected 2 (inch) or 3 (centimetre)")
 
-    # raw2ometiff writes pixels per centimetre, so 10000 um over that is the pixel size
-    x = 10000 / x_res
-    y = 10000 / y_res if y_res else x
-    if abs(x - y) > 1e-6 * max(x, y):  # anisotropic, one number cannot describe both
+    x = UM_PER_UNIT[unit] / x_res
+    y = UM_PER_UNIT[unit] / y_res if y_res else x
+    if abs(x - y) > tolerance * max(x, y):
         log.warning("anisotropic pixels, X=%.4f um Y=%.4f um; using X", x, y)
     return x
 
@@ -79,7 +84,7 @@ def read_info(path: Path, scene: int = 0) -> SlideInfo:
             y0=0,
             width=sizes["X"],
             height=sizes["Y"],
-            pixel_size_um=_pixel_size_um(level0.keyframe),
+            pixel_size_um=pixel_size_um(level0.keyframe),
         )
 
 

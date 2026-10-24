@@ -25,6 +25,9 @@ from scipy.ndimage import binary_fill_holes
 from scipy.optimize import minimize
 from skimage.filters import sobel
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+from slideviz.analysis.outline import SWAP_XY, align, outline_qc, warp_mask
+
 POSE_EDGE_PX = 400  # a sweep takes seconds at this size
 REFINE_EDGES_PX = (400, 800)
 
@@ -131,8 +134,7 @@ def _warp(image: np.ndarray, matrix: np.ndarray, shape) -> np.ndarray:
     """Apply an x/y matrix to an image indexed (row, col)."""
     from scipy.ndimage import affine_transform
 
-    swap = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
-    row_col = np.linalg.inv(swap @ matrix @ swap)
+    row_col = np.linalg.inv(SWAP_XY @ matrix @ SWAP_XY)
     return affine_transform(
         image, row_col[:2, :2], offset=row_col[:2, 2], output_shape=shape, order=1,
     )
@@ -187,9 +189,6 @@ def pose_from_outline(fixed_mask: np.ndarray, moving_mask: np.ndarray):
 
     Returns align's matrix whole: its rotation and shift are meaningful together.
     """
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-    from slideviz.analysis.outline import align, outline_qc
-
     report = outline_qc(fixed_mask, moving_mask)
     matrix, _ = align(fixed_mask, moving_mask, fixed_mask.shape, moving_mask.shape,
                       angle=report.angle)
@@ -197,11 +196,9 @@ def pose_from_outline(fixed_mask: np.ndarray, moving_mask: np.ndarray):
 
 
 def mask_dice(fixed_mask: np.ndarray, moving_mask: np.ndarray, matrix) -> float:
-    """Outline overlap after applying `matrix`, in the mask's own pixel grid."""
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-    from slideviz.analysis.outline import dice, warp_mask
-
-    return dice(fixed_mask, warp_mask(moving_mask, matrix, fixed_mask.shape))
+    """Dice of the fixed outline and the moving one warped by `matrix`, in the mask's own pixel grid."""
+    warped = warp_mask(moving_mask, matrix, fixed_mask.shape)
+    return float(2 * (fixed_mask & warped).sum() / (fixed_mask.sum() + warped.sum()))
 
 
 def overlap_png(fixed: np.ndarray, moving: np.ndarray, matrix, path: Path) -> None:
@@ -227,10 +224,6 @@ def main() -> None:
     parser.add_argument("slide_dir", type=Path)
     parser.add_argument("out_dir", type=Path)
     parser.add_argument("--reference", required=True, help="the fixed slide's filename")
-    parser.add_argument("--angle", type=float, default=None,
-                        help="skip the sweep and refine from this angle instead")
-    parser.add_argument("--no-refine", action="store_true",
-                        help="stop at the outline pose, for comparison")
     args = parser.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -250,17 +243,10 @@ def main() -> None:
         pose_ds = shared_downsample([reference, moving_path], POSE_EDGE_PX)
         fixed_pose = read_level(reference, pose_ds)
         moving_pose = read_level(moving_path, pose_ds)
-        fixed_mask = binary_fill_holes(tissue_mask(fixed_pose))
-        moving_mask = binary_fill_holes(tissue_mask(moving_pose))
+        fixed_mask = tissue_mask(fixed_pose)
+        moving_mask = tissue_mask(moving_pose)
 
         report, matrix = pose_from_outline(fixed_mask, moving_mask)
-        if args.angle is not None:
-            sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-            from slideviz.analysis.outline import align
-
-            matrix, _ = align(fixed_mask, moving_mask, fixed_mask.shape,
-                              moving_mask.shape, angle=args.angle)
-
         print(f"  outline: angle {report.angle:.2f} deg, dice {report.dice:.4f}, "
               f"sharpness {report.sharpness:.4f}, {report.verdict}")
         for note in report.notes:
@@ -268,28 +254,26 @@ def main() -> None:
         if not report.ok:
             sys.exit("  the pair fails outline QC; not registering it")
 
-        score = report.dice
-        if not args.no_refine:
-            # coarse to fine, each level improving on the one before
-            for edge_px in REFINE_EDGES_PX:
-                level_ds = shared_downsample([reference, moving_path], edge_px)
-                rescale = pose_ds / level_ds
-                up = np.diag([rescale, rescale, 1.0])
-                matrix = up @ matrix @ np.linalg.inv(up)
+        # coarse to fine, each level improving on the one before
+        for edge_px in REFINE_EDGES_PX:
+            level_ds = shared_downsample([reference, moving_path], edge_px)
+            rescale = pose_ds / level_ds
+            up = np.diag([rescale, rescale, 1.0])
+            matrix = up @ matrix @ np.linalg.inv(up)
 
-                matrix, score = refine(
-                    read_level(reference, level_ds), read_level(moving_path, level_ds),
-                    matrix, ANGLE_WINDOW_DEG,
-                )
-                rotation = np.degrees(np.arctan2(matrix[1, 0], matrix[0, 0]))
-                print(f"  refined at 1/{level_ds:.0f}: angle {rotation:.3f} deg, "
-                      f"correlation {score:.4f}")
-                matrix = np.linalg.inv(up) @ matrix @ up
-            last_ds = shared_downsample([reference, moving_path], REFINE_EDGES_PX[-1])
-            overlap_png(read_level(reference, last_ds), read_level(moving_path, last_ds),
-                        np.diag([pose_ds / last_ds] * 2 + [1.0]) @ matrix
-                        @ np.linalg.inv(np.diag([pose_ds / last_ds] * 2 + [1.0])),
-                        args.out_dir / f"{moving_path.name.split('.')[0]}_overlap.png")
+            matrix, score = refine(
+                read_level(reference, level_ds), read_level(moving_path, level_ds),
+                matrix, ANGLE_WINDOW_DEG,
+            )
+            rotation = np.degrees(np.arctan2(matrix[1, 0], matrix[0, 0]))
+            print(f"  refined at 1/{level_ds:.0f}: angle {rotation:.3f} deg, "
+                  f"correlation {score:.4f}")
+            matrix = np.linalg.inv(up) @ matrix @ up
+        last_ds = shared_downsample([reference, moving_path], REFINE_EDGES_PX[-1])
+        overlap_png(read_level(reference, last_ds), read_level(moving_path, last_ds),
+                    np.diag([pose_ds / last_ds] * 2 + [1.0]) @ matrix
+                    @ np.linalg.inv(np.diag([pose_ds / last_ds] * 2 + [1.0])),
+                    args.out_dir / f"{moving_path.name.split('.')[0]}_overlap.png")
 
         # the pose is in shrunk pixels, the stored matrix in full resolution
         import pyvips

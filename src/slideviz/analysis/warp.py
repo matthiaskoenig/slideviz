@@ -59,8 +59,8 @@ def _chunk(block_info, source: da.Array, inverse: np.ndarray, field: Field,
     # the field's grid spacing differs from the reference pixel size
     to_grid = reference_um / field.grid_um_per_px
     grid = [y * to_grid, x * to_grid]
-    x = x + map_coordinates(field.dx_um, grid, order=1, mode="constant") / reference_um
-    y = y + map_coordinates(field.dy_um, grid, order=1, mode="constant") / reference_um
+    x = x + map_coordinates(field.dx_um, grid, order=1, mode="nearest") / reference_um
+    y = y + map_coordinates(field.dy_um, grid, order=1, mode="nearest") / reference_um
 
     # reference level 0 -> moving level 0 -> this moving level
     qx = (inverse[0, 0] * x + inverse[0, 1] * y + inverse[0, 2]) / src_factor[1]

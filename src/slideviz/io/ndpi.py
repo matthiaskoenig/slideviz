@@ -18,6 +18,7 @@ import tifffile
 import zarr
 
 from slideviz.io.czi import SlideInfo
+from slideviz.io.ome_tiff import pixel_size_um
 
 log = logging.getLogger(__name__)
 
@@ -31,28 +32,6 @@ TILE = 1024
 def image_series(slide: tifffile.TiffFile) -> list[tifffile.TiffPageSeries]:
     """Series holding slide images, with the scanner's thumbnails dropped."""
     return [s for s in slide.series if s.name not in THUMBNAILS]
-
-
-def _pixel_size_um(page: tifffile.TiffPage) -> float:
-    """Pixel size in micrometres, warning if the two axes disagree."""
-
-    def resolution(code: int) -> float | None:
-        value = page.tags[code].value if code in page.tags else None
-        # TIFF stores resolution as a rational, in ResolutionUnit per pixel
-        return value[0] / value[1] if value and value[0] and value[1] else None
-
-    x_res, y_res = resolution(282), resolution(283)
-    if not x_res:
-        raise ValueError(f"{page.parent.filename} has no XResolution")
-
-    # NDPI records pixels per centimetre, so 10000 um over that is the pixel size
-    x = 10000 / x_res
-    y = 10000 / y_res if y_res else x
-    # NDPI rounds the two resolutions independently (43990 against 43991 on this
-    # scanner), so the tolerance is loose enough not to call that anisotropy
-    if abs(x - y) > 1e-3 * max(x, y):
-        log.warning("anisotropic pixels, X=%.4f um Y=%.4f um; using X", x, y)
-    return x
 
 
 def read_info(path: Path, scene: int = 0) -> SlideInfo:
@@ -72,7 +51,7 @@ def read_info(path: Path, scene: int = 0) -> SlideInfo:
             y0=0,
             width=width,
             height=height,
-            pixel_size_um=_pixel_size_um(level0.keyframe),
+            pixel_size_um=pixel_size_um(level0.keyframe, tolerance=1e-3),  # NDPI rounds the two axes apart
         )
 
 

@@ -47,6 +47,7 @@ TREND_UM = 1000.0
 CLIP = (0.25, 4.0)
 
 REGION_TREND_UM = 3000.0
+LEVEL_MAX_UM = 4200.0  # widest fallback scale of _level
 REGION_REACH_UM = 250.0  # support around trusted tissue where regions may lie
 REGION_LEVELS_UM = (250.0, 120.0)  # seeding and boundary smoothing of the leftover map
 REGION_HI, REGION_MIN_STEP, REGION_SHARP = 0.08, 0.06, 0.2  # log units
@@ -154,10 +155,10 @@ def prepare(view: np.ndarray, view_um: float, tissue: np.ndarray, necrotic: np.n
 # regions: a smooth trend plus feathered offsets for coherent paler or darker regions
 
 
-def _level(values: np.ndarray, trust: np.ndarray, sigma_px: float) -> np.ndarray:
-    """Masked Gaussian, falling back to 3x and 10x wider scales and the median where trust is thin."""
+def _level(values: np.ndarray, trust: np.ndarray, sigma_px: float, grid_um: float) -> np.ndarray:
+    """Masked Gaussian, falling back to 3x and 10x wider scales (at most LEVEL_MAX_UM) and the median where trust is thin."""
     out = np.full(values.shape, float(np.median(values[trust])))
-    for s in sorted({min(sigma_px * m, 150.0) for m in (10, 3, 1)}, reverse=True):
+    for s in sorted({min(sigma_px * m, LEVEL_MAX_UM / grid_um) for m in (10, 3, 1)}, reverse=True):
         v, w = masked_smooth(values, trust, s)
         b = np.clip(w / 0.2, 0, 1)
         out = b * v + (1 - b) * out
@@ -245,8 +246,8 @@ def _best_region(d, values, trust, sup, grid_um):
     """The accepted region with the largest step, as (mask, step, feather um), or None."""
     px = 1 / grid_um
     min_px = REGION_MIN_MM2 * 1e6 * px * px
-    r25 = _level(d, trust, REGION_LEVELS_UM[0] * px)
-    r12 = _level(d, trust, REGION_LEVELS_UM[1] * px)
+    r25 = _level(d, trust, REGION_LEVELS_UM[0] * px, grid_um)
+    r12 = _level(d, trust, REGION_LEVELS_UM[1] * px, grid_um)
     best = None
     for sign in (1, -1):
         seeds = apply_hysteresis_threshold(np.where(sup, sign * r25, 0), REGION_HI / 2, REGION_HI)
@@ -284,7 +285,7 @@ def region_field(log_c: np.ndarray, trust: np.ndarray, grid_um: float) -> np.nda
     term = np.zeros_like(log_c)
     for _ in range(MAX_REGIONS):
         left = log_c - term
-        best = _best_region(left - _level(left, trust, REGION_TREND_UM * px), left, trust, sup, grid_um)
+        best = _best_region(left - _level(left, trust, REGION_TREND_UM * px, grid_um), left, trust, sup, grid_um)
         if best is None:
             break
         regions.append((best[0], best[2]))

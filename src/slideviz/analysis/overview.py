@@ -86,3 +86,23 @@ def export_overview(
         overview.um_per_px,
     )
     return overview
+
+
+def main() -> None:
+    """Export overviews for annotation from the command line."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("slides", type=Path, nargs="+", help="slide files")
+    parser.add_argument("--out", type=Path, required=True, help="folder for the PNGs and their JSON")
+    parser.add_argument("--scene", type=int, default=0)
+    parser.add_argument("--max-edge-px", type=int, default=MAX_EDGE_PX)
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    for path in args.slides:
+        export_overview(path, args.out, args.scene, args.max_edge_px)
+
+
+if __name__ == "__main__":
+    main()
