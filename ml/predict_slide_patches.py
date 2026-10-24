@@ -1,4 +1,4 @@
-"""Per-patch necrosis map over a whole slide: overlapping tiles embedded and scored on the fly, never stored.
+"""Per-patch necrosis map over a whole slide, from overlapping tiles embedded and scored on the fly.
 
     uv run python predict_slide_patches.py --heads <train_patch_head.py output> \
         --embeddings <its training cache> --tiles <export_field_tiles.py --slide output> \
@@ -7,7 +7,7 @@
 The whole-slide form of predict_field_patches.py: every tile passes the frozen encoder once, its patch
 descriptions are rounded to half precision as the training ones were and scored by the head fitted without
 the slide's animal, and each pixel's map value is the mean of the scores of the tiles covering it. The
-descriptions themselves (about 90 GB a slide) are not kept. The head must first reproduce its stored
+descriptions (about 90 GB a slide) are discarded after scoring. The head must first reproduce its stored
 training scores bit for bit.
 """
 

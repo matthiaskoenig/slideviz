@@ -1,15 +1,14 @@
-"""Predict one held-out slide's tiles and write the scores next to their positions.
+"""Predict one held-out animal's tiles and write the scores next to their grid positions.
 
-The model that predicts a slide is never trained on it, so this runs one fold of the
-leave-one-animal-out split and writes only that animal. The output carries each tile's
-grid position, so the viewer can paint the scores back onto the slide.
+One fold of the leave-one-animal-out split: the head is fitted on every other animal, and
+the viewer paints the scores back onto the slide from the grid positions.
 
     uv run python predict_slide.py --cache /data/michelle/mouse/embeddings \
         --tiles /data/michelle/mouse/tiles --animal 281mg_m1 \
         --out /data/michelle/mouse/predictions
 
 With --nested, the area uses the cutoff the nested run chose for this animal, and the
-file is only written if it reproduces that run's area.
+file is written only when it reproduces that run's area.
 """
 
 from __future__ import annotations

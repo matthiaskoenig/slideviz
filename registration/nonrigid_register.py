@@ -22,7 +22,7 @@ from outline_register import (
     tissue_mask,
 )
 
-EDGE_PX = 2048  # RAFT tore the tissue at this size, DeepFlow matched its 1024 px result
+EDGE_PX = 2048  # longest edge of the DeepFlow grid, ~4 um/px on a mouse slide
 MIN_AGREEMENT = 0.99  # own resampling against VALIS's warped image
 
 
@@ -180,8 +180,8 @@ def main() -> None:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--edge", type=int, default=EDGE_PX, help="longest edge in px")
     parser.add_argument("--input", choices=("density", "haematoxylin"), default="haematoxylin",
-                        help="haematoxylin leaves DAB out, so the flow cannot follow the DAB "
-                             "pattern; density was the input before 6 Oct 2026")
+                        help="haematoxylin: the counterstain both slides carry, DAB split off; "
+                             "density: inverted grey inside the tissue")
     args = parser.parse_args()
 
     refused = []

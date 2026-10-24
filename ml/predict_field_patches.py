@@ -4,11 +4,10 @@
         --embeddings <its training cache> --field-tiles <export_field_tiles.py output> \
         --field-cache <embed_tiles.py --patches on those tiles> --out <dir>
 
-Every field tile is scored per patch by the head that never saw its animal. A pixel lies in one patch of
-every tile that covers it, up to 25 at a 15 um stride, and its map value is the mean of those scores: the
-same spot judged in different surroundings, so averaging takes out the tile seams without blurring across
-space. The share of those tiles calling it necrotic is kept beside the mean. Before anything is written,
-each head must reproduce, bit for bit, its stored scores on the first training tiles of its animal.
+Every field tile is scored per patch by the head fitted without its animal. A pixel lies in one patch of
+every tile that covers it, up to 25 at a 15 um stride, and its map value is the mean of those scores. The
+share of those tiles calling it necrotic is kept beside the mean. Before anything is written, each head
+must reproduce, bit for bit, its stored scores on the first training tiles of its animal.
 """
 
 from __future__ import annotations
@@ -94,7 +93,7 @@ def main() -> None:
                          "input size, transform, normalisation or stain matching")
     if (args.field_cache / "tiles.txt").read_text().split() != [r["tile"] for r in rows]:
         raise SystemExit("the field cache does not follow the field manifest's tile order")
-    # tile names carry grid positions, not places, so only the export's stamp ties the cache to these tiles
+    # tile names carry grid positions, the same in every export of a field; the export's stamp ties the cache to these tiles
     if field_meta.get("source_manifest_written") != manifest["written"]:
         raise SystemExit("the field cache was embedded from another export of the field tiles")
     if {(r["level"], r["size_px"]) for r in rows} - trained_on:

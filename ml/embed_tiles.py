@@ -82,7 +82,7 @@ def build_transform(mean: tuple, std: tuple) -> T.Compose:
 def main() -> None:
     """Embed every exported tile once and write the cache with its provenance."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tiles", type=Path, required=True, help="export_tiles.py output")
+    parser.add_argument("--tiles", type=Path, required=True, help="export_tiles.py or export_field_tiles.py output")
     parser.add_argument("--out", type=Path, required=True, help="where to write the cache")
     parser.add_argument("--device", default="cuda:0", help="cuda:N, or cpu")
     parser.add_argument("--batch", type=int, default=BATCH)
@@ -165,7 +165,7 @@ def main() -> None:
     elapsed = time.time() - start
     print(f"  {len(order):,} tiles in {elapsed:.0f} s ({len(order) / elapsed:.0f}/s)")
 
-    # the loader keeps manifest order, but the index makes that a check rather than a hope
+    # the loader keeps manifest order; the index checks it
     if order != list(range(len(rows))):
         raise ValueError("tiles came back out of manifest order")
 
@@ -174,8 +174,8 @@ def main() -> None:
         patches.flush()
         os.replace(partial, final)
     elif final.exists():
-        final.unlink()  # an earlier run's patches, which no longer match these tiles
-    # a fraction, not a class: the threshold is the training stage's choice
+        final.unlink()  # an earlier run's patches, stale against these embeddings
+    # a fraction; the training stage sets the threshold
     np.save(args.out / "necrosis.npy", np.array([r["necrosis"] for r in rows], dtype=np.float32))
     np.save(args.out / "tissue.npy", np.array([r["tissue"] for r in rows], dtype=np.float32))
     # the split is by animal, so the animal has to survive into the cache
@@ -197,7 +197,6 @@ def main() -> None:
         "input_px": INPUT_PX,
         "transform": f"resize {INPUT_PX}x{INPUT_PX} bicubic, no crop",
         "normalize": {"mean": list(config["mean"]), "std": list(config["std"])},
-        # without this two caches look identical and neither says which one was matched
         "stain_matched": bool(args.stain_reference),
         "stain_reference": str(args.stain_reference) if args.stain_reference else None,
         "stain_reference_written": reference_written,

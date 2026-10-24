@@ -19,8 +19,8 @@ from vitessce import (
 BASE_URL = "https://slide.michelle-elias.de"
 OUT_DIR = Path(__file__).parent / "dist"
 
-# label and store path; the path ends in /0 because bioformats2raw writes a
-# collection: series 0 is the slide, 1 and 2 are the scanner's label and macro thumbnails
+# label and store path; the /0 is series 0 of the bioformats2raw collection, the slide
+# (1 and 2 are the scanner's label and macro thumbnails)
 SLIDES = [
     ("H&E", "mouse_apap_500mg_m2_he.zarr/0"),
     ("CYP2E1", "mouse_apap_500mg_m2_cyp2e1.zarr/0"),
@@ -33,7 +33,7 @@ def build(slides):
     dataset = vc.add_dataset(name="500 mg/kg m2")
 
     for name, path in slides:
-        # fileUid ties each coordination scope below to one specific file
+        # fileUid ties each coordination scope below to one file
         dataset = dataset.add_file(
             file_type="image.ome-zarr",
             url=f"{BASE_URL}/{path}",
@@ -68,9 +68,8 @@ PAGE = """<!doctype html>
     <meta charset="utf-8" />
     <title>APAP mouse liver</title>
     <style>html,body,#root{margin:0;height:100%%;background:#111}</style>
-    <!-- Vitessce comes from this origin rather than a CDN. esm.sh injects a
-         Node `process` polyfill, which makes the bundle's isNode check true and
-         then hits a bare `module` reference meant for worker_threads. -->
+    <!-- Vitessce is served from this origin: esm.sh adds a Node process polyfill that
+         makes the bundle's isNode check true. React comes from esm.sh. -->
     <script type="importmap">
     {
       "imports": {

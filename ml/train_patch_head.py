@@ -3,12 +3,11 @@
     uv run python train_patch_head.py --embeddings <embed_tiles.py --patches output> \
         --labels <patch_labels.py output> --out <dir> --workers 40
 
-The encoder describes every 2.7 um patch of a tile (patches.npy), and the head is train_necrosis.py's
-logistic regression fitted on those descriptions with patch_labels.py's labels, so it calls necrosis
-per patch instead of per tile. Each animal gets a head fitted on the other 19, with its cutoff chosen
-on those 19 by the tile head's rule (each one left out in turn, lowest mean area error), so no animal
-informs its own map. Training uses a fixed random sample of --per-tile tissue patches per tile; then
-every patch of every training tile is scored by the head that never saw its animal.
+The encoder describes every 2.7 um patch of a tile (patches.npy); the head is train_necrosis.py's logistic
+regression fitted on those descriptions with patch_labels.py's labels, one necrosis call per patch. Each
+animal's head is fitted on all other animals, its cutoff chosen on those by the tile head's rule (each one
+left out in turn, lowest mean area error). Training uses a fixed random sample of --per-tile tissue patches
+per tile; then every patch of every training tile is scored by the head fitted without its animal.
 """
 
 from __future__ import annotations
@@ -137,7 +136,7 @@ def main() -> None:
     jobs += [(args.out, (a,), args.threads) for a in names]
     inner: dict[str, dict[str, list[float]]] = {a: {} for a in names}
     final: dict[str, dict] = {}
-    # fresh workers rather than forked ones, so no BLAS thread state is copied into them
+    # spawned workers, each starting with fresh BLAS thread state
     with ProcessPoolExecutor(max(1, args.workers), mp_context=get_context("spawn")) as pool:
         for done, result in enumerate(pool.map(fit, jobs), 1):
             if len(result["held"]) == 2:
@@ -213,7 +212,7 @@ def main() -> None:
         "head": "LogisticRegression on standardised patch descriptions, as train_necrosis.py on tiles",
         "class_weight": CLASS_WEIGHT,
         "max_iter": MAX_ITER,
-        "split": "leave one animal out; the cutoff chosen on the 19 training animals, each left out in turn",
+        "split": f"leave one animal out; the cutoff chosen on the {len(names) - 1} training animals, each left out in turn",
         "cutoff_objective": ("mean absolute area error over the inner animals, on their sampled tissue patches, "
                              "each weighted by its tile's tissue patches over those sampled"),
         "cutoff_grid": [float(c) for c in CUTOFFS],
@@ -236,8 +235,8 @@ def main() -> None:
             "heads.npz": "per animal (animals order): scaler mean and scale, coef, intercept, cutoff; its note "
                          "says what the cutoff applies to",
             "patch_scores.npy": "float16, tiles x row x col: each training tile's patches scored by the head "
-                                "that never saw its animal",
-            "sample_x.npy, sample.npz": ("the training sample: descriptions, tile, patch (row * 28 + col), label, "
+                                "fitted without its animal",
+            "sample_x.npy, sample.npz": (f"the training sample: descriptions, tile, patch (row * {meta['patches']['grid'][1]} + col), label, "
                                          "animal, weight"),
         },
         "inputs": {

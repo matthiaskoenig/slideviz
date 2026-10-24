@@ -52,7 +52,7 @@ def main() -> None:
     if missing:
         raise ValueError(f"not in {args.target_cache}: {', '.join(missing)}")
 
-    # one fit serves every slide, since the training set does not change between them
+    # one fit on every annotated animal serves every target slide
     print(f"=== fit on {len(train_y):,} annotated tiles from {len(meta['animals'])} animals ===")
     scaler, head = fit_head(train_x, train_y)
 
@@ -77,7 +77,7 @@ def write_one(animal, head, scaler, target_x, target_animals, manifest, meta, ar
         "slide": rows[0]["slide"],
         "encoder": meta["model"],
         "trained_on": meta["animals"],
-        "unlabelled": True,  # nothing to score against; this map is read, not measured
+        "unlabelled": True,  # nothing to score against; a person reads this map
         "positive_threshold": args.positive,
         "cutoff": CUTOFF,
         "n_tiles": len(rows),

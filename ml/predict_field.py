@@ -22,7 +22,7 @@ from train_necrosis import POSITIVE, fit_head
 def main() -> None:
     """Fit each field animal's held-out head, check it, and write its field scores."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--cache", type=Path, required=True, help="the annotated 75 um cache")
+    parser.add_argument("--cache", type=Path, required=True, help="the annotated tile cache the nested run used")
     parser.add_argument("--nested", type=Path, required=True,
                         help="train_necrosis.py --nested results, for cutoffs and areas")
     parser.add_argument("--field-cache", type=Path, required=True, help="embedded field tiles")

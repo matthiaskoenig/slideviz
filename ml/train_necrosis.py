@@ -1,8 +1,6 @@
-"""Train a linear head on cached tile embeddings, holding out one animal per fold.
+"""Train a linear head on cached tile embeddings, holding out one animal (one slide) per fold.
 
-Animals correspond to slides, so random tile splits would leak slide-specific features.
-
-    uv run python train_necrosis.py --cache /data/michelle/mouse/embeddings
+    uv run python train_necrosis.py --cache /data/michelle/mouse/embeddings --nested --tag nested_area
 """
 
 from __future__ import annotations
@@ -24,7 +22,7 @@ from sklearn.metrics import (
 )
 from sklearn.preprocessing import StandardScaler
 
-# a tile is called necrotic above this much coverage; tiles between the two are ambiguous
+# a tile is called necrotic at this much coverage or more
 POSITIVE = 0.5
 
 MAX_ITER = 2000
@@ -105,7 +103,7 @@ def choose_cutoff(
         for column, cutoff in enumerate(CUTOFFS):
             errors[row, column] = area_error(scores, target[check], cutoff)
 
-    # averaged over animals first, so one large slide cannot decide the cutoff
+    # averaged over animals first, so each animal weighs equally in the cutoff
     mean = errors.mean(axis=0)
     best = int(np.argmin(mean))
     trace = [
@@ -130,7 +128,7 @@ def fold(
 
     cutoff, trace = 0.5, None
     if nested:
-        # chosen inside the training animals, so the held-out slide never informs it
+        # chosen on the training animals alone
         inner = list(np.unique(animals[train]))
         cutoff, trace = choose_cutoff(embeddings, target, animals, inner, keep)
 
@@ -158,7 +156,7 @@ def fold(
         "test_positive": int(truth.sum()),
         "test_positive_rate": round(float(truth.mean()), 4),
         "balanced_accuracy": round(float(balanced_accuracy_score(truth, predicted)), 4),
-        # DSC is F1 under another name, reported as both because the thesis asks for DSC
+        # DSC equals F1 on boolean calls; the thesis reports DSC
         "f1": round(float(f1_score(truth, predicted, zero_division=0)), 4),
         "dsc": round(float(f1_score(truth, predicted, zero_division=0)), 4),
         "iou": None if union == 0 else round(true_positive / union, 4),
@@ -318,7 +316,7 @@ def main() -> None:
             float(np.mean([f["iou"] for f in folds if f["test_positive"] and f["iou"] is not None])),
             4,
         ),
-        # the gap between these two is the label quality question, not a model score
+        # the gap between these two reflects label quality at region edges
         "mean_iou_boundary": round(
             float(np.mean([
                 f["iou_boundary"] for f in folds
@@ -332,10 +330,9 @@ def main() -> None:
             ])), 4,
         ),
         "n_animals": len(meta["animals"]),
-        # derived to avoid stale hardcoded counts
         "caveat": (
             f"{len(meta['animals'])} animals, so each fold trains on "
-            f"{len(meta['animals']) - 1}; a fold is one slide, not a cohort"
+            f"{len(meta['animals']) - 1}; a fold is one slide"
         ),
         # the manuscript reports necrotic area, so the cutoff is chosen against that
         "area_note": (

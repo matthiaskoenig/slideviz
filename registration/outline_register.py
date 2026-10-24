@@ -1,14 +1,11 @@
 """Register a pair from its outline, then refine on intensity.
 
-For blocks where VALIS's feature matching fails on the H&E to DAB stain change,
-fitting a transform to a handful of keypoints and returning scales like 0.653 and
-1.586 alongside a plausible error.
-
 A rotation sweep over the tissue outlines fixes the pose to within a degree,
 ~100 um at the slide edge; maximising gradient correlation refines it from there.
 Scale is held at 1.0, the size two sections off one block share.
 
-Runs in this folder's venv. Writes transforms.json.
+Runs in this folder's venv. Writes transforms.json, the schema
+slideviz.data.registration.from_valis_run reads, and outline_error.csv.
 
     uv run python outline_register.py <slides_dir> <out_dir> --reference <name>
 """
@@ -61,11 +58,7 @@ def pyramid_level(path: Path, target: float) -> tuple[int, int]:
 
 
 def read_level(path: Path, downsample: float) -> np.ndarray:
-    """A greyscale view of a slide, shrunk by a factor shared across the pair.
-
-    Shared so both land in one pixel grid. bioformats2raw writes brightfield as
-    three one-band pages, averaged here. Reads from the SubIFD pyramid.
-    """
+    """A greyscale view of a slide shrunk by `downsample`, its three one-band pages averaged."""
     import pyvips
 
     width, _ = full_size(path)
@@ -162,11 +155,7 @@ def correlation(fixed: np.ndarray, moving: np.ndarray) -> float:
 def refine(
     fixed: np.ndarray, moving: np.ndarray, matrix: np.ndarray, window: float,
 ) -> tuple[np.ndarray, float]:
-    """Nudge a pose until gradient correlation peaks.
-
-    Searches a correction on top of the pose, starting at identity. Powell, since
-    resampling is discontinuous.
-    """
+    """The pose after a Powell search for peak gradient correlation, and that correlation."""
     # one canvas for both, so the transform means the same in each
     shape = (max(fixed.shape[0], moving.shape[0]), max(fixed.shape[1], moving.shape[1]))
     fixed_gradient = on_canvas(gradient(fixed), shape)
@@ -192,10 +181,7 @@ def refine(
 
 
 def pose_from_outline(fixed_mask: np.ndarray, moving_mask: np.ndarray):
-    """The matrix that best overlaps two outlines, in mask pixels, and the QC report.
-
-    Returns align's matrix whole: its rotation and shift are meaningful together.
-    """
+    """The outline QC report and the matrix that best overlaps the two masks, in mask pixels."""
     report = outline_qc(fixed_mask, moving_mask)
     matrix, _ = align(fixed_mask, moving_mask, fixed_mask.shape, moving_mask.shape,
                       angle=report.angle)
@@ -209,10 +195,7 @@ def mask_dice(fixed_mask: np.ndarray, moving_mask: np.ndarray, matrix) -> float:
 
 
 def overlap_png(fixed: np.ndarray, moving: np.ndarray, matrix, path: Path) -> None:
-    """Fixed slide in magenta, warped moving one in green; agreement is grey.
-
-    The same view VALIS writes.
-    """
+    """Write fixed gradients in magenta, warped moving ones in green; agreement is grey."""
     from PIL import Image
 
     shape = (max(fixed.shape[0], moving.shape[0]), max(fixed.shape[1], moving.shape[1]))
@@ -314,7 +297,7 @@ def main() -> None:
     }, indent=2) + "\n")
     print(f"\nwrote transforms.json ({len(entries)} slides)")
 
-    # a correlation, under its own name: rigid_D measures matched keypoints
+    # per moving slide, the gradient correlation after the refine
     with (args.out_dir / "outline_error.csv").open("w") as handle:
         handle.write("name,correlation\n")
         for name, score in scores.items():

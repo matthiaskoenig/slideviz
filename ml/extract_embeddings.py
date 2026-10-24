@@ -30,11 +30,11 @@ CLASSES = ("01_TUM", "02_FIB", "03_INF", "04_NEC", "05_NOR", "06_REA", "07_STE")
 # timm's default centre-crops to 90%, discarding 18.4% of a patch whose edges carry tissue
 INPUT_PX = 224
 
-# fp16 is 3x faster; the full pass is 164 s either way, so keep the baseline plain
+# float32 for the baseline; fp16 is ~3x faster and the pass is short at either precision
 DTYPE = torch.float32
 
 BATCH = 256  # 3.7 GiB of 23.5; throughput is flat above this
-WORKERS = 16  # PNG decoding is the bottleneck, not the encoder
+WORKERS = 16  # PNG decoding is the bottleneck
 
 
 class PatchZips(Dataset):
@@ -52,7 +52,7 @@ class PatchZips(Dataset):
             with zipfile.ZipFile(path) as archive:
                 members = sorted(n for n in archive.namelist() if n.endswith(".png"))
             self.index += [(label, member) for member in members]
-        # opened lazily: a ZipFile cannot be pickled, so it must not exist when DataLoader forks
+        # opened lazily per worker: a ZipFile is unpicklable, and each DataLoader worker needs its own handle
         self._handles: dict[int, zipfile.ZipFile] = {}
 
     def __len__(self) -> int:
@@ -72,7 +72,7 @@ class PatchZips(Dataset):
         try:
             image = Image.open(io.BytesIO(raw)).convert("RGB")
         except (OSError, Image.UnidentifiedImageError):
-            # 02_FIB_3355.png is zero bytes in the published archive and killed a whole pass
+            # 02_FIB_3355.png in the published archive is zero bytes
             return torch.zeros(3, INPUT_PX, INPUT_PX), label, member, False
         return self.transform(image), label, member, True
 

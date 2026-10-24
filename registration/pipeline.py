@@ -92,7 +92,7 @@ def in_registration_venv(command: list[str], log: Path) -> None:
     """Run a script of this folder in its venv, output into `log`; raise on failure."""
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("w") as handle:
-        # --no-sync: parallel blocks would otherwise sync the venv at the same time
+        # --no-sync: main() syncs the venv once before the blocks run in parallel
         result = subprocess.run(["uv", "run", "--no-sync", "python", *command],
                                 cwd=REGISTRATION_PROJECT, stdout=handle,
                                 stderr=subprocess.STDOUT, check=False)
