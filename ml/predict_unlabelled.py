@@ -4,8 +4,9 @@ The model is trained on annotated animals and applied to an unlabelled slide.
 The output shows where it predicts necrosis; a person reviews the map.
 
     uv run python predict_unlabelled.py --cache /data/michelle/mouse/embeddings \
-        --tiles /data/michelle/mouse_unlabelled --animal 158mg_m1 \
-        --out /data/michelle/mouse/predictions
+        --target-cache /data/michelle/tiles_unannotated/embeddings \
+        --target-tiles /data/michelle/tiles_unannotated --animal 158mg_m1 \
+        --out /data/michelle/tiles_unannotated/predictions
 """
 
 from __future__ import annotations
@@ -18,10 +19,9 @@ from pathlib import Path
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
+from train_necrosis import CLASS_WEIGHT, MAX_ITER, POSITIVE
 
-POSITIVE = 0.5
-MAX_ITER = 2000
-CLASS_WEIGHT = "balanced"
+CUTOFF = 0.5  # score at or above which a tile counts as flagged
 
 
 def main() -> None:
@@ -72,7 +72,7 @@ def write_one(animal, head, scaler, target_x, target_animals, manifest, meta, ar
         raise ValueError(f"{len(rows)} manifest rows against {int(keep.sum())} embeddings")
 
     scores = head.predict_proba(scaler.transform(target_x[keep]))[:, 1]
-    flagged = scores >= 0.5
+    flagged = scores >= CUTOFF
     print(f"  {animal:<11} {len(rows):>6,} tiles, {flagged.mean():>6.1%} flagged")
 
     record = {
@@ -83,6 +83,7 @@ def write_one(animal, head, scaler, target_x, target_animals, manifest, meta, ar
         "trained_on": meta["animals"],
         "unlabelled": True,  # nothing to score against; this map is read, not measured
         "positive_threshold": args.positive,
+        "cutoff": CUTOFF,
         "n_tiles": len(rows),
         "size_px": rows[0]["size_px"],
         "level": rows[0]["level"],

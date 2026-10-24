@@ -113,7 +113,7 @@ def fold(
     cutoff, trace = 0.5, None
     if nested:
         # chosen inside the training animals, so the held-out slide never informs it
-        inner = [a for a in np.unique(animals[train]) if a != held_out]
+        inner = list(np.unique(animals[train]))
         cutoff, trace = choose_cutoff(embeddings, target, animals, inner, keep)
 
     scaler = StandardScaler().fit(embeddings[train])  # train alone, so test statistics stay out
@@ -212,9 +212,7 @@ def main() -> None:
     )
     print(header)
     for f in folds:
-        auroc = "n/a" if f["auroc"] is None else f"{f['auroc']:.4f}"
-        ap = "n/a" if f["average_precision"] is None else f"{f['average_precision']:.4f}"
-        iou = "n/a" if f["iou"] is None else f"{f['iou']:.4f}"
+        auroc, ap, iou = shown(f["auroc"]), shown(f["average_precision"]), shown(f["iou"])
         print(
             f"{f['held_out']:<12}{f['n_train']:>8,}{f['n_test']:>7,}"
             f"{f['balanced_accuracy']:>9.4f}{f['f1']:>8.4f}{iou:>8}{auroc:>8}{ap:>8}"
@@ -254,12 +252,11 @@ def main() -> None:
             f"{error:>+9.1%}{f['cutoff']:>8.3f}"
         )
 
-    scored_area = [f for f in folds if f["test_positive"]]
-    absolute = [abs(f["area_predicted"] - f["area_true"]) for f in scored_area]
-    signed = [f["area_predicted"] - f["area_true"] for f in scored_area]
+    absolute = [abs(f["area_predicted"] - f["area_true"]) for f in scored]
+    signed = [f["area_predicted"] - f["area_true"] for f in scored]
     print(
         f"{'mean |error|':<12}{'':>11}{'':>11}{np.mean(absolute):>9.1%}"
-        f"   over {len(scored_area)} necrotic slides"
+        f"   over {len(scored)} necrotic slides"
     )
     print(f"{'mean error':<12}{'':>11}{'':>11}{np.mean(signed):>+9.1%}")
 

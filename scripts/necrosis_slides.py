@@ -98,6 +98,9 @@ def main() -> None:
     paths = sorted(args.maps.glob("*_patch_slide.npz"))
     if not paths:
         raise SystemExit(f"no slide maps in {args.maps}")
+    lumina = [args.lumen / f"{p.name.removesuffix('_patch_slide.npz')}_lumen.npz" for p in paths]
+    if missing := [str(path) for path in [*lumina, args.lumen / "necrosis_lumen.json"] if not path.exists()]:
+        raise SystemExit("missing lumen inputs:\n  " + "\n  ".join(missing))
     args.out.mkdir(parents=True, exist_ok=True)
 
     with ProcessPoolExecutor(max(1, min(args.workers, len(paths))), mp_context=get_context("spawn")) as pool:

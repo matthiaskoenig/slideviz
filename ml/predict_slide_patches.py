@@ -23,7 +23,16 @@ from pathlib import Path
 import numpy as np
 import timm
 import torch
-from embed_tiles import BATCH, DTYPE, INPUT_PX, MODEL, WORKERS, TileSet, build_transform
+from embed_tiles import (
+    BATCH,
+    DTYPE,
+    INPUT_PX,
+    MODEL,
+    PATCH_DTYPE,
+    WORKERS,
+    TileSet,
+    build_transform,
+)
 from predict_field_patches import check_head, pixel_patch, score
 from torch.utils.data import DataLoader
 
@@ -62,7 +71,8 @@ def main() -> None:
     ((animal, geometry),) = manifest["fields"].items()
     if not geometry.get("whole_slide"):
         raise SystemExit(f"{args.tiles} holds a field, not a whole slide")
-    if str(heads["encoder"]) != MODEL or train_meta["input_px"] != INPUT_PX or train_meta.get("stain_matched"):
+    if (str(heads["encoder"]) != MODEL or train_meta["input_px"] != INPUT_PX or train_meta.get("stain_matched")
+            or (train_meta.get("patches") or {}).get("dtype") != str(PATCH_DTYPE).removeprefix("torch.")):
         raise SystemExit("the heads were fitted on descriptions made differently from this script's")
     if {(r["level"], r["size_px"]) for r in rows} - trained_on:
         raise SystemExit(f"tiles are not cut like the training tiles {sorted(trained_on)}")
@@ -97,7 +107,7 @@ def main() -> None:
         for batch, index in loader:
             tokens = encoder.forward_features(batch.to(args.device, dtype=DTYPE, non_blocking=True))
             # rounded to half precision as embed_tiles.py --patches stores the training descriptions
-            patches = tokens[:, prefix:].reshape(len(batch), *grid, dim).to(torch.float16).cpu().numpy()
+            patches = tokens[:, prefix:].reshape(len(batch), *grid, dim).to(PATCH_DTYPE).cpu().numpy()
             for i, patch_scores in zip(index.tolist(), score(patches, np.arange(len(batch)), heads, k), strict=True):
                 y, x = rows[i]["y"] - top, rows[i]["x"] - left
                 total[y:y + size, x:x + size] += patch_scores[np.ix_(expand, expand)]

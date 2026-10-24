@@ -16,9 +16,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
-from predict_slide import CLASS_WEIGHT, MAX_ITER, POSITIVE
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
+from train_necrosis import CLASS_WEIGHT, MAX_ITER, POSITIVE
 
 
 def main() -> None:

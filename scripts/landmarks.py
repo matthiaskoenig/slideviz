@@ -3,6 +3,7 @@
     uv run python scripts/landmarks.py place 281mg_m2 --slides <APAP_tiff> --out <landmarks>
     uv run python scripts/landmarks.py score --slides <APAP_tiff> --out <landmarks> \
         --fields density=<nonrigid dir> haematoxylin=<nonrigid dir>
+    uv run python scripts/landmarks.py cache 281mg_m2 375mg_m3 --slides <APAP_tiff> --out <landmarks>
 
 Points are stored as level-0 (row, col) pixels in each slide's own frame; pair i is the
 i-th H&E point with the i-th CYP2E1 point.
@@ -119,8 +120,8 @@ def score(slides: Path, out: Path, fields: dict[str, Path]) -> None:
         pairs = min(len(record["he"]), len(record["cyp2e1"]))
         if pairs == 0:
             continue
-        he_um = view_um(slides, record["he_slide"])
-        cyp_um = view_um(slides, record["cyp2e1_slide"])
+        he_um = level0_um(slides, record["he_slide"])
+        cyp_um = level0_um(slides, record["cyp2e1_slide"])
         p = np.array(record["he"])[:pairs, ::-1]  # (x, y) reference px
         q = np.array(record["cyp2e1"])[:pairs, ::-1]  # (x, y) moving px
 
@@ -154,7 +155,7 @@ def score(slides: Path, out: Path, fields: dict[str, Path]) -> None:
          for block, _, e in rows}, indent=1) + "\n")
 
 
-def view_um(slides: Path, slide: str) -> float:
+def level0_um(slides: Path, slide: str) -> float:
     """A slide's level-0 pixel size."""
     info, _ = open_slide(slides / f"{slide}.ome.tiff")
     return info.pixel_size_um
@@ -173,6 +174,8 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "place":
+        if len(args.block) != 1:
+            parser.error("place takes exactly one block")
         place(args.block[0], args.slides, args.out)
     elif args.command == "cache":
         for block in args.block:

@@ -16,6 +16,7 @@ import numpy as np
 from outline_register import (
     _warp,
     full_size,
+    pyramid_level,
     read_level,
     shared_downsample,
     tissue_mask,
@@ -44,7 +45,9 @@ def um_per_px(path: Path) -> float:
 
 def sidecar_matrix(slides: Path, slide: str) -> np.ndarray:
     """The moving slide's matrix onto its reference, from its sidecar."""
-    registration = json.loads((slides / f"{slide}.json").read_text())["registration"]
+    names = (slides / f"{slide}.json", slides / f"{slide}.ome.json")
+    path = next((p for p in names if p.exists()), names[0])
+    registration = json.loads(path.read_text())["registration"]
     return np.array(registration["matrix"], float)
 
 
@@ -74,15 +77,7 @@ def read_rgb(path: Path, downsample: float) -> np.ndarray:
 
     width, _ = full_size(path)
     target = width / downsample
-    level = -1  # deepest SubIFD still at or above target, so the last step shrinks
-    for candidate in range(16):
-        try:
-            probe = pyvips.Image.new_from_file(str(path), page=0, subifd=candidate)
-        except pyvips.Error:
-            break
-        if probe.width < target:
-            break
-        level = candidate
+    level, _ = pyramid_level(path, target)
 
     bands = []
     for page in range(3):
@@ -121,12 +116,13 @@ def register_block(block: str, slides: Path, out: Path, edge: int,
     matrix = sidecar_matrix(slides, slide)
 
     fixed_grey = read_level(he, downsample)
-    moving_grey = read_level(cyp, downsample)
     fixed_mask = tissue_mask(fixed_grey)
-    fixed = density(fixed_grey, fixed_mask)
-    moving = _warp(density(moving_grey, tissue_mask(moving_grey)).astype(float),
-                   scaled(matrix, downsample), fixed.shape).astype(np.uint8)
-    if source == "haematoxylin":
+    if source == "density":
+        moving_grey = read_level(cyp, downsample)
+        fixed = density(fixed_grey, fixed_mask)
+        moving = _warp(density(moving_grey, tissue_mask(moving_grey)).astype(float),
+                       scaled(matrix, downsample), fixed.shape).astype(np.uint8)
+    else:
         fixed = haematoxylin(read_rgb(he, downsample), fixed_mask)
         moving_rgb = read_rgb(cyp, downsample)
         moving = _warp(haematoxylin(moving_rgb, tissue_mask(moving_rgb.mean(axis=-1)))

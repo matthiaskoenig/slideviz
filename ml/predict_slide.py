@@ -5,7 +5,8 @@ leave-one-animal-out split and writes only that animal. The output carries each 
 grid position, so the viewer can paint the scores back onto the slide.
 
     uv run python predict_slide.py --cache /data/michelle/mouse/embeddings \
-        --animal 281mg_m1 --out /data/michelle/mouse/predictions
+        --tiles /data/michelle/mouse/tiles --animal 281mg_m1 \
+        --out /data/michelle/mouse/predictions
 
 With --nested, the area uses the cutoff the nested run chose for this animal, and the
 file is only written if it reproduces that run's area.
@@ -21,10 +22,9 @@ from pathlib import Path
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
+from train_necrosis import CLASS_WEIGHT, MAX_ITER, POSITIVE
 
-POSITIVE = 0.5
-MAX_ITER = 2000
-CLASS_WEIGHT = "balanced"
+CUTOFF = 0.5  # score cutoff without --nested
 
 
 def main() -> None:
@@ -39,7 +39,7 @@ def main() -> None:
                         help="train_necrosis.py --nested results, for this animal's cutoff")
     args = parser.parse_args()
 
-    cutoff, expected = POSITIVE, None
+    cutoff, expected = CUTOFF, None
     if args.nested:
         folds = {f["held_out"]: f for f in json.loads(args.nested.read_text())["folds"]}
         cutoff, expected = folds[args.animal]["cutoff"], folds[args.animal]["area_predicted"]

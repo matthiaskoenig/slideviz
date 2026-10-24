@@ -43,6 +43,23 @@ def full_size(path: Path) -> tuple[int, int]:
     return image.width, image.height
 
 
+def pyramid_level(path: Path, target: float) -> tuple[int, int]:
+    """The deepest SubIFD at least `target` px wide and its width; -1 and the full width for level 0."""
+    import pyvips
+
+    width, _ = full_size(path)
+    level, level_width = -1, width
+    for candidate in range(16):
+        try:
+            probe = pyvips.Image.new_from_file(str(path), page=0, subifd=candidate)
+        except pyvips.Error:
+            break
+        if probe.width < target:
+            break
+        level, level_width = candidate, probe.width
+    return level, level_width
+
+
 def read_level(path: Path, downsample: float) -> np.ndarray:
     """A greyscale view of a slide, shrunk by a factor shared across the pair.
 
@@ -53,17 +70,7 @@ def read_level(path: Path, downsample: float) -> np.ndarray:
 
     width, _ = full_size(path)
     target = width / downsample
-
-    # deepest level still at or above target, so the last step shrinks
-    level, level_width = -1, width
-    for candidate in range(16):
-        try:
-            probe = pyvips.Image.new_from_file(str(path), page=0, subifd=candidate)
-        except pyvips.Error:
-            break
-        if probe.width < target:
-            break
-        level, level_width = candidate, probe.width
+    level, level_width = pyramid_level(path, target)
 
     channels = []
     for page in range(3):

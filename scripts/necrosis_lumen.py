@@ -103,9 +103,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--slides", type=Path, required=True, help="H&E OME-TIFFs")
     parser.add_argument("--predictions", type=Path, required=True, help="nested necrosis predictions")
-    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--out", type=Path, required=True, help="a new or empty folder")
     parser.add_argument("--workers", type=int, default=1)
     args = parser.parse_args()
+    if args.out.exists() and any(args.out.iterdir()):
+        raise SystemExit(f"{args.out} is not empty; give a new --out")
     args.out.mkdir(parents=True, exist_ok=True)
 
     paths = sorted(args.predictions.glob("*_predictions.json"))

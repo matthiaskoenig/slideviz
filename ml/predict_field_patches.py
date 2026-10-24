@@ -20,8 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
-
-CHUNK = 256  # tiles scored at once, as train_patch_head.py scores them, so the check repeats its arithmetic
+from train_patch_head import CHUNK  # check_head scores by this chunk
 
 
 def score(patches: np.ndarray, part: np.ndarray, heads: np.lib.npyio.NpzFile, k: int) -> np.ndarray:
