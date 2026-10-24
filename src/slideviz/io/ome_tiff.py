@@ -20,9 +20,6 @@ log = logging.getLogger(__name__)
 # the scanner's own overview pictures, stored as extra series beside the slide
 THUMBNAILS = ("label image", "macro image")
 
-# Tile edge in pixels, the unit napari fetches and caches
-TILE = 1024
-
 
 def image_series(slide: tifffile.TiffFile) -> list[tifffile.TiffPageSeries]:
     """Series holding slide images, with the scanner's thumbnails dropped."""

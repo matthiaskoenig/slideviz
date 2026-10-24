@@ -7,7 +7,7 @@ a slide costs nothing until its pixels are.
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 import dask.array as da
@@ -54,14 +54,6 @@ class Grid:
     size_um: float
     um_per_px: float
     tiles: list[Tile]
-
-    def to_dict(self) -> dict:
-        """The grid as JSON-serialisable provenance."""
-        return {
-            **{k: v for k, v in asdict(self).items() if k != "tiles"},
-            "n_tiles": len(self.tiles),
-            "tiles": [asdict(t) for t in self.tiles],
-        }
 
 
 def pick_level_um(

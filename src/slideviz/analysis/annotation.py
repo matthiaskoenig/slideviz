@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -51,14 +51,6 @@ class Labels:
     n_polygons: int
     polygon_area_um2: float  # grid-independent, so label quantisation can be measured
     tiles: list[Coverage]
-
-    def to_dict(self) -> dict:
-        """The labels as JSON-serialisable provenance."""
-        return {
-            **{k: v for k, v in asdict(self).items() if k != "tiles"},
-            "n_tiles": len(self.tiles),
-            "tiles": [asdict(t) for t in self.tiles],
-        }
 
 
 def read_overview(sidecar: Path) -> dict:

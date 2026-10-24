@@ -100,11 +100,6 @@ def tissue_mask(
     return mask, index, um_per_px
 
 
-def tissue_area_mm2(mask: np.ndarray, um_per_px: float) -> float:
-    """Tissue area in square millimetres."""
-    return float(mask.sum()) * (um_per_px / 1000.0) ** 2
-
-
 def pyramid_factor(fine_width: int, coarse_width: int) -> int:
     """The power of two between two pyramid levels: each level halves the one above."""
     return 2 ** round(np.log2(fine_width / coarse_width))

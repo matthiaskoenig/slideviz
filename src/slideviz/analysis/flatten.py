@@ -347,7 +347,6 @@ def brown_parts(grid: Grid, decay_um: float, typical: float | None = None):
     deep = deep_mask(grid)
     bands = np.arange(EDGE_UM, RIM_FIT_UM, RIM_BAND_UM)
     rim = np.zeros_like(logd)
-    strength = np.zeros(RIM_SECTORS)
     for _ in range(5):
         slow = trend(logd - rim, trust, BROWN_TREND_UM / grid.grid_um)
         left = logd - slow

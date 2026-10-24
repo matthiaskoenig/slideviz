@@ -253,7 +253,7 @@ def register_block(block: str, args) -> dict:
             # every directory that holds sidecars for this block
             for directory in (ZARR_DIR, TIFF_DIR, CZI_DIR):
                 if directory.exists():
-                    write_to_sidecars(registrations, directory, write=True)
+                    write_to_sidecars(registrations, directory)
             print(f"  error: {error_um:.1f} µm" if error_um else "  error: a correlation, see outline_error.csv")
             return {"block": block, "route": route, "error_um": error_um, "reasons": []}
 

@@ -7,13 +7,10 @@ in sync with the copy in `ml/stain_norm.py`.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 
 import numpy as np
 from skimage.color import lab2rgb, rgb2lab
-
-log = logging.getLogger(__name__)
 
 
 def _triple(values: np.ndarray) -> tuple[float, float, float]:

@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 from scipy.ndimage import binary_fill_holes
 from skimage.measure import approximate_polygon, find_contours, label
-from skimage.morphology import closing, disk, remove_small_holes
+from skimage.morphology import remove_small_holes
 
 log = logging.getLogger(__name__)
 
@@ -34,11 +34,9 @@ def flagged_mask(rows: list[dict], scores: np.ndarray, threshold: float) -> np.n
     return mask
 
 
-def clean_mask(
-    mask: np.ndarray, min_tiles: int = MIN_TILES, bridge: bool = False
-) -> np.ndarray:
-    """Fill small holes, optionally closing gaps between lesions."""
-    cleaned = closing(mask, disk(1)) if bridge else mask
+def clean_mask(mask: np.ndarray, min_tiles: int = MIN_TILES) -> np.ndarray:
+    """Fill holes smaller than `min_tiles` tiles."""
+    cleaned = mask
     # max_size removes holes of that size or smaller, so one less keeps min_tiles intact
     return remove_small_holes(cleaned, max_size=min_tiles - 1)
 
@@ -104,7 +102,6 @@ def suggest_polygons(
     return {
         "slide": record.get("slide"),
         "animal": record["animal"],
-        "frame": overview.get("frame"),
         "width": overview["width"],
         "height": overview["height"],
         "model_generated": True,  # review and correct before these count as annotation

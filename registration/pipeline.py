@@ -126,7 +126,7 @@ def rigid(block: str, run: Path, code: str) -> dict:
     implausible = check_geometry(registration.matrix)
     if implausible:
         raise RuntimeError(f"rigid: {implausible}")
-    write_to_sidecars(registrations, run / "slides", write=True)
+    write_to_sidecars(registrations, run / "slides")
 
     matrix = np.array(registration.matrix)
     with (out / "outline_error.csv").open() as handle:
@@ -145,8 +145,7 @@ def nonrigid(block: str, run: Path, edge: int) -> dict:
     in_registration_venv(["nonrigid_register.py", block, "--slides", str(run / "slides"),
                           "--out", str(fields), "--edge", str(edge),
                           "--input", NONRIGID_INPUT], fields / f"{block}_log.txt")
-    field = attach_nonrigid(fields / f"{stem(block, 'cyp2e1')}_nonrigid.json", run / "slides",
-                            write=True)
+    field = attach_nonrigid(fields / f"{stem(block, 'cyp2e1')}_nonrigid.json", run / "slides")
     return {"median_um": field.median_um, "p95_um": field.p95_um}
 
 

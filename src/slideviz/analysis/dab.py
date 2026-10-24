@@ -16,8 +16,8 @@ from skimage.color import hed_from_rgb
 
 from slideviz.analysis.tissue import working_mask
 
-# channel order of stain_od
-HAEMATOXYLIN, RESIDUAL, DAB = 0, 1, 2
+DAB = 2  # channel of stain_od: haematoxylin, residual, DAB
+BAND_PX = 1024  # rows evaluated at a time
 
 # optical density is scaled by this log, as in skimage.color.rgb2hed, so cutoffs share its units
 LOG_FLOOR = np.log(1e-6)
@@ -128,24 +128,24 @@ def local_levels(dab: np.ndarray, tissue: np.ndarray, um_per_px: float) -> Local
     )
 
 
-def positive_map(dab: np.ndarray, tissue: np.ndarray, levels: LocalLevels, band_px: int = 1024) -> np.ndarray:
+def positive_map(dab: np.ndarray, tissue: np.ndarray, levels: LocalLevels) -> np.ndarray:
     """0 negative, 1 positive, 2 not tissue; evaluated in row bands so memory stays bounded."""
     out = np.full(dab.shape, 2, np.uint8)
     cols = np.arange(dab.shape[1], dtype=np.float32)
-    for r0 in range(0, dab.shape[0], band_px):
-        r1 = min(r0 + band_px, dab.shape[0])
+    for r0 in range(0, dab.shape[0], BAND_PX):
+        r1 = min(r0 + BAND_PX, dab.shape[0])
         rows, cc = np.meshgrid(np.arange(r0, r1, dtype=np.float32), cols, indexing="ij")
         positive = dab[r0:r1] > levels.threshold(rows, cc)
         out[r0:r1] = np.where(tissue[r0:r1], positive, 2)
     return out
 
 
-def relative_position(dab: np.ndarray, tissue: np.ndarray, levels: LocalLevels, band_px: int = 1024) -> np.ndarray:
+def relative_position(dab: np.ndarray, tissue: np.ndarray, levels: LocalLevels) -> np.ndarray:
     """Each pixel's DAB between its window's low (0) and high (POSITION_SCALE) level, NO_TISSUE outside."""
     out = np.full(dab.shape, NO_TISSUE, np.uint8)
     cols = np.arange(dab.shape[1], dtype=np.float32)
-    for r0 in range(0, dab.shape[0], band_px):
-        r1 = min(r0 + band_px, dab.shape[0])
+    for r0 in range(0, dab.shape[0], BAND_PX):
+        r1 = min(r0 + BAND_PX, dab.shape[0])
         rows, cc = np.meshgrid(np.arange(r0, r1, dtype=np.float32), cols, indexing="ij")
         low, high = levels.bounds(rows, cc)
         # the range is zero only where low and high are both zero

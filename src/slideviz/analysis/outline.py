@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.ndimage import binary_fill_holes, rotate, shift, zoom
+from scipy.ndimage import affine_transform, rotate, shift
 from skimage.measure import label, regionprops
 
 # matrices are built (x, y) while masks are indexed (row, col)
@@ -25,16 +25,6 @@ PEAK_SEPARATION_DEG = 20.0
 MIN_DICE = 0.90  # good blocks span 0.9235 to 0.9900
 WEAK_SHARPNESS = 0.03  # below this, confirm the angle by intensity
 AREA_RATIO_LIMIT = 0.25
-
-MASK_EDGE_PX = 400
-PROCESSED_THRESHOLD = 8
-
-
-def principal_axis(mask: np.ndarray) -> tuple[float, np.ndarray]:
-    """Angle of the largest blob's long axis in degrees, and its centroid (row, col)."""
-    biggest = max(regionprops(label(mask)), key=lambda region: region.area)
-    return float(np.rad2deg(biggest.orientation)), np.array(biggest.centroid)
-
 
 def elongation(mask: np.ndarray) -> float:
     """Ratio of the mask's principal axes."""
@@ -63,8 +53,6 @@ def dice(fixed: np.ndarray, moving: np.ndarray) -> float:
 
 def warp_mask(mask: np.ndarray, matrix: np.ndarray, shape) -> np.ndarray:
     """Apply an x/y matrix to a mask, in the same pixel grid it was built in."""
-    from scipy.ndimage import affine_transform
-
     row_col = SWAP_XY @ matrix @ SWAP_XY
     inverse = np.linalg.inv(row_col)
     warped = affine_transform(
@@ -136,17 +124,13 @@ def best_rotation(
 
 
 def align(
-    fixed: np.ndarray, moving: np.ndarray, fixed_shape_rc, moving_shape_rc,
-    angle: float | None = None,
+    fixed: np.ndarray, moving: np.ndarray, fixed_shape_rc, moving_shape_rc, angle: float,
 ) -> tuple[np.ndarray, float]:
     """A full-resolution x/y matrix mapping the moving slide onto the fixed one.
 
     Masks are at some pyramid level; the matrix is rescaled to full resolution.
     `angle` builds the matrix for an angle found elsewhere.
     """
-    if angle is None:
-        angle, *_ = best_rotation(fixed, moving)
-
     # rotate the grid through the same call that warps the mask: rotate(reshape=True)
     # works in (row, col) and recentres, a transpose away from a hand-composed one
     turned = _turn(moving, angle)
@@ -244,26 +228,3 @@ def outline_qc(fixed: np.ndarray, moving: np.ndarray) -> OutlineQC:
         angle=angle, dice=score, sharpness=sharpness, mirrored_dice=mirrored,
         area_ratio=ratio, elongation=elongation(fixed), verdict=verdict, notes=notes,
     )
-
-
-def mask_from_png(path, size: int = MASK_EDGE_PX) -> np.ndarray:
-    """A filled tissue mask from one of VALIS's processed images."""
-    from PIL import Image
-
-    grey = np.asarray(Image.open(path).convert("L"))
-    mask = binary_fill_holes(grey > PROCESSED_THRESHOLD)
-    scaled = zoom(mask.astype(float), size / max(mask.shape), order=1) > 0.5
-    return binary_fill_holes(scaled)
-
-
-def masks_from_valis_run(run_dir, block: str) -> tuple[np.ndarray, np.ndarray]:
-    """The (H&E, CYP2E1) masks for a block, from its VALIS run directory."""
-    from pathlib import Path
-
-    processed = Path(run_dir) / "slides" / "processed"
-    fixed = processed / f"mouse_apap_{block}_he.png"
-    moving = processed / f"mouse_apap_{block}_cyp2e1.png"
-    for path in (fixed, moving):
-        if not path.exists():
-            raise FileNotFoundError(f"no processed image at {path}")
-    return mask_from_png(fixed), mask_from_png(moving)

@@ -47,14 +47,12 @@ from slideviz.data.schema import Registration, Slide
 from slideviz.io.reader import open_slide
 from slideviz.settings import settings
 
-# n_scenes rides along per row, so list can label scenes without opening any file
-SELECT_SQL = "SELECT *, COUNT(*) OVER (PARTITION BY directory, file) AS n_scenes FROM slides"
+SELECT_SQL = "SELECT * FROM slides"
 ORDER_SQL = "ORDER BY species, substance, dose_mg_per_kg, animal_id, stain, scene"
 
 # One row per serial block
 BLOCK_SQL = """
-SELECT directory, serial_block, species, substance, dose_mg_per_kg, animal_id,
-       COUNT(*) AS n_slides
+SELECT directory, serial_block, species, substance, dose_mg_per_kg, animal_id
 FROM slides
 """
 BLOCK_GROUP_SQL = """
@@ -311,14 +309,11 @@ class SlideList(QWidget):
         self._pixels.timeout.connect(self._poll_pixels)
         self._pixels.start(PIXEL_POLL_MS)
 
-        self.reload()
+        self._fill_boxes()
+        self.refresh()
 
     def _fill_boxes(self) -> None:
-        """Offer the values the index actually holds, so new species appear on their own.
-
-        Keeps each selection across a refill, so a reindex mid-session does not
-        silently reset the filters.
-        """
+        """Offer the values the index holds, scoped to the listed directory."""
         scope, params = self._scope()
         where = f"WHERE {scope[0]}" if scope else ""
         for column, box in self.boxes.items():
@@ -327,13 +322,11 @@ class SlideList(QWidget):
                 f"SELECT DISTINCT {_column(column)} FROM slides {where} ORDER BY 1",
                 tuple(params),
             )
-            previous = box.currentText()
             box.blockSignals(True)  # filling would otherwise fire refresh once per item
             box.clear()
             box.addItem(ANY)
             box.addItems([str(row[0]) for row in values if row[0] is not None])
-            kept = box.findText(previous)  # -1 when the value is gone from the index
-            box.setCurrentIndex(max(kept, 0))
+            box.setCurrentIndex(0)
             box.blockSignals(False)
 
     def _scope(self) -> tuple[list[str], list]:
@@ -351,15 +344,6 @@ class SlideList(QWidget):
                 # cast, rather than leaving an integer column to SQLite's type affinity
                 params.append(FILTER_TYPES[column](box.currentText()))
         return ("WHERE " + " AND ".join(clauses) if clauses else "", tuple(params))
-
-    def reload(self) -> None:
-        """Pick up a reindex: rebuild the dropdowns, then the list.
-
-        refresh() alone keeps stale dropdowns, because they are filled once at
-        construction and a new species would never appear in them.
-        """
-        self._fill_boxes()
-        self.refresh()
 
     def refresh(self) -> None:
         """Reload the list from the index, honouring the filters."""
@@ -652,16 +636,15 @@ class SlideList(QWidget):
         self._map_worker = None
         self._set_busy(False)
 
-    def _load_readouts(self, slides: list) -> int:
+    def _load_readouts(self, slides: list) -> None:
         """Add the stored gradient map of each DAB slide, on its H&E partner's grid."""
         import numpy as np
 
         directory = settings.predictions_dir()
         if directory is None or not directory.is_dir():
-            return 0
+            return
         references = {Path(row["file"]).name.split(".")[0]
                       for row in slides if row["stain"] == REFERENCE_STAIN}
-        added = 0
         for row in slides:
             if row["stain"] not in DAB_STAINS:
                 continue
@@ -694,8 +677,6 @@ class SlideList(QWidget):
                 interpolation2d="nearest",  # steps are classes, a blend between two would be a third
                 visible=False,
             )
-            added += 1
-        return added
 
     @thread_worker
     def _open_block(self, slides: list):

@@ -265,7 +265,7 @@ def main() -> None:
               f"sharpness {report.sharpness:.4f}, {report.verdict}")
         for note in report.notes:
             print(f"    ! {note}")
-        if report.verdict == "reject":
+        if not report.ok:
             sys.exit("  the pair fails outline QC; not registering it")
 
         score = report.dice
