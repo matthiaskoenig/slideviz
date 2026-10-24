@@ -2,9 +2,8 @@
 
 Inside every window the output is a straight-line function of the guide's colours, fitted to the input
 map, so the output keeps an edge where the guide has one and is smoothed where the guide is flat. Used to
-move a coarse necrosis score onto the edges the H&E shows. Radius and smoothness are a tuned rule, not a
-learned one. It holds about 300 bytes per pixel at once (measured), so a whole slide goes through in
-blocks that overlap by twice the radius.
+move a coarse necrosis score onto the edges the H&E shows. Radius and smoothness are hand-set. It holds
+about 300 bytes per pixel, so callers run a whole slide in blocks that overlap by twice the radius.
 """
 
 from __future__ import annotations
@@ -12,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 from scipy.ndimage import uniform_filter
 
-# the necrosis call's settings (option E, her pick 19 Oct): 8 and 16 um looked alike by eye, 8 keeps more detail
+# the necrosis map's guided filter: window radius in um and flat-window colour variance
 NECROSIS_RADIUS_UM = 8.0
 NECROSIS_EPS = 0.01
 
@@ -32,7 +31,7 @@ def guided_filter(guide: np.ndarray, source: np.ndarray, radius: int, eps: float
     mean_value = window_mean(value, radius)
     covariance = window_mean(colour * value[..., None], radius) - mean_colour * mean_value[..., None]
 
-    # each window's 3 x 3 colour covariance, flattened by eps so a flat window cannot amplify noise
+    # each window's 3 x 3 colour covariance, plus eps on the diagonal, which holds the slope near zero in flat windows
     products = colour[..., :, None] * colour[..., None, :]
     spread = window_mean(products.reshape(*colour.shape[:2], 9), radius).reshape(*colour.shape[:2], 3, 3)
     spread -= mean_colour[..., :, None] * mean_colour[..., None, :]

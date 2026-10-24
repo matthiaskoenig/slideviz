@@ -1,11 +1,4 @@
-"""Annotated tiles written to disk as images, ready for an encoder in another environment.
-
-Tiling and labelling need the slide readers, embedding needs CUDA wheels, and the two
-environments are deliberately separate. So this stage ends at a directory of PNGs plus
-one manifest, which the embedding stage reads without importing slideviz.
-
-The manifest carries the animal each tile came from, because the split is by animal.
-"""
+"""Annotated tiles written as PNGs plus one manifest with each tile's animal, the input of the embedding stage in ml/."""
 
 from __future__ import annotations
 
@@ -31,7 +24,7 @@ class Row:
 
     tile: str  # filename, relative to the tile directory
     slide: str
-    animal: str  # the split is by animal, so it travels with every row
+    animal: str  # split key
     dose_mg: int
     row: int
     col: int
@@ -64,12 +57,7 @@ def export_slide(
     tile_um: float = TILE_UM,
     target_um_per_px: float = TARGET_UM_PER_PX,
 ) -> list[Row]:
-    """Write every tissue tile of one slide as a PNG, with its annotated fraction.
-
-    The pixels depend only on the slide and the grid, so tiles already on disk are
-    reused. Annotating changes the label, which lives in the manifest, not the image.
-    `rewrite` forces them out again, for when the grid parameters themselves change.
-    """
+    """Write each tissue tile of one slide as a PNG and return its rows with the annotated fraction; PNGs on disk are reused unless `rewrite`, which a grid change needs."""
     grid = build_grid(slide_path, scene, tile_um=tile_um, target_um_per_px=target_um_per_px)
     labels = label_grid(grid, polygons, overview)
 
@@ -114,12 +102,7 @@ def export_slide(
 
 
 def read_confirmed_empty(path: Path | None) -> list[str]:
-    """Slides someone looked at and confirmed hold no necrosis.
-
-    An unannotated slide and a slide with nothing to draw are identical in the CVAT
-    export, so only slides named in this file count as negative. Everything else that
-    carries no polygons is simply not yet drawn, and stays out of the training data.
-    """
+    """Slide keys checked and found free of necrosis, the only polygon-free slides used as negatives."""
     if path is None or not path.exists():
         return []
     return list(json.loads(path.read_text())["slides"])
@@ -181,8 +164,8 @@ def export_annotated(
         "size_px": rows[0].size_px if rows else None,
         "animals": sorted({r.animal for r in rows}),
         "label": "necrosis",
-        "label_is_fraction": True,  # a threshold is the training stage's choice, not this one
-        "confirmed_empty": empty,  # negative because someone looked, not because nobody drew
+        "label_is_fraction": True,  # the training stage sets the threshold
+        "confirmed_empty": empty,  # slides checked and found free of necrosis
         "necrotic_over_half": int((necrosis > 0.5).sum()),
         "clean": int((necrosis == 0).sum()),
         "boundary_0.1_to_0.9": int(((necrosis > 0.1) & (necrosis < 0.9)).sum()),

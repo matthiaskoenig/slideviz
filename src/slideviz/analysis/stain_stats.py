@@ -21,7 +21,7 @@ SEED = 0  # fixed, so a rerun reproduces the same sample and the same target
 
 @dataclass(frozen=True)
 class SlideSample:
-    """Which healthy tiles one slide's statistics were computed from."""
+    """How many healthy tiles one slide has and how many its statistics were computed from."""
 
     n_clean: int
     n_sampled: int
@@ -101,7 +101,7 @@ def read(path: Path) -> tuple[LabStats, dict[str, LabStats]]:
 
 
 def main() -> None:
-    """Compute the set's stain statistics and write them where both stages read them."""
+    """Compute the set's stain statistics, write them to --out and print a summary."""
     import argparse
 
     from slideviz.log import setup

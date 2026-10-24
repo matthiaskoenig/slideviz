@@ -70,7 +70,7 @@ def glass_like(od: np.ndarray) -> np.ndarray:
 
 
 def smooth(dab: np.ndarray, tissue: np.ndarray, um_per_px: float) -> np.ndarray:
-    """DAB averaged over about one cell, weighted to tissue so lumina and glass do not dilute it."""
+    """Tissue-weighted mean DAB over about one cell (SMOOTH_UM)."""
     sigma = SMOOTH_UM / um_per_px
     weight = gaussian_filter(tissue.astype(np.float32), sigma)
     return gaussian_filter(dab * tissue, sigma) / np.maximum(weight, 1e-3)
@@ -131,7 +131,7 @@ def local_levels(dab: np.ndarray, tissue: np.ndarray, um_per_px: float) -> Local
 
 
 def positive_map(dab: np.ndarray, tissue: np.ndarray, levels: LocalLevels) -> np.ndarray:
-    """0 negative, 1 positive, 2 not tissue; evaluated in row bands so memory stays bounded."""
+    """0 negative, 1 positive, 2 outside the tissue, computed in row bands of BAND_PX."""
     out = np.full(dab.shape, 2, np.uint8)
     cols = np.arange(dab.shape[1], dtype=np.float32)
     for r0 in range(0, dab.shape[0], BAND_PX):

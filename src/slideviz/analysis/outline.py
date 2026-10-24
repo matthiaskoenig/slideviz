@@ -108,10 +108,7 @@ def best_rotation(
     fixed: np.ndarray, moving: np.ndarray, step: float = SWEEP_STEP_DEG,
     refine: bool = True,
 ) -> tuple[float, float, float, float]:
-    """Angle, its Dice, the peak's sharpness, and the best Dice when mirrored.
-
-    Mirrored beating upright means a section was mounted face down.
-    """
+    """Best angle, its Dice, the peak's sharpness, and the best mirrored Dice, which beats upright for a face-down section."""
     scored = sweep_rotation(fixed, moving, step)
     angle, score = scored[0]
     sharpness = peak_sharpness(scored)
@@ -126,13 +123,8 @@ def best_rotation(
 def align(
     fixed: np.ndarray, moving: np.ndarray, fixed_shape_rc, moving_shape_rc, angle: float,
 ) -> tuple[np.ndarray, float]:
-    """A full-resolution x/y matrix mapping the moving slide onto the fixed one.
-
-    Masks are at some pyramid level; the matrix is rescaled to full resolution.
-    `angle` builds the matrix for an angle found elsewhere.
-    """
-    # rotate the grid through the same call that warps the mask: rotate(reshape=True)
-    # works in (row, col) and recentres, a transpose away from a hand-composed one
+    """An x/y matrix mapping the moving slide onto the fixed one at `angle`, rescaled from mask pixels to the `*_shape_rc` grids, and its mask Dice."""
+    # the grid under _turn: rotated about the frame centre, recentred in the enlarged frame
     turned = _turn(moving, angle)
     rows, cols = moving.shape
     grid_rc = np.array(
@@ -142,7 +134,7 @@ def align(
 
     radians = np.deg2rad(angle)
     cos, sin = np.cos(radians), np.sin(radians)
-    # measured off rotate() with a probe grid, to 0.5 px
+    # scipy rotate()'s (row, col) rotation, matched to it to 0.5 px
     rotation = np.array([[cos, -sin], [sin, cos]])
     moving_centre = (np.array(moving.shape, float) - 1) / 2
     turned_centre = (np.array(turned.shape, float) - 1) / 2
@@ -190,12 +182,7 @@ class OutlineQC:
 
 
 def outline_qc(fixed: np.ndarray, moving: np.ndarray) -> OutlineQC:
-    """Judge a pair by its outlines alone.
-
-    Rejects a mismatched pair (low Dice at every angle), a face-down section
-    (mirrored beats upright) and a large area difference. Flags a round outline
-    (low sharpness) as weak.
-    """
+    """A pair's OutlineQC: reject for low Dice, a face-down section or an area mismatch, weak for low sharpness (a round outline)."""
     angle, score, sharpness, mirrored = best_rotation(fixed, moving)
     ratio = float(moving.sum() / fixed.sum()) if fixed.sum() else 0.0
 

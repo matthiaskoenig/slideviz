@@ -1,8 +1,4 @@
-"""A tile grid over a slide, sized in micrometres and filtered to tissue.
-
-The grid is coordinates, not images: tiles are read lazily when they are needed, so
-a slide costs nothing until its pixels are.
-"""
+"""A tile grid over a slide, sized in micrometres and filtered to tissue; tiles hold coordinates and are read lazily."""
 
 from __future__ import annotations
 
@@ -35,7 +31,7 @@ class Tile:
     slide: str
     scene: int
     level: int
-    row: int  # index on the tile grid, not a pixel
+    row: int  # tile-grid index
     col: int
     y: int  # top-left pixel on `level`
     x: int
@@ -119,7 +115,7 @@ def build_grid(
 
 
 def read_tile(levels: list[da.Array], tile: Tile) -> np.ndarray:
-    """One tile's pixels, the only point at which a slide is decoded."""
+    """One tile's pixels, read from its level."""
     level = levels[tile.level]
     return np.asarray(
         level[tile.y : tile.y + tile.size_px, tile.x : tile.x + tile.size_px]

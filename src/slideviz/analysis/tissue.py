@@ -60,7 +60,7 @@ def keep_large_components(mask: np.ndarray) -> np.ndarray:
     """Drop components far smaller than the largest, keeping genuinely torn pieces."""
     labelled = label(mask)
     sizes = np.bincount(labelled.ravel())
-    sizes[0] = 0  # background is not a component
+    sizes[0] = 0  # label 0 is background
     if not sizes.any():
         return mask
 
@@ -105,9 +105,7 @@ def pyramid_factor(fine_width: int, coarse_width: int) -> int:
     return 2 ** round(np.log2(fine_width / coarse_width))
 
 
-# Measured on the slides (18 Oct): a coarser level sits (factor - 1) / 2 level pixels up and left of a plain
-# factor-wide box, the same across the slide, as halving by pyrDown gives; mapping by the ratio of the widths
-# drifts from that by up to 13 level-1 px at the coarsest outline level
+# a coarser level's pixel q is centred on fine pixel factor * q, as pyrDown halving places it
 def on_level(mask: np.ndarray, factor: int, top: int, left: int, shape_rc: tuple[int, int]) -> np.ndarray:
     """A level's pixels from (top, left) over shape_rc on a coarser level's mask, coarse pixel q centred on factor * q."""
     rows = ((np.arange(top, top + shape_rc[0]) + factor // 2) // factor).clip(0, mask.shape[0] - 1)

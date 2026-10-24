@@ -17,10 +17,10 @@ from skimage.morphology import remove_small_holes
 
 log = logging.getLogger(__name__)
 
-# below this many tiles a region is noise, not a lesion worth drawing
+# fewest tiles in a region worth drawing
 MIN_TILES = 4
 
-# how far a traced outline may sit from the mask, in tile widths; keeps point counts sane
+# approximate_polygon tolerance: how far a simplified outline may sit from the traced one, in tile widths
 TOLERANCE_TILES = 0.4
 
 
@@ -57,7 +57,7 @@ def mask_to_polygons(
         for contour in contours:
             simplified = approximate_polygon(contour, tolerance=tolerance)
             if len(simplified) < 4:
-                continue  # fewer than four points is not a region
+                continue  # a closed triangle takes four points
             # shoelace area in tile units, so the threshold means "this many tiles"
             y, x = simplified[:, 0], simplified[:, 1]
             area = abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1))) / 2

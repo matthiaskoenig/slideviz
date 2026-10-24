@@ -1,9 +1,4 @@
-"""A downscaled slide image for annotation, with the scale needed to map drawings back.
-
-CVAT holds an ordinary image, so a whole slide is exported at a coarse pyramid level.
-The sidecar records what that level was, so a polygon drawn on the export converts to
-full-resolution slide coordinates.
-"""
+"""A downscaled slide PNG for CVAT annotation, with a JSON sidecar of the level and pixel size that map drawings back to the slide."""
 
 from __future__ import annotations
 
@@ -44,7 +39,7 @@ def pick_export_level(levels: list, max_edge_px: int = MAX_EDGE_PX) -> int:
     for i, level in enumerate(levels):
         if max(level.shape[0], level.shape[1]) <= max_edge_px:
             return i
-    return len(levels) - 1  # every level is larger, so the coarsest is the only option
+    return len(levels) - 1  # coarsest level when none fits
 
 
 def export_overview(

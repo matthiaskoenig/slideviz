@@ -41,7 +41,7 @@ LUMEN_GREY = 215  # brighter view pixels inside the tissue are vessel openings
 AMOUNT_FLOOR = 0.02  # stain amount below this is noise for the log
 NECROSIS_MARGIN_UM = 100.0
 EDGE_UM = 50.0  # outer band left out of the trend and region fits
-OUTLINE_CLOSE_UM = 200.0  # depth is measured from the closed outer outline, not from holes
+OUTLINE_CLOSE_UM = 200.0  # closing radius of the hole-filled outer outline that depth is measured from
 SUPPORT_UM, FULL_SUPPORT = 1000.0, 0.1  # full correction where >= 10 % of the surrounding mm is trusted
 TREND_UM = 1000.0
 CLIP = (0.25, 4.0)
@@ -64,7 +64,7 @@ RIM_TAPER_UM = (900.0, 1200.0)
 DEEP_UM, DEEP_SHARE = 1200.0, 0.15  # a slide informs the shared decay when this much is that deep
 RIM_QUANTILE = 25  # the rim scales weak and strong cells alike; weak cells ignore spared tissue
 RIM_MAX = float(np.log(3.0))
-RIM_FRACTION = 0.7  # removing all of the rim took too much brown off small sections
+RIM_FRACTION = 0.7  # share of the fitted rim that is removed
 BROWN_CLIP = (0.4, 2.5)
 
 
@@ -326,7 +326,7 @@ def deep_profile(grid: Grid) -> np.ndarray | None:
 
 
 def rim_decay(profiles: list[np.ndarray]) -> float:
-    """The shared decay length: exp(-depth / decay) fitted to the pooled normalised profiles."""
+    """The shared decay length: exp(-(depth - first band) / decay) fitted to the pooled normalised profiles."""
     norm = [p / np.mean(p[:2]) for p in profiles if np.mean(p[:2]) > 0.1]
     if not norm:
         raise ValueError("no slide has a measurable rim and enough deep tissue")
@@ -339,11 +339,7 @@ def rim_decay(profiles: list[np.ndarray]) -> float:
 
 
 def brown_parts(grid: Grid, decay_um: float, typical: float | None = None):
-    """Slow trend (anchored on the deep tissue, scaled by support), rim, and rim strength per sector.
-
-    Sectors without enough trusted tissue, or all of them when fewer than half have it, take
-    `typical`, the median strength over the slides that inform the decay.
-    """
+    """Slow trend (anchored on the deep tissue, scaled by support), rim, and rim strength per sector; sectors short of trusted tissue take `typical` (all when under half qualify) or the slide's median."""
     logd, trust, depth, sector = grid.logs[2], grid.trust, grid.depth, grid.sector
     g = rim_shape(depth, decay_um)
     deep = deep_mask(grid)

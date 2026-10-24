@@ -14,7 +14,7 @@ from skimage.color import lab2rgb, rgb2lab
 
 
 def _triple(values: np.ndarray) -> tuple[float, float, float]:
-    """Three numpy scalars as plain floats, which JSON can write and numpy cannot."""
+    """Three numpy scalars as a tuple of plain Python floats, for JSON."""
     a, b, c = (float(v) for v in values)
     return a, b, c
 
@@ -34,7 +34,6 @@ class LabStats:
 def lab_stats(tiles: list[np.ndarray]) -> LabStats:
     """Mean and standard deviation per LAB channel over a sample of one slide's tiles."""
     lab = np.concatenate([rgb2lab(t.astype(np.float32) / 255).reshape(-1, 3) for t in tiles])
-    # plain floats, so the statistics survive json.dumps into a manifest
     return LabStats(_triple(lab.mean(axis=0)), _triple(lab.std(axis=0)))
 
 
