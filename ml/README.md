@@ -1,45 +1,20 @@
-# ml/
+# ML
 
-Frozen pathology encoders and linear heads. Separate uv project, runs on `gpu1`.
+Frozen encoder (Lunit ViT-S/8) and linear heads. Own venv, runs on GPU server.
 
 | File | |
 |---|---|
-| `extract_embeddings.py` | HepatoBench patches to cached embeddings |
-| `train_linear_head.py` | embeddings to classifier, metrics, misclassified list |
-| `embed_tiles.py` | mouse slide tiles to cached embeddings |
-| `train_necrosis.py` | leave one animal out, `--tag` names the run |
-| `predict_slide.py` | one held-out animal's per-tile scores |
-| `predict_unlabelled.py` | scores for a slide with no annotation, to show where to look |
+| `extract_embeddings.py`, `train_linear_head.py` | HepatoBench baseline |
+| `embed_tiles.py`, `stain_norm.py` | slide tiles to cached embeddings (`--patches` keeps the patch descriptions) |
+| `train_necrosis.py`, `predict_slide.py`, `predict_unlabelled.py` | tile head, leave one animal out |
+| `train_patch_head.py`, `predict_slide_patches.py` | the necrosis map: per-patch head over a whole slide |
+| `predict_field.py`, `predict_field_patches.py` | both heads on field tiles, for map comparisons |
 
-The first two are stage 1, HepatoBench. The rest are stage 2, mouse necrosis, and
-take their tiles from `slideviz-scripts/export_tiles.py`.
+Tiles come from `scripts/export_tiles.py` and `scripts/export_field_tiles.py`, labels from
+`scripts/patch_labels.py`; `scripts/necrosis_slides.py` turns the maps into calls and areas.
 
-## Setup
-
-    ssh gpu1                       # HU VPN first
-    cd ~/Projects/slideviz && git pull
     cd ml && uv sync
-
-## Running
-
-    uv run python extract_embeddings.py \
-        --zips /data/michelle/hepatobench/zips \
-        --out  /data/michelle/hepatobench/embeddings
-
-    uv run python train_linear_head.py \
-        --cache /data/michelle/hepatobench/embeddings
-
-Mouse necrosis, from tiles already on the server:
-
-    uv run python embed_tiles.py \
-        --tiles /data/michelle/mouse/tiles \
-        --out   /data/michelle/mouse/embeddings
-
-    uv run python train_necrosis.py --cache /data/michelle/mouse/embeddings
-    uv run python train_necrosis.py --cache /data/michelle/mouse/embeddings --drop-boundary
-
-    uv run python predict_slide.py \
-        --cache  /data/michelle/mouse/embeddings \
-        --tiles  /data/michelle/mouse/tiles \
-        --animal 281mg_m1 \
-        --out    /data/michelle/mouse/predictions
+    uv run python embed_tiles.py --tiles <tiles> --out <embeddings> --patches
+    uv run python train_patch_head.py --embeddings <embeddings> --labels <labels> --out <heads>
+    uv run python predict_slide_patches.py --heads <heads> --embeddings <embeddings> \
+        --tiles <export_field_tiles.py --slide output> --out <maps>
