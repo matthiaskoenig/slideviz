@@ -20,9 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler
-from train_necrosis import CLASS_WEIGHT, MAX_ITER, POSITIVE
+from train_necrosis import POSITIVE, fit_head
 
 CUTOFF = 0.5  # score cutoff without --nested
 
@@ -59,9 +57,7 @@ def main() -> None:
     test, train = animals == args.animal, animals != args.animal
     print(f"=== fit on {train.sum():,} tiles, predict {test.sum():,} of {args.animal} ===")
 
-    scaler = StandardScaler().fit(embeddings[train])  # train alone, so test statistics stay out
-    head = LogisticRegression(max_iter=MAX_ITER, class_weight=CLASS_WEIGHT)
-    head.fit(scaler.transform(embeddings[train]), target[train])
+    scaler, head = fit_head(embeddings[train], target[train])
     scores = head.predict_proba(scaler.transform(embeddings[test]))[:, 1]
 
     rows = [r for r in manifest["tiles"] if r["animal"] == args.animal]

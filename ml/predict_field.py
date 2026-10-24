@@ -16,9 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler
-from train_necrosis import CLASS_WEIGHT, MAX_ITER, POSITIVE
+from train_necrosis import POSITIVE, fit_head
 
 
 def main() -> None:
@@ -47,9 +45,7 @@ def main() -> None:
     for animal, geometry in manifest["fields"].items():
         fold = folds[animal]
         train, own = animals != animal, animals == animal
-        scaler = StandardScaler().fit(embeddings[train])
-        head = LogisticRegression(max_iter=MAX_ITER, class_weight=CLASS_WEIGHT)
-        head.fit(scaler.transform(embeddings[train]), target[train])
+        scaler, head = fit_head(embeddings[train], target[train])
 
         # the same model as the manuscript numbers, or nothing is written
         own_area = round(float((head.predict_proba(scaler.transform(embeddings[own]))[:, 1]

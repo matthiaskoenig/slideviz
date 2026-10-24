@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,19 +32,16 @@ from embed_tiles import (
     TileSet,
     build_transform,
 )
-from predict_field_patches import check_head, pixel_patch, score
+from predict_field_patches import (
+    check_head,
+    load_heads,
+    map_frame,
+    mean_map,
+    pixel_patch,
+    score,
+)
 from torch.utils.data import DataLoader
-
-
-def code_version() -> str:
-    """The git commit the script ran from, marked dirty if the tree had changes and untracked if it is not in it."""
-    here = Path(__file__).parent
-    found = subprocess.run(["git", "describe", "--always", "--dirty"], capture_output=True,
-                           text=True, check=False, cwd=here)
-    tracked = subprocess.run(["git", "ls-files", "--error-unmatch", Path(__file__).name],
-                             capture_output=True, check=False, cwd=here).returncode == 0
-    version = found.stdout.strip()
-    return "unknown" if not version else version if tracked else f"{version}-untracked"
+from train_necrosis import code_version
 
 
 def main() -> None:
@@ -60,11 +56,7 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=WORKERS)
     args = parser.parse_args()
 
-    heads = np.load(args.heads / "heads.npz")
-    results = json.loads((args.heads / "patch_head_results.json").read_text())
-    names = heads["animals"].tolist()
-    label_meta = json.loads((Path(results["inputs"]["labels"]) / "patch_labels_meta.json").read_text())
-    trained_on = {(lv, sz) for lv in label_meta["geometry"]["level"] for sz in label_meta["geometry"]["size_px"]}
+    heads, results, names, trained_on = load_heads(args.heads)
     train_meta = json.loads((args.embeddings / "embeddings_meta.json").read_text())
     manifest = json.loads((args.tiles / "manifest.json").read_text())
     rows = manifest["tiles"]
@@ -97,9 +89,7 @@ def main() -> None:
                         batch_size=args.batch, shuffle=False, num_workers=args.workers, pin_memory=True,
                         prefetch_factor=4 if args.workers else None)
 
-    size = rows[0]["size_px"]
-    top, left = min(r["y"] for r in rows), min(r["x"] for r in rows)
-    shape = (max(r["y"] for r in rows) + size - top, max(r["x"] for r in rows) + size - left)
+    top, left, shape, size = map_frame(rows)
     total, count = np.zeros(shape, np.float64), np.zeros(shape, np.uint16)
     expand = pixel_patch(size, grid[0])
     start, done = time.time(), 0
@@ -117,10 +107,10 @@ def main() -> None:
                 print(f"  {done:>8,}/{len(rows):,}  {done / (time.time() - start):.0f} tiles/s", flush=True)
 
     seen = count > 0
-    mean = np.where(seen, total / np.maximum(count, 1), np.nan).astype(np.float32)
+    mean = mean_map(total, count)
     meta = {
         "written": datetime.now(UTC).isoformat(timespec="seconds"),
-        "code": code_version(),
+        "code": code_version(Path(__file__).name),
         "animal": animal,
         "slide": geometry["slide"],
         "head": f"heads.npz index {k}, fitted without {animal}",

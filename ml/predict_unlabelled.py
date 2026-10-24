@@ -17,9 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler
-from train_necrosis import CLASS_WEIGHT, MAX_ITER, POSITIVE
+from train_necrosis import POSITIVE, fit_head
 
 CUTOFF = 0.5  # score at or above which a tile counts as flagged
 
@@ -56,9 +54,7 @@ def main() -> None:
 
     # one fit serves every slide, since the training set does not change between them
     print(f"=== fit on {len(train_y):,} annotated tiles from {len(meta['animals'])} animals ===")
-    scaler = StandardScaler().fit(train_x)
-    head = LogisticRegression(max_iter=MAX_ITER, class_weight=CLASS_WEIGHT)
-    head.fit(scaler.transform(train_x), train_y)
+    scaler, head = fit_head(train_x, train_y)
 
     for animal in wanted:
         write_one(animal, head, scaler, target_x, target_animals, manifest, meta, args)

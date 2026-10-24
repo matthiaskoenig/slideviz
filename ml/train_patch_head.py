@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 from concurrent.futures import ProcessPoolExecutor
 from datetime import UTC, datetime
 from itertools import combinations
@@ -27,7 +26,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import balanced_accuracy_score, roc_auc_score
 from sklearn.preprocessing import StandardScaler
 from threadpoolctl import threadpool_limits
-from train_necrosis import CLASS_WEIGHT, CUTOFFS, MAX_ITER
+from train_necrosis import CLASS_WEIGHT, CUTOFFS, MAX_ITER, area_error, code_version
 
 # a tile's patches overlap in what they see, so a few per tile carry most of what the tile can teach
 PER_TILE = 16
@@ -64,9 +63,11 @@ def draw_sample(patches: np.ndarray, labels: np.ndarray, tissue: np.ndarray, ani
     return len(index)
 
 
-def area_error(scores: np.ndarray, truth: np.ndarray, cutoff: float, weight: np.ndarray) -> float:
-    """train_necrosis.area_error on a weighted sample: how far the called area lies from the drawn one."""
-    return abs(float(np.average(scores >= cutoff, weights=weight) - np.average(truth, weights=weight)))
+def patch_score(x: np.ndarray, mean: np.ndarray, scale: np.ndarray, coef: np.ndarray, intercept: float) -> np.ndarray:
+    """Necrosis score per patch description: sigmoid of the standardised float32 description dotted with coef plus intercept, as float32."""
+    x = np.asarray(x, dtype=np.float32)
+    logit = ((x - mean) / scale) @ coef + intercept
+    return (1 / (1 + np.exp(-logit))).astype(np.float32)
 
 
 def fit(job: tuple) -> dict:
@@ -98,17 +99,6 @@ def overlap(truth: np.ndarray, called: np.ndarray) -> tuple[float | None, float 
     if not drawn + kept:
         return None, None
     return round(2 * both / (drawn + kept), 4), round(both / (drawn + kept - both), 4)
-
-
-def code_version() -> str:
-    """The git commit the script ran from, marked dirty if the tree had changes and untracked if it is not in it."""
-    here = Path(__file__).parent
-    found = subprocess.run(["git", "describe", "--always", "--dirty"], capture_output=True,
-                           text=True, check=False, cwd=here)
-    tracked = subprocess.run(["git", "ls-files", "--error-unmatch", Path(__file__).name, "train_necrosis.py"],
-                             capture_output=True, check=False, cwd=here).returncode == 0
-    version = found.stdout.strip()
-    return "unknown" if not version else version if tracked else f"{version}-untracked"
 
 
 def main() -> None:
@@ -169,9 +159,8 @@ def main() -> None:
         own_scores = np.zeros((len(tiles), *labels.shape[1:]), np.float32)
         for start in range(0, len(tiles), CHUNK):
             part = tiles[start:start + CHUNK]
-            x = np.asarray(patches[part], dtype=np.float32)
-            logit = ((x - head["mean"]) / head["scale"]) @ head["coef"] + head["intercept"]
-            own_scores[start:start + CHUNK] = 1 / (1 + np.exp(-logit))
+            own_scores[start:start + CHUNK] = patch_score(patches[part], head["mean"], head["scale"],
+                                                          head["coef"], head["intercept"])
         scores[tiles] = own_scores  # stored in half precision; the metrics below use the full scores
 
         own_labels = labels[tiles]
@@ -212,7 +201,7 @@ def main() -> None:
     np.savez(args.out / "heads.npz", animals=np.array(names), cutoff=[f["cutoff"] for f in folds],
              mean=np.stack([final[a]["mean"] for a in names]), scale=np.stack([final[a]["scale"] for a in names]),
              coef=np.stack([final[a]["coef"] for a in names]), intercept=[final[a]["intercept"] for a in names],
-             encoder=meta["model"], grid=meta["patches"]["grid"], code=code_version(),
+             encoder=meta["model"], grid=meta["patches"]["grid"], code=code_version(Path(__file__).name, "train_necrosis.py"),
              note=("score = sigmoid(((x - mean) / scale) @ coef + intercept) on a float16 patch description cast "
                    "to float32; the cutoff was chosen on one pass over whole training-grid tiles, on patches "
                    f"with at least {TISSUE} tissue"))
@@ -220,7 +209,7 @@ def main() -> None:
     necrotic = [f for f in folds if f["area_true"] > 0]
     results = {
         "written": datetime.now(UTC).isoformat(timespec="seconds"),
-        "code": code_version(),
+        "code": code_version(Path(__file__).name, "train_necrosis.py"),
         "head": "LogisticRegression on standardised patch descriptions, as train_necrosis.py on tiles",
         "class_weight": CLASS_WEIGHT,
         "max_iter": MAX_ITER,

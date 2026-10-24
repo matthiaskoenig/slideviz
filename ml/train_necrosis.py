@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -63,9 +64,28 @@ def overlap(truth: np.ndarray, predicted: np.ndarray) -> float | None:
     return None if union == 0 else round(float((truth & predicted).sum() / union), 4)
 
 
-def area_error(scores: np.ndarray, truth: np.ndarray, cutoff: float) -> float:
-    """How far this cutoff puts predicted necrotic area from the annotated area."""
-    return abs(float((scores >= cutoff).mean() - truth.mean()))
+def area_error(scores: np.ndarray, truth: np.ndarray, cutoff: float, weight: np.ndarray | None = None) -> float:
+    """How far this cutoff puts predicted necrotic area from the annotated area, each element weighted by `weight` when given."""
+    return abs(float(np.average(scores >= cutoff, weights=weight) - np.average(truth, weights=weight)))
+
+
+def fit_head(x: np.ndarray, y: np.ndarray) -> tuple[StandardScaler, LogisticRegression]:
+    """A scaler fitted on x and the logistic head fitted on the standardised x against y."""
+    scaler = StandardScaler().fit(x)
+    head = LogisticRegression(max_iter=MAX_ITER, class_weight=CLASS_WEIGHT)
+    head.fit(scaler.transform(x), y)
+    return scaler, head
+
+
+def code_version(*files: str) -> str:
+    """The git commit the caller ran from, marked dirty for a changed tree and untracked unless git tracks every one of `files`."""
+    here = Path(__file__).parent
+    found = subprocess.run(["git", "describe", "--always", "--dirty"], capture_output=True,
+                           text=True, check=False, cwd=here)
+    tracked = subprocess.run(["git", "ls-files", "--error-unmatch", *files],
+                             capture_output=True, check=False, cwd=here).returncode == 0
+    version = found.stdout.strip()
+    return "unknown" if not version else version if tracked else f"{version}-untracked"
 
 
 def choose_cutoff(
@@ -80,9 +100,7 @@ def choose_cutoff(
     for row, validation in enumerate(inner):
         fit = np.isin(animals, [a for a in inner if a != validation]) & keep
         check = (animals == validation) & keep
-        scaler = StandardScaler().fit(embeddings[fit])
-        head = LogisticRegression(max_iter=MAX_ITER, class_weight=CLASS_WEIGHT)
-        head.fit(scaler.transform(embeddings[fit]), target[fit])
+        scaler, head = fit_head(embeddings[fit], target[fit])
         scores = head.predict_proba(scaler.transform(embeddings[check]))[:, 1]
         for column, cutoff in enumerate(CUTOFFS):
             errors[row, column] = area_error(scores, target[check], cutoff)
@@ -116,9 +134,7 @@ def fold(
         inner = list(np.unique(animals[train]))
         cutoff, trace = choose_cutoff(embeddings, target, animals, inner, keep)
 
-    scaler = StandardScaler().fit(embeddings[train])  # train alone, so test statistics stay out
-    head = LogisticRegression(max_iter=MAX_ITER, class_weight=CLASS_WEIGHT)
-    head.fit(scaler.transform(embeddings[train]), target[train])
+    scaler, head = fit_head(embeddings[train], target[train])
 
     scores = head.predict_proba(scaler.transform(embeddings[test]))[:, 1]
     predicted = scores >= cutoff

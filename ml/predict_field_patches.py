@@ -15,19 +15,17 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
-from train_patch_head import CHUNK  # check_head scores by this chunk
+from train_necrosis import code_version
+from train_patch_head import CHUNK, patch_score  # check_head scores by this chunk
 
 
 def score(patches: np.ndarray, part: np.ndarray, heads: np.lib.npyio.NpzFile, k: int) -> np.ndarray:
     """Necrosis scores per patch for the tiles in part, by head k, in train_patch_head.py's arithmetic."""
-    x = np.asarray(patches[part], dtype=np.float32)
-    logit = ((x - heads["mean"][k]) / heads["scale"][k]) @ heads["coef"][k] + heads["intercept"][k]
-    return (1 / (1 + np.exp(-logit))).astype(np.float32)
+    return patch_score(patches[part], heads["mean"][k], heads["scale"][k], heads["coef"][k], heads["intercept"][k])
 
 
 def check_head(heads: np.lib.npyio.NpzFile, k: int, animal: str, train_patches: np.ndarray,
@@ -43,20 +41,31 @@ def check_head(heads: np.lib.npyio.NpzFile, k: int, animal: str, train_patches: 
     return {"tiles": int(part.size), "patches_different": differ}
 
 
+def load_heads(heads_dir: Path) -> tuple[np.lib.npyio.NpzFile, dict, list[str], set[tuple[int, int]]]:
+    """The heads, their results record, their animal names and the (level, size_px) pairs their labels were cut at."""
+    heads = np.load(heads_dir / "heads.npz")
+    results = json.loads((heads_dir / "patch_head_results.json").read_text())
+    label_meta = json.loads((Path(results["inputs"]["labels"]) / "patch_labels_meta.json").read_text())
+    trained_on = {(level, size) for level in label_meta["geometry"]["level"] for size in label_meta["geometry"]["size_px"]}
+    return heads, results, heads["animals"].tolist(), trained_on
+
+
+def map_frame(rows: list[dict]) -> tuple[int, int, tuple[int, int], int]:
+    """Top, left, shape and tile size of the map covering these tile rows."""
+    size = rows[0]["size_px"]
+    top, left = min(r["y"] for r in rows), min(r["x"] for r in rows)
+    shape = (max(r["y"] for r in rows) + size - top, max(r["x"] for r in rows) + size - left)
+    return top, left, shape, size
+
+
+def mean_map(total: np.ndarray, count: np.ndarray) -> np.ndarray:
+    """total / count per pixel as float32, NaN where count is 0."""
+    return np.where(count > 0, total / np.maximum(count, 1), np.nan).astype(np.float32)
+
+
 def pixel_patch(size_px: int, grid: int) -> np.ndarray:
     """The patch row (or column) each tile pixel's centre falls in, with patch edges at r * size_px / grid."""
     return ((np.arange(size_px) + 0.5) * grid / size_px).astype(int)
-
-
-def code_version() -> str:
-    """The git commit the script ran from, marked dirty if the tree had changes and untracked if it is not in it."""
-    here = Path(__file__).parent
-    found = subprocess.run(["git", "describe", "--always", "--dirty"], capture_output=True,
-                           text=True, check=False, cwd=here)
-    tracked = subprocess.run(["git", "ls-files", "--error-unmatch", Path(__file__).name],
-                             capture_output=True, check=False, cwd=here).returncode == 0
-    version = found.stdout.strip()
-    return "unknown" if not version else version if tracked else f"{version}-untracked"
 
 
 def main() -> None:
@@ -71,11 +80,7 @@ def main() -> None:
     if args.out.exists() and any(args.out.iterdir()):
         raise SystemExit(f"{args.out} is not empty; give a new --out")
 
-    heads = np.load(args.heads / "heads.npz")
-    results = json.loads((args.heads / "patch_head_results.json").read_text())
-    names = heads["animals"].tolist()
-    label_meta = json.loads((Path(results["inputs"]["labels"]) / "patch_labels_meta.json").read_text())
-    trained_on = {(level, size) for level in label_meta["geometry"]["level"] for size in label_meta["geometry"]["size_px"]}
+    heads, results, names, trained_on = load_heads(args.heads)
 
     field_meta = json.loads((args.field_cache / "embeddings_meta.json").read_text())
     manifest = json.loads((args.field_tiles / "manifest.json").read_text())
@@ -117,7 +122,7 @@ def main() -> None:
         "field_cache": str(args.field_cache),
         "field_cache_written": field_meta["written"],
     }
-    run_stamp = {"written": datetime.now(UTC).isoformat(timespec="seconds"), "code": code_version()}
+    run_stamp = {"written": datetime.now(UTC).isoformat(timespec="seconds"), "code": code_version(Path(__file__).name)}
 
     args.out.mkdir(parents=True, exist_ok=True)
     fields = {}
@@ -127,9 +132,7 @@ def main() -> None:
         own = np.flatnonzero(field_animals == animal)
         if len(own) != geometry["n_tiles"]:
             raise SystemExit(f"{animal}: {len(own)} tiles in the manifest against the field's {geometry['n_tiles']}")
-        size = rows[own[0]]["size_px"]
-        top, left = min(rows[i]["y"] for i in own), min(rows[i]["x"] for i in own)
-        shape = (max(rows[i]["y"] for i in own) + size - top, max(rows[i]["x"] for i in own) + size - left)
+        top, left, shape, size = map_frame([rows[i] for i in own])
         total, votes = np.zeros(shape, np.float64), np.zeros(shape, np.uint16)
         count = np.zeros(shape, np.uint16)
         expand = pixel_patch(size, grid)
@@ -144,8 +147,8 @@ def main() -> None:
                 count[window] += 1
 
         seen = count > 0
-        mean = np.where(seen, total / np.maximum(count, 1), np.nan).astype(np.float32)
-        vote_share = np.where(seen, votes / np.maximum(count, 1), np.nan).astype(np.float32)
+        mean = mean_map(total, count)
+        vote_share = mean_map(votes, count)
 
         # the field itself, from the first tile centre to the last; the map reaches half a tile beyond it
         first = np.round(np.array(geometry["first_centre"]) - [top, left]).astype(int)
