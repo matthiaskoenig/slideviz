@@ -18,7 +18,6 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Rectangle
-from scipy.ndimage import map_coordinates
 from skimage.color import lab2rgb, rgb2lab
 
 from slideviz.analysis import flatten
@@ -106,27 +105,6 @@ def sidecar(slides: Path, stem: str) -> dict:
         if (slides / name).exists():
             return json.loads((slides / name).read_text())
     raise FileNotFoundError(f"no sidecar for {stem} in {slides}")
-
-
-# the overlapping-tile scores of the 18 Oct comparison (scripts/necrosis_fine_report.py imports this)
-def field_score(scores: Path, he: list, level: int, top_left: tuple[int, int], size: int) -> tuple:
-    """The blended held-out score over a square field, the share of tissue tiles behind it, and the cutoff."""
-    record = json.loads(scores.read_text())
-    field = record["field"]
-    probability = np.zeros(field["grid_shape"], np.float32)
-    present = np.zeros(field["grid_shape"], np.float32)
-    for t in record["tiles"]:
-        probability[t["row"], t["col"]] = t["predicted"]
-        present[t["row"], t["col"]] = 1.0
-
-    # zoom pixels to positions on the tile-centre grid, through level 0
-    to_field = he[field["level"]].shape[1] / he[level].shape[1]
-    rows = ((top_left[0] + np.arange(size)) * to_field - field["first_centre"][0]) / field["stride_px"]
-    cols = ((top_left[1] + np.arange(size)) * to_field - field["first_centre"][1]) / field["stride_px"]
-    grid = np.meshgrid(rows, cols, indexing="ij")
-    weight = map_coordinates(present, grid, order=1, mode="nearest")
-    blended = map_coordinates(probability * present, grid, order=1, mode="nearest") / np.maximum(weight, 1e-6)
-    return blended, weight, record["cutoff"]
 
 
 def cyp2e1_field(warped: list, he: list, um: float, spot: tuple[int, int]) -> tuple[np.ndarray, float]:

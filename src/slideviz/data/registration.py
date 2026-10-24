@@ -1,4 +1,4 @@
-"""Registration transforms: from a VALIS run into the sidecars, and out to a viewer."""
+"""Registration transforms: from a registration run into the sidecars, and out to a viewer."""
 
 from __future__ import annotations
 
@@ -22,18 +22,8 @@ def napari_affine(registration: Registration, pixel_size_um: float = 1.0) -> np.
     return matrix
 
 
-VALIS_METHOD = "valis-1.2.0 rigid, GradientOD"
-
-
-def from_valis_run(
-    run_dir: Path, error_um: float | None = None, method: str = VALIS_METHOD,
-    code: str | None = None,
-) -> dict[str, Registration]:
-    """Read a run's transforms.json, keyed by slide stem.
-
-    `method` records what produced it, since outline_register.py writes this file too;
-    `code` is the commit that ran it.
-    """
+def from_valis_run(run_dir: Path, method: str, code: str | None = None) -> dict[str, Registration]:
+    """Read a run's transforms.json, keyed by slide stem; `method` and `code` record what produced it."""
     data = json.loads((run_dir / "transforms.json").read_text())
     reference = Path(data["reference"]).name.split(".")[0]
 
@@ -46,7 +36,6 @@ def from_valis_run(
             matrix=entry["matrix"],
             slide_shape_rc=entry["slide_shape_rc"],
             method=method,
-            error_um=error_um,
             # how exactly the affine fit the full warp
             residual_px=entry.get("residual_px"),
             outline_dice=entry.get("outline_dice"),

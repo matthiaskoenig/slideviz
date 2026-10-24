@@ -30,7 +30,6 @@ from pathlib import Path
 import numpy as np
 from nonrigid_register import EDGE_PX, code_version
 from outline_register import POSE_EDGE_PX, REFINE_EDGES_PX
-from register import check_geometry
 
 from slideviz.data.registration import (
     attach_nonrigid,
@@ -40,10 +39,27 @@ from slideviz.data.registration import (
 
 REGISTRATION_PROJECT = Path(__file__).resolve().parent
 STAINS = ("he", "cyp2e1")  # he is the reference
+SCALE_TOLERANCE = 0.10  # true section scales lie between 0.96 and 1.01
+SHEAR_TOLERANCE = 1.05  # a similarity transform is isotropic
 NONRIGID_INPUT = "haematoxylin"
 RIGID_METHOD = (f"outline rigid (slideviz): rotation sweep of the tissue outlines at "
                 f"{POSE_EDGE_PX} px, gradient correlation refine at "
                 f"{' then '.join(str(e) for e in REFINE_EDGES_PX)} px, scale held at 1")
+
+
+def check_geometry(matrix) -> str | None:
+    """Why this transform is implausible for two sections off one block, or None."""
+    linear = np.asarray(matrix, float)[:2, :2]
+    determinant = float(np.linalg.det(linear))
+    if determinant < 0:
+        return f"reflection (det {determinant:+.3f}), so a section may be mounted face down"
+    scale = float(np.sqrt(abs(determinant)))
+    if abs(scale - 1.0) > SCALE_TOLERANCE:
+        return f"scale {scale:.3f} is not within {SCALE_TOLERANCE:.0%} of 1.0"
+    larger, smaller = np.linalg.svd(linear, compute_uv=False)
+    if smaller > 0 and larger / smaller > SHEAR_TOLERANCE:
+        return f"anisotropic by {larger / smaller:.3f}, so the fit is stretched"
+    return None
 
 
 def now() -> str:

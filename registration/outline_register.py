@@ -8,7 +8,7 @@ A rotation sweep over the tissue outlines fixes the pose to within a degree,
 ~100 um at the slide edge; maximising gradient correlation refines it from there.
 Scale is held at 1.0, the size two sections off one block share.
 
-Runs in this folder's venv. Writes transforms.json in valis_register.py's schema.
+Runs in this folder's venv. Writes transforms.json.
 
     uv run python outline_register.py <slides_dir> <out_dir> --reference <name>
 """
