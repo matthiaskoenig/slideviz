@@ -25,15 +25,23 @@ from slideviz.analysis.dab import (
     STEP_ALPHA,
     STEP_OPACITY,
     STEP_RGB,
+    WORK_UM,
     glass_colour,
     gradient_steps,
     relative_position,
     relative_readout,
 )
-from slideviz.analysis.prediction import CALL_OPACITY, CALL_RGB, calls_on_level
+from slideviz.analysis.flatten import FLATTEN_DIR
+from slideviz.analysis.prediction import (
+    CALL_OPACITY,
+    CALL_RGB,
+    NECROSIS_RECORD,
+    calls_on_level,
+)
 from slideviz.analysis.tissue import mask_from_level
 from slideviz.analysis.tissue import pick_level as outline_level
 from slideviz.analysis.warp import load_field, nonrigid_levels
+from slideviz.data.registration import read_sidecar
 from slideviz.data.schema import Registration
 from slideviz.io.ome_tiff import read_pyramid
 
@@ -49,7 +57,6 @@ BLOCKS = {
 
 ZOOM_UM = 1000.0
 ZOOM_UM_PER_PX = 0.9
-READOUT_UM_PER_PX = 1.8  # the CYP2E1 readout's working resolution
 READOUT_MARGIN_UM = 600.0  # more than one readout window, so the field matches the whole-slide run
 THUMB_EDGE_PX = 1200
 THUMB_PAD = 1.04  # each slide fills its square up to this thin white border
@@ -61,7 +68,6 @@ STEP_RGBA = np.array([(0.0, 0.0, 0.0, 0.0)]
                      + [(*(c / 255 for c in rgb), alpha * STEP_OPACITY)
                         for rgb, alpha in zip(STEP_RGB, STEP_ALPHA, strict=True)]
                      + [(0.0, 0.0, 0.0, 0.0)], np.float32)
-NECROSIS_RECORD = "necrosis_slides.json"  # the necrosis run's areas, beside its maps
 
 # page layout in mm: one A4 page, the panel size follows from the room the rows leave
 MM = 1 / 25.4
@@ -99,17 +105,9 @@ def pick_level(levels, level0_um: float, target_um: float) -> int:
     return chosen
 
 
-def sidecar(slides: Path, stem: str) -> dict:
-    """A slide's sidecar, named <stem>.json or <stem>.ome.json."""
-    for name in (f"{stem}.json", f"{stem}.ome.json"):
-        if (slides / name).exists():
-            return json.loads((slides / name).read_text())
-    raise FileNotFoundError(f"no sidecar for {stem} in {slides}")
-
-
 def cyp2e1_field(warped: list, he: list, um: float, spot: tuple[int, int]) -> tuple[np.ndarray, float]:
     """The CYP2E1 gradient steps over the zoom field (0 to STEPS - 1, STEPS excluded) and its um/px."""
-    level = pick_level(he, um, READOUT_UM_PER_PX)
+    level = pick_level(he, um, WORK_UM)
     factor = he[0].shape[1] / he[level].shape[1]
     half = int((ZOOM_UM / 2 + READOUT_MARGIN_UM) / (um * factor))
     r, c = int(spot[0] / factor), int(spot[1] / factor)
@@ -133,7 +131,7 @@ def cyp2e1_field(warped: list, he: list, um: float, spot: tuple[int, int]) -> tu
 
 def flattening(slides: Path, stem: str) -> flatten.Flattening:
     """A slide's flattening fields from the folder beside it."""
-    path = slides / "flatten" / f"{stem}_flatten.npz"
+    path = slides / FLATTEN_DIR / f"{stem}_flatten.npz"
     if not path.exists():
         raise FileNotFoundError(f"no flattening fields: {path}")
     return flatten.load(path)
@@ -153,7 +151,7 @@ def read_block(slides: Path, necrosis_dir: Path, block: str, spot: tuple[int, in
     """Whole H&E and CYP2E1 thumbnails, the zooms in H&E and registered CYP2E1, necrosis and gradient."""
     he_info, he = read_pyramid(slides / f"mouse_apap_{block}_he.ome.tiff")
     cyp_info, cyp = read_pyramid(slides / f"mouse_apap_{block}_cyp2e1.ome.tiff")
-    registration = Registration(**sidecar(slides, f"mouse_apap_{block}_cyp2e1")["registration"])
+    registration = Registration(**read_sidecar(slides, f"mouse_apap_{block}_cyp2e1")["registration"])
     field = load_field(slides, registration)
     if field is None:
         raise RuntimeError(f"{block}: no valid non-rigid field")

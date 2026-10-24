@@ -30,7 +30,7 @@ from slideviz.analysis.tiling import (
     coverage,
     pick_level_um,
 )
-from slideviz.analysis.tissue import mask_from_level, pick_level
+from slideviz.analysis.tissue import mask_from_level, pick_level, pyramid_factor
 from slideviz.io.reader import open_slide
 
 SIZE_UM = 1000.0
@@ -42,7 +42,7 @@ def tissue_square(slides: Path, animal: str, tile_um: float) -> tuple[tuple[int,
     info, levels = open_slide(slides / f"mouse_apap_{animal}_he.ome.tiff")
     coarse = pick_level(levels)
     mask = mask_from_level(np.asarray(levels[coarse]))
-    factor = 2 ** round(np.log2(levels[0].shape[1] / levels[coarse].shape[1]))  # each level halves the one above
+    factor = pyramid_factor(levels[0].shape[1], levels[coarse].shape[1])
     rows, cols = np.nonzero(mask)
     top, bottom = rows.min() * factor - factor, (rows.max() + 1) * factor
     left, right = cols.min() * factor - factor, (cols.max() + 1) * factor
@@ -56,7 +56,7 @@ def export_field(slides: Path, animal: str, centre: tuple[int, int], size_um: fl
     """Write one field's overlapping tiles; return their manifest rows and the field's geometry."""
     path = slides / f"mouse_apap_{animal}_he.ome.tiff"
     info, levels = open_slide(path)
-    level = pick_level_um(levels, info.pixel_size_um, target_um_per_px)
+    level = pick_level_um([level.shape for level in levels], info.pixel_size_um, target_um_per_px)
     to_level = levels[0].shape[1] / levels[level].shape[1]
     um_per_px = info.pixel_size_um * to_level
     size_px = round(tile_um / um_per_px)

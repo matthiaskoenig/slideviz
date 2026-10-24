@@ -57,24 +57,25 @@ class Grid:
 
 
 def pick_level_um(
-    levels: list[da.Array], px_um: float, target: float = TARGET_UM_PER_PX
+    shapes: list[tuple[int, ...]], px_um: float, target: float = TARGET_UM_PER_PX
 ) -> int:
-    """Index of the level whose pixel size is closest to `target`, in micrometres."""
-    scales = [px_um * (levels[0].shape[1] / level.shape[1]) for level in levels]
+    """Index of the level shape whose pixel size is closest to `target`, in micrometres."""
+    scales = [px_um * (shapes[0][1] / shape[1]) for shape in shapes]
     return min(range(len(scales)), key=lambda i: abs(scales[i] - target))
+
+
+def resampled(mask: np.ndarray, shape_rc: tuple[int, int], y: int, x: int, size: int) -> np.ndarray:
+    """A tile's footprint on a mask held at another scale, one value per tile pixel."""
+    rows = (np.arange(y, y + size) * mask.shape[0] // shape_rc[0]).clip(0, mask.shape[0] - 1)
+    cols = (np.arange(x, x + size) * mask.shape[1] // shape_rc[1]).clip(0, mask.shape[1] - 1)
+    return mask[np.ix_(rows, cols)]
 
 
 def coverage(
     mask: np.ndarray, shape_rc: tuple[int, int], y: int, x: int, size: int
 ) -> float:
     """Fraction of one tile's footprint covered by a mask held at a coarser scale."""
-    rows = (np.arange(y, y + size) * mask.shape[0] // shape_rc[0]).clip(
-        0, mask.shape[0] - 1
-    )
-    cols = (np.arange(x, x + size) * mask.shape[1] // shape_rc[1]).clip(
-        0, mask.shape[1] - 1
-    )
-    return float(mask[np.ix_(rows, cols)].mean())
+    return float(resampled(mask, shape_rc, y, x, size).mean())
 
 
 def build_grid(
@@ -86,7 +87,7 @@ def build_grid(
 ) -> Grid:
     """Tile one slide, keeping the tiles that hold enough tissue."""
     info, levels = open_slide(path, scene)
-    level = pick_level_um(levels, info.pixel_size_um, target_um_per_px)
+    level = pick_level_um([level.shape for level in levels], info.pixel_size_um, target_um_per_px)
 
     height, width = levels[level].shape[:2]
     um_per_px = info.pixel_size_um * (levels[0].shape[1] / width)

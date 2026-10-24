@@ -16,7 +16,8 @@ from pathlib import Path
 
 import numpy as np
 
-from slideviz.data.registration import napari_affine
+from slideviz.analysis.tiling import pick_level_um
+from slideviz.data.registration import napari_affine, read_sidecar
 from slideviz.data.schema import Registration
 from slideviz.io.reader import open_slide
 
@@ -25,20 +26,11 @@ CACHE = Path.home() / ".cache" / "slideviz" / "landmarks"
 POINT_UM = 40
 
 
-def sidecar(slides: Path, slide: str) -> dict:
-    """A slide's sidecar, named <stem>.json or <stem>.ome.json."""
-    for name in (f"{slide}.json", f"{slide}.ome.json"):
-        if (slides / name).exists():
-            return json.loads((slides / name).read_text())
-    raise FileNotFoundError(f"no sidecar for {slide} in {slides}")
-
-
 def view(slides: Path, slide: str) -> tuple[np.ndarray, float, float]:
     """The level nearest VIEW_UM_PER_PX in memory, cached: (image, level-0 um/px, factor)."""
     info, levels = open_slide(slides / f"{slide}.ome.tiff")
-    factors = [levels[0].shape[1] / level.shape[1] for level in levels]
-    index = min(range(len(levels)),
-                key=lambda i: abs(info.pixel_size_um * factors[i] - VIEW_UM_PER_PX))
+    index = pick_level_um([level.shape for level in levels], info.pixel_size_um, VIEW_UM_PER_PX)
+    factor = levels[0].shape[1] / levels[index].shape[1]
     path = CACHE / f"{slide}_level{index}.npy"
     if path.exists():
         image = np.load(path)
@@ -46,7 +38,7 @@ def view(slides: Path, slide: str) -> tuple[np.ndarray, float, float]:
         image = np.asarray(levels[index])
         CACHE.mkdir(parents=True, exist_ok=True)
         np.save(path, image)
-    return image, info.pixel_size_um, factors[index]
+    return image, info.pixel_size_um, factor
 
 
 def place(block: str, slides: Path, out: Path) -> None:
@@ -56,7 +48,7 @@ def place(block: str, slides: Path, out: Path) -> None:
     he, cyp = f"mouse_apap_{block}_he", f"mouse_apap_{block}_cyp2e1"
     he_image, he_um, he_factor = view(slides, he)
     cyp_image, cyp_um, cyp_factor = view(slides, cyp)
-    registration = Registration(**sidecar(slides, cyp)["registration"])
+    registration = Registration(**read_sidecar(slides, cyp)["registration"])
     affine = napari_affine(registration, he_um)
 
     path = out / f"{block}.json"
@@ -136,7 +128,7 @@ def score(slides: Path, out: Path, fields: dict[str, Path]) -> None:
         for name, directory in {"rigid": None, **fields}.items():
             if directory is None:
                 matrix = np.array(Registration(
-                    **sidecar(slides, record["cyp2e1_slide"])["registration"]).matrix)
+                    **read_sidecar(slides, record["cyp2e1_slide"])["registration"]).matrix)
                 shifted = p
             else:
                 with np.load(directory / f"{record['cyp2e1_slide']}_nonrigid.npz") as stored:

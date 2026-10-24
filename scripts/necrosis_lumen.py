@@ -8,9 +8,7 @@ Example:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import subprocess
 from datetime import UTC, datetime
 from multiprocessing import Pool
 from pathlib import Path
@@ -20,10 +18,13 @@ from skimage.transform import resize
 
 from slideviz.analysis import dab, tissue
 from slideviz.analysis.dab import glass_colour, glass_like, stain_od
+from slideviz.analysis.tiling import pick_level_um
 from slideviz.analysis.tissue import lumen_mask, mask_from_level, pick_level
+from slideviz.data.provenance import code_version
+from slideviz.data.registration import sha256
 from slideviz.io.reader import open_slide
 
-LUMEN_UM = 1.8  # the CYP2E1 readout's working resolution, so both readouts share one lumen rule
+LUMEN_UM = dab.WORK_UM
 
 
 def level_um(levels: list, level0_um: float, index: int) -> float:
@@ -37,7 +38,7 @@ def slide_lumen(path: Path) -> tuple[np.ndarray, float, list[float]]:
     coarse = np.asarray(levels[pick_level(levels)])[..., :3]
     outline = mask_from_level(coarse)
     sizes = [level_um(levels, info.pixel_size_um, i) for i in range(len(levels))]
-    index = min(range(len(levels)), key=lambda i: abs(sizes[i] - LUMEN_UM))
+    index = pick_level_um([level.shape for level in levels], info.pixel_size_um, LUMEN_UM)
     rgb = np.asarray(levels[index])[..., :3]
     inside = resize(outline, rgb.shape[:2], order=0).astype(bool)
     lumen = lumen_mask(glass_like(stain_od(rgb, glass_colour(coarse, outline))), sizes[index]) & inside
@@ -82,7 +83,7 @@ def one_slide(job: tuple) -> dict:
         "slide": record["slide"],
         "animal": record["animal"],
         "prediction": path.name,
-        "prediction_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "prediction_sha256": sha256(path),
         "rule": "tissue.lumen_mask on dab.glass_like inside the tissue outline",
         "settings": {"LUMEN_UM": LUMEN_UM, "GLASS_OD": dab.GLASS_OD,
                      "LUMEN_OPEN_UM": tissue.LUMEN_OPEN_UM, "LUMEN_MIN_UM2": tissue.LUMEN_MIN_UM2},
@@ -95,13 +96,6 @@ def one_slide(job: tuple) -> dict:
     print(f"{record['animal']}: predicted {row['area_predicted']:.1%} -> {row['area_predicted_no_lumen']:.1%}",
           flush=True)
     return {"animal": record["animal"], **row}
-
-
-def code_version() -> str:
-    """The git commit the script ran from, marked dirty if the tree had changes."""
-    found = subprocess.run(["git", "describe", "--always", "--dirty"], capture_output=True,
-                           text=True, check=False, cwd=Path(__file__).parent)
-    return found.stdout.strip() or "unknown"
 
 
 def main() -> None:
@@ -117,7 +111,7 @@ def main() -> None:
     paths = sorted(args.predictions.glob("*_predictions.json"))
     if not paths:
         raise SystemExit(f"no prediction files in {args.predictions}")
-    code = code_version()
+    code = code_version(Path(__file__))
     with Pool(max(1, min(args.workers, len(paths)))) as pool:
         rows = pool.map(one_slide, [(p, args.slides, args.out, code) for p in paths])
 

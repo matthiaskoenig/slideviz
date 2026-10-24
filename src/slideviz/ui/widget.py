@@ -33,16 +33,16 @@ from slideviz.analysis.dab import (
     STEPS,
     gradient_steps,
 )
-from slideviz.analysis.flatten import flatten_levels
+from slideviz.analysis.flatten import DAB_STAINS, FLATTEN_DIR, flatten_levels
 from slideviz.analysis.flatten import load as load_flattening
 from slideviz.analysis.masked import to_rgba
-from slideviz.analysis.prediction import add_call_layer, call_level
+from slideviz.analysis.prediction import NECROSIS_RECORD, add_call_layer, call_level
 from slideviz.analysis.stain import normalise_levels
 from slideviz.analysis.stain_stats import read as read_stain_reference
 from slideviz.analysis.tissue import mask_from_level, pick_level
 from slideviz.analysis.warp import load_field, nonrigid_levels
 from slideviz.data.catalog import query, slide_path
-from slideviz.data.registration import napari_affine
+from slideviz.data.registration import find_sidecar, napari_affine
 from slideviz.data.schema import Registration, Slide
 from slideviz.io.reader import open_slide
 from slideviz.settings import settings
@@ -67,9 +67,6 @@ REFERENCE_STAIN = "he"
 SOURCE_LEVELS = "slideviz_levels"
 EVENED_LEVELS = "slideviz_evened_levels"
 
-# a slide's flattening fields sit in this folder beside it, as <stem>_flatten.npz
-FLATTEN_DIR = "flatten"
-
 # one colour per stain, so an overlay reads as two channels instead of two pictures
 STAIN_COLOURS = {"he": "green", "cyp2e1": "magenta", "cyp1a2": "magenta", "hmgb1": "cyan"}
 FALLBACK_COLOUR = "yellow"
@@ -87,9 +84,6 @@ NAME_SEPARATOR = " · "
 # what the necrosis map's layer is called
 NECROSIS_NAME = "necrosis"
 
-# the DAB stains that carry a gradient readout, keyed as the index writes them
-DAB_STAINS = ("cyp2e1", "cyp1a2")
-
 # stored gradient map of a DAB slide, from scripts/cyp2e1_readout.py
 READOUT_SUFFIX = "_readout.npz"
 
@@ -98,7 +92,6 @@ READOUT_RECORDS = "cyp2e1_readout*.json"
 
 # necrosis_slides.py output beside the predictions: the necrosis map per animal and the run's areas
 NECROSIS_SUFFIX = "_necrosis.npz"
-NECROSIS_RECORD = "necrosis_slides.json"
 
 # the share of necrotic tissue that is DAB positive is shown from this much necrosis on, as reported
 NECROTIC_SHOWN_PCT = 5.0
@@ -124,6 +117,16 @@ ANY = "All"
 PIXEL_POLL_MS = 200
 
 log = logging.getLogger(__name__)
+
+
+def slide_stem(row) -> str:
+    """A slide's file name up to the first dot, the key its readout, flattening and stain statistics share."""
+    return Path(row["file"]).name.split(".")[0]
+
+
+def stain_name(stain: str) -> str:
+    """How a stain is written in layer names and the info panel."""
+    return STAIN_NAMES.get(stain, stain.upper())
 
 
 def _column(name: str) -> str:
@@ -371,11 +374,8 @@ class SlideList(QWidget):
     def _sidecar(row) -> Slide | None:
         """A slide's full sidecar, for the fields SQL does not carry."""
         path = slide_path(row)
-        # <stem>.ome.json locally, <stem>.json on the NAS
-        for sidecar in (path.with_suffix(".json"), path.with_name(f"{path.name.split('.')[0]}.json")):
-            if sidecar.exists():
-                return Slide(**json.loads(sidecar.read_text()))
-        return None
+        sidecar = find_sidecar(path.parent, path.name.split(".")[0])
+        return Slide(**json.loads(sidecar.read_text())) if sidecar else None
 
     @classmethod
     def _registration(cls, row) -> Registration | None:
@@ -414,7 +414,7 @@ class SlideList(QWidget):
                 details.append("not registered")
             # a stain gets a heading only when something is said about it
             if details:
-                lines.append(f"<br><b>{STAIN_NAMES.get(row['stain'], row['stain'].upper())}</b>")
+                lines.append(f"<br><b>{stain_name(row['stain'])}</b>")
                 lines.extend(details)
 
         animal = animal_name(block, slides[0]["substance"])
@@ -463,10 +463,10 @@ class SlideList(QWidget):
         measured = record.get("slides_measured", {})
         lines = []
         for row in slides:
-            found = measured.get(Path(row["file"]).name.split(".")[0])
+            found = measured.get(slide_stem(row))
             if row["stain"] not in DAB_STAINS or found is None:
                 continue
-            stain = STAIN_NAMES.get(row["stain"], row["stain"].upper())
+            stain = stain_name(row["stain"])
             lines.append(f"<br><b>{stain} positive</b> (readout, {record.get('written', '')[:10]})")
             if found.get("positive_surviving_pct") is not None:
                 lines.append(f"{found['positive_surviving_pct']:.1f}% of surviving tissue")
@@ -488,7 +488,7 @@ class SlideList(QWidget):
         path, scene = slide_path(row), row["scene"]
         registration = self._registration(row)
         info, levels = open_slide(path, scene)  # lazy, pixels arrive when napari draws
-        slide_key = Path(row["file"]).name.split(".")[0]
+        slide_key = slide_stem(row)
         pyramids = {SOURCE_LEVELS: levels}
         # fields are fitted on a file's only scene, on its own pixel grid, so they go in before the warp
         flat = self._flattening(path.parent, slide_key) if info.n_scenes == 1 else None
@@ -496,7 +496,7 @@ class SlideList(QWidget):
             pyramids[EVENED_LEVELS] = flatten_levels(levels, flat, info.pixel_size_um)
         # applied always, so one slide has one appearance for everyone who opens it
         pyramids = {key: self._matched(p, slide_key) for key, p in pyramids.items()}
-        stain = STAIN_NAMES.get(row["stain"], row["stain"].upper())
+        stain = stain_name(row["stain"])
         # a scene number only means something on the files that hold more than one
         what = f"{stain} stain s{scene}" if info.n_scenes > 1 else f"{stain} stain"
         name = layer_name(animal_name(row["serial_block"], row["substance"]), what)
@@ -643,7 +643,7 @@ class SlideList(QWidget):
         directory = settings.predictions_dir()
         if directory is None or not directory.is_dir():
             return
-        references = {Path(row["file"]).name.split(".")[0]
+        references = {slide_stem(row)
                       for row in slides if row["stain"] == REFERENCE_STAIN}
         for row in slides:
             if row["stain"] not in DAB_STAINS:
@@ -667,7 +667,7 @@ class SlideList(QWidget):
             self.viewer.add_image(
                 steps,
                 name=layer_name(animal_name(row["serial_block"], row["substance"]),
-                                STAIN_NAMES.get(row["stain"], row["stain"].upper())),
+                                stain_name(row["stain"])),
                 # a pyramid level's pixel q is centred on level-0 pixel factor * q, where napari puts it with no shift
                 scale=(pixel_um, pixel_um),
                 units="um",
@@ -743,7 +743,7 @@ class SlideList(QWidget):
 
     def _step(self, animal: str, row, done: int, total: int) -> None:
         """Show which slide is being opened."""
-        stain = STAIN_NAMES.get(row["stain"], row["stain"].upper())
+        stain = stain_name(row["stain"])
         self.progress.setRange(0, total)
         self.progress.setValue(done)
         self._show_activity(f"{animal}: opening {stain} ({done + 1}/{total})")

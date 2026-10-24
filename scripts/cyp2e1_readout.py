@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
-import subprocess
 from datetime import UTC, datetime
 from multiprocessing import Pool
 from pathlib import Path
@@ -19,23 +17,26 @@ from slideviz.analysis.dab import (
     NO_TISSUE,
     POSITION_SCALE,
     STEPS,
+    WORK_UM,
     glass_colour,
     gradient_steps,
     relative_position,
     relative_readout,
 )
-from slideviz.analysis.prediction import calls_on_level
+from slideviz.analysis.flatten import FLATTEN_DIR
+from slideviz.analysis.prediction import NECROSIS_RECORD, calls_on_level
+from slideviz.analysis.tiling import pick_level_um
 from slideviz.analysis.tissue import mask_from_level, pick_level
 from slideviz.analysis.warp import load_field, nonrigid_levels
+from slideviz.data.provenance import code_version
+from slideviz.data.registration import read_sidecar, sha256
 from slideviz.data.schema import Registration
 from slideviz.io.reader import open_slide
 
-WORK_UM = 1.8  # working resolution; the nearest pyramid level is used and the map is stored at it
 NECROTIC_MIN_SHARE = 0.01  # below 1 % of the covered tissue necrotic (specks on the controls), no necrotic readout
 DAB_SETTINGS = ("GLASS_OD", "SMOOTH_UM", "WINDOW_UM", "STEP_UM", "CELL_UM", "LOW_Q", "HIGH_Q",
                 "MIDPOINT", "CONTRAST_MIN", "WINDOW_TISSUE_MIN", "STEPS", "POSITION_SCALE", "NO_TISSUE")
 TISSUE_SETTINGS = ("LUMEN_OPEN_UM", "LUMEN_MIN_UM2", "RIM_UM")
-FLATTEN_DIR = "flatten"  # flattening fields beside the slides, where the viewer finds them
 
 COLUMNS = 4
 PANEL_PX = 300
@@ -44,20 +45,6 @@ SHEET_STRIDE = 4  # the sheet reads every 4th map pixel
 NEGATIVE, POSITIVE, OUTSIDE = (236, 236, 244), (139, 69, 19), (154, 154, 154)
 # one colour per step from negative to positive, then outside, indexed by gradient_steps
 STEP_COLOURS = np.array([*np.linspace(NEGATIVE, POSITIVE, STEPS), OUTSIDE]).round().astype(np.uint8)
-
-
-def sidecar(slides: Path, stem: str) -> dict:
-    """A slide's sidecar, named <stem>.json or <stem>.ome.json."""
-    for name in (f"{stem}.json", f"{stem}.ome.json"):
-        if (slides / name).exists():
-            return json.loads((slides / name).read_text())
-    raise FileNotFoundError(f"no sidecar for {stem} in {slides}")
-
-
-def level_near(levels: list, pixel_size_um: float, target_um: float) -> int:
-    """Index of the level whose pixel size is closest to target_um."""
-    sizes = [pixel_size_um * levels[0].shape[1] / level.shape[1] for level in levels]
-    return min(range(len(levels)), key=lambda i: abs(sizes[i] - target_um))
 
 
 def percent(part: np.ndarray, whole: np.ndarray) -> float | None:
@@ -126,7 +113,7 @@ def readout(rgb: np.ndarray, glass: np.ndarray, outline: np.ndarray, um_per_px: 
 def measure(job: tuple) -> dict:
     """One CYP2E1 slide: readout and gradient on its H&E partner's grid, raw and optionally flattened."""
     cyp_stem, slides, calls, out, flattened, provenance = job
-    side = sidecar(slides, cyp_stem)
+    side = read_sidecar(slides, cyp_stem)
     registration = Registration.model_validate(side["registration"])
     field = load_field(slides, registration)
     if field is None:
@@ -136,7 +123,7 @@ def measure(job: tuple) -> dict:
     cyp_info, cyp = open_slide(slides / f"{cyp_stem}.ome.tiff")
     he_shapes = [level.shape[:2] for level in he]
     warped = nonrigid_levels(cyp, he_shapes, registration, field, he_info.pixel_size_um)
-    index = level_near(he, he_info.pixel_size_um, WORK_UM)
+    index = pick_level_um([level.shape for level in he], he_info.pixel_size_um, WORK_UM)
     um_per_px = he_info.pixel_size_um * he[0].shape[1] / he[index].shape[1]
 
     coarse = np.asarray(warped[pick_level(warped)])
@@ -169,7 +156,7 @@ def measure(job: tuple) -> dict:
         both = (positive != 2) & (flat_positive != 2)
         row["flattened"] = {
             "fields": path.name,
-            "fields_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "fields_sha256": sha256(path),
             "changed_call_pct": percent(positive != flat_positive, both),
             "changed_step_pct": percent(gradient_steps(position) != gradient_steps(flat_position), both),
             **flat_numbers,
@@ -220,13 +207,6 @@ def write_sheet(results: list[dict], path: Path) -> None:
     sheet.save(path)
 
 
-def code_version() -> str:
-    """The git commit the script ran from, marked dirty if the tree had changes."""
-    found = subprocess.run(["git", "describe", "--always", "--dirty"], capture_output=True,
-                           text=True, check=False, cwd=Path(__file__).parent)
-    return found.stdout.strip() or "unknown"
-
-
 def main() -> None:
     """Measure every CYP2E1 slide in --slides and write maps, numbers and settings."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -243,12 +223,12 @@ def main() -> None:
 
     calls, necrosis_run = {}, None
     if args.necrosis:
-        necrosis_run = json.loads((args.necrosis / "necrosis_slides.json").read_text())
+        necrosis_run = json.loads((args.necrosis / NECROSIS_RECORD).read_text())
         calls = {row["slide"]: args.necrosis / f"{row['animal']}_necrosis.npz" for row in necrosis_run["slides"]}
         if missing := [str(path) for path in calls.values() if not path.exists()]:
             raise SystemExit("necrosis maps listed but missing:\n  " + "\n  ".join(missing))
 
-    code = code_version()
+    code = code_version(Path(__file__))
     settings = ({name: getattr(dab, name) for name in DAB_SETTINGS}
                 | {name: getattr(tissue, name) for name in TISSUE_SETTINGS})
     jobs = []
@@ -256,7 +236,7 @@ def main() -> None:
         stem = path.name.removesuffix(".ome.tiff")
         if args.blocks and not any(block in stem for block in args.blocks):
             continue
-        reference = sidecar(args.slides, stem)["registration"]["reference"]
+        reference = read_sidecar(args.slides, stem)["registration"]["reference"]
         jobs.append((stem, args.slides, calls.get(reference), args.out, args.flattened,
                      {"code": code, "settings": settings}))
     if not jobs:

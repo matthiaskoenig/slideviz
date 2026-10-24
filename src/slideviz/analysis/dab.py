@@ -22,6 +22,8 @@ BAND_PX = 1024  # rows evaluated at a time
 # optical density is scaled by this log, as in skimage.color.rgb2hed, so cutoffs share its units
 LOG_FLOOR = np.log(1e-6)
 
+WORK_UM = 1.8  # um/px of the readout and its lumen mask; the nearest pyramid level is used
+
 
 def glass_colour(level: np.ndarray, mask: np.ndarray) -> np.ndarray:
     """Median RGB of the real glass: outside the tissue, without the synthetic white."""

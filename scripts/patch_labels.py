@@ -21,7 +21,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import subprocess
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from datetime import UTC, datetime
@@ -36,7 +35,9 @@ from slideviz.analysis.annotation import (
     read_overview,
     to_level,
 )
+from slideviz.analysis.tiling import resampled
 from slideviz.analysis.tissue import mask_from_level, pick_level
+from slideviz.data.provenance import code_version
 from slideviz.io.reader import open_slide
 
 GRID = 28  # the encoder's patch grid, as in embed_tiles.py's patches.npy
@@ -57,13 +58,6 @@ def patch_weights(size_px: int, grid: int = GRID) -> np.ndarray:
     pixels = np.arange(size_px)[None, :]
     overlap = np.minimum(edges[1:, None], pixels + 1) - np.maximum(edges[:-1, None], pixels)
     return np.clip(overlap, 0, None) / (size_px / grid)
-
-
-def resampled(mask: np.ndarray, shape_rc: tuple[int, int], y: int, x: int, size: int) -> np.ndarray:
-    """A tile's footprint on a mask held at another scale, one value per tile pixel, as tiling.coverage reads it."""
-    rows = (np.arange(y, y + size) * mask.shape[0] // shape_rc[0]).clip(0, mask.shape[0] - 1)
-    cols = (np.arange(x, x + size) * mask.shape[1] // shape_rc[1]).clip(0, mask.shape[1] - 1)
-    return mask[np.ix_(rows, cols)]
 
 
 def one_slide(job: tuple) -> dict:
@@ -123,13 +117,6 @@ def one_slide(job: tuple) -> dict:
             "distance": near, "label_error": label_error, "tissue_error": tissue_error, "edge_tiles": edge,
             "level": level, "size_px": size, "um_per_px": um_per_px,
             "lumen": {"code": lumen_meta["code"], "written": lumen_meta["written"]}}
-
-
-def code_version() -> str:
-    """The git commit the script ran from, marked dirty if the tree had changes."""
-    found = subprocess.run(["git", "describe", "--always", "--dirty"], capture_output=True,
-                           text=True, check=False, cwd=Path(__file__).parent)
-    return found.stdout.strip() or "unknown"
 
 
 def main() -> None:
@@ -203,7 +190,7 @@ def main() -> None:
     named = {1: "necrotic", 0: "not_necrotic", LEFT_OUT: "left_out"}
     meta = {
         "written": datetime.now(UTC).isoformat(timespec="seconds"),
-        "code": code_version(),
+        "code": code_version(Path(__file__)),
         "rule": (f"necrotic: at least {HALF} of the patch is tissue inside a polygon; not necrotic: at least "
                  f"{HALF} tissue and the patch centre more than {args.band_um} um outside every polygon; left "
                  f"out: everything else (the band between, glass, lumina). Tissue is the outline without "

@@ -7,10 +7,12 @@ from pathlib import Path
 
 import numpy as np
 
+from slideviz.analysis.tiling import pick_level_um
 from slideviz.analysis.tissue import pyramid_factor
 
 # necrosis_slides.py call maps: 1 necrotic, 0 not, this value where nothing was measured (glass, lumen, no tile)
 CALL_NOT_MEASURED = 255
+NECROSIS_RECORD = "necrosis_slides.json"  # the run's areas, beside its maps
 CALL_BAND_ROWS = 256  # level rows binned at a time, which keeps the temporary arrays to tens of MB
 
 # the necrotic call as a see-through cyan area; over the gold CYP2E1 steps it mixes to green
@@ -73,8 +75,7 @@ def calls_on_level(
 
 def call_level(path: Path, level_shapes: list[tuple[int, int]], level0_um: float) -> tuple[np.ndarray, float]:
     """A necrosis call map's necrotic mask on the H&E level nearest CALL_SHOWN_UM, and that level's um/px."""
-    sizes = [level0_um * level_shapes[0][1] / shape[1] for shape in level_shapes]
-    index = min(range(len(sizes)), key=lambda i: abs(sizes[i] - CALL_SHOWN_UM))
+    index = pick_level_um(level_shapes, level0_um, CALL_SHOWN_UM)
     necrotic, _, _ = calls_on_level(path, level_shapes, index)
     return necrotic.astype(np.uint8), level0_um * pyramid_factor(level_shapes[0][1], level_shapes[index][1])
 

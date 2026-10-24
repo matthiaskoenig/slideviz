@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import subprocess
 from datetime import UTC, datetime
 from multiprocessing import Pool
 from pathlib import Path
@@ -21,7 +20,10 @@ from skimage.transform import resize
 
 from slideviz.analysis import flatten
 from slideviz.analysis.dab import glass_colour
+from slideviz.analysis.tiling import pick_level_um
 from slideviz.analysis.tissue import mask_from_level, pick_level
+from slideviz.data.provenance import code_version
+from slideviz.data.registration import read_sidecar
 from slideviz.io.reader import open_slide
 
 METHOD = {
@@ -32,24 +34,10 @@ METHOD = {
 }
 
 
-def sidecar(slides: Path, stem: str) -> dict:
-    """A slide's sidecar, named <stem>.json or <stem>.ome.json."""
-    for name in (f"{stem}.json", f"{stem}.ome.json"):
-        if (slides / name).exists():
-            return json.loads((slides / name).read_text())
-    raise FileNotFoundError(f"no sidecar for {stem} in {slides}")
-
-
-def level_near(levels: list, pixel_size_um: float, target_um: float) -> int:
-    """Index of the level whose pixel size is closest to target_um."""
-    sizes = [pixel_size_um * levels[0].shape[1] / level.shape[1] for level in levels]
-    return min(range(len(levels)), key=lambda i: abs(sizes[i] - target_um))
-
-
 def view_of(path: Path) -> dict:
     """The level nearest flatten.VIEW_UM, its pixel size, tissue mask and glass colour."""
     info, levels = open_slide(path)
-    index = level_near(levels, info.pixel_size_um, flatten.VIEW_UM)
+    index = pick_level_um([level.shape for level in levels], info.pixel_size_um, flatten.VIEW_UM)
     view = np.asarray(levels[index])[..., :3]
     view_um = info.pixel_size_um * levels[0].shape[1] / levels[index].shape[1]
     # the tissue mask is tuned for the ~600 px level, so it is made there and resized
@@ -87,7 +75,7 @@ def carry(mask: np.ndarray, mask_um: float, ref_level0_um: float, matrix: list, 
 def grid_for(job: tuple) -> tuple[str, str, flatten.Grid, dict]:
     """One slide's fitting grid, its stain kind and the inputs it used."""
     stem, slides, predictions = job
-    car = sidecar(slides, stem)
+    car = read_sidecar(slides, stem)
     kind = "dab" if car["stain"] in flatten.DAB_STAINS else "he"
     v = view_of(slides / f"{stem}.ome.tiff")
     inputs = {"slide": f"{stem}.ome.tiff", "view_um": round(v["view_um"], 4), "prediction": None}
@@ -139,13 +127,6 @@ def settings() -> dict:
             if name.isupper() and isinstance(getattr(flatten, name), int | float | tuple | str)}
 
 
-def code_version() -> str:
-    """The git commit the script ran from, marked dirty if the tree had changes."""
-    found = subprocess.run(["git", "describe", "--always", "--dirty"], capture_output=True,
-                           text=True, check=False, cwd=Path(__file__).parent)
-    return found.stdout.strip() or "unknown"
-
-
 def main() -> None:
     """Learn the shared rim from all DAB slides, then write fields for the chosen slides."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -167,7 +148,7 @@ def main() -> None:
     if not stems:
         raise SystemExit(f"no slides in {args.slides}")
     wanted = [s for s in stems if not args.blocks or any(b in s for b in args.blocks)]
-    dab = [s for s in stems if sidecar(args.slides, s)["stain"] in flatten.DAB_STAINS]
+    dab = [s for s in stems if read_sidecar(args.slides, s)["stain"] in flatten.DAB_STAINS]
     jobs = sorted(set(wanted) | set(dab))
 
     with Pool(max(1, min(args.workers, len(jobs)))) as pool:
@@ -184,7 +165,7 @@ def main() -> None:
         print(f"rim decay {decay:.0f} um, typical rim x{np.exp(typical):.2f}, from {len(informing)} slides",
               flush=True)
 
-    code = code_version()
+    code = code_version(Path(__file__))
     with Pool(max(1, min(args.workers, len(wanted)))) as pool:
         rows = pool.map(fields_for, [(s, *grids[s], decay, typical, args.out, code) for s in wanted])
 

@@ -8,11 +8,10 @@ from pathlib import Path
 
 import numpy as np
 
+from slideviz.analysis.outline import SWAP_XY
 from slideviz.data.schema import NonRigid, Registration
 
 FIELD_DIR = "transforms"  # beside the sidecars; NonRigid.path points into it
-
-SWAP_XY = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
 
 
 def napari_affine(registration: Registration, pixel_size_um: float = 1.0) -> np.ndarray:
@@ -45,16 +44,30 @@ def from_valis_run(run_dir: Path, method: str, code: str | None = None) -> dict[
     return found
 
 
+def find_sidecar(directory: Path, stem: str) -> Path | None:
+    """A slide's sidecar in `directory`, named <stem>.json or <stem>.ome.json."""
+    for name in (f"{stem}.json", f"{stem}.ome.json"):
+        if (directory / name).exists():
+            return directory / name
+    return None
+
+
+def read_sidecar(directory: Path, stem: str) -> dict:
+    """A slide's sidecar JSON from `directory`."""
+    path = find_sidecar(directory, stem)
+    if path is None:
+        raise FileNotFoundError(f"no sidecar for {stem} in {directory}")
+    return json.loads(path.read_text())
+
+
 def write_to_sidecars(registrations: dict[str, Registration], slide_dir: Path) -> None:
     """Merge registrations into the sidecars of `slide_dir`, matching on file stem."""
     for name, registration in registrations.items():
-        # <name>.ome.json keeps the .ome in its stem, so cut at the first dot
-        matches = [p for p in slide_dir.glob("*.json") if p.name.split(".")[0] == name]
-        if not matches:
+        sidecar = find_sidecar(slide_dir, name)
+        if sidecar is None:
             print(f"  ! no sidecar for {name}")
             continue
 
-        sidecar = matches[0]
         data = json.loads(sidecar.read_text())
         data["registration"] = registration.model_dump(exclude_none=True)
         print(f"  {name}: registered to {registration.reference}")
@@ -78,10 +91,9 @@ def attach_nonrigid(summary_path: Path, slide_dir: Path) -> NonRigid:
 
     summary = json.loads(summary_path.read_text())
     field = summary_path.parent / summary["field"]
-    matches = [p for p in slide_dir.glob("*.json") if p.name.split(".")[0] == summary["slide"]]
-    if not matches:
+    sidecar = find_sidecar(slide_dir, summary["slide"])
+    if sidecar is None:
         raise FileNotFoundError(f"no sidecar for {summary['slide']} in {slide_dir}")
-    sidecar = matches[0]
 
     data = json.loads(sidecar.read_text())
     registration = Registration(**data["registration"])

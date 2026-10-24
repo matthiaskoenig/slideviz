@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 from concurrent.futures import ProcessPoolExecutor
 from datetime import UTC, datetime
 from multiprocessing import get_context
@@ -25,17 +24,17 @@ from pathlib import Path
 import numpy as np
 
 from slideviz.analysis.edge_snap import NECROSIS_EPS, NECROSIS_RADIUS_UM, guided_filter
-from slideviz.analysis.prediction import read_lumen
+from slideviz.analysis.prediction import CALL_NOT_MEASURED, NECROSIS_RECORD, read_lumen
 from slideviz.analysis.tissue import (
     mask_from_level,
     on_level,
     pick_level,
     pyramid_factor,
 )
+from slideviz.data.provenance import code_version
 from slideviz.io.reader import open_slide
 
 BLOCK = 4096  # level px per side of one filtering block
-NOT_MEASURED = 255  # in the call maps: glass, lumen, or tissue no tile covered
 
 
 def snapped(score: np.ndarray, level: object, origin: tuple[int, int], radius: int) -> np.ndarray:
@@ -74,7 +73,7 @@ def one_slide(job: tuple) -> dict:
     calls = {"E": snapped(score, level, origin, radius) >= cutoff, "D": score >= cutoff}
     n = max(1, int(measured.sum()))
     area = {code: round(float((call & measured).sum() / n), 4) for code, call in calls.items()}
-    maps = {f"call_{code}": np.where(measured, call, NOT_MEASURED).astype(np.uint8) for code, call in calls.items()}
+    maps = {f"call_{code}": np.where(measured, call, CALL_NOT_MEASURED).astype(np.uint8) for code, call in calls.items()}
     record = {"animal": animal, "slide": meta["slide"], "cutoff": cutoff, "level": meta["level"],
               "um_per_px": meta["um_per_px"], "origin_level_rc": origin, "radius_px": radius,
               "measured_px": int(measured.sum()), "tissue_mm2": round(n * (meta["um_per_px"] / 1000) ** 2, 3),
@@ -83,17 +82,6 @@ def one_slide(job: tuple) -> dict:
     np.savez_compressed(out / f"{animal}_necrosis.npz", **maps, meta=json.dumps(record))
     print(f"{animal}: E {area['E']:.1%}, D {area['D']:.1%} of {record['tissue_mm2']} mm2", flush=True)
     return record
-
-
-def code_version() -> str:
-    """The git commit the script ran from, marked dirty if the tree had changes and untracked if it is not in it."""
-    here = Path(__file__).parent
-    found = subprocess.run(["git", "describe", "--always", "--dirty"], capture_output=True,
-                           text=True, check=False, cwd=here)
-    tracked = subprocess.run(["git", "ls-files", "--error-unmatch", Path(__file__).name],
-                             capture_output=True, check=False, cwd=here).returncode == 0
-    version = found.stdout.strip()
-    return "unknown" if not version else version if tracked else f"{version}-untracked"
 
 
 def main() -> None:
@@ -126,19 +114,19 @@ def main() -> None:
              for code, key in (("E", "area_E"), ("D", "area_D"), ("A", "area_A_tiles"))}
     record = {
         "written": datetime.now(UTC).isoformat(timespec="seconds"),
-        "code": code_version(),
+        "code": code_version(Path(__file__)),
         "readout": "E: D's per-patch mean score, guided filter on the H&E, at the head's cutoff (her pick, 19 Oct)",
         "edge_snap": {"radius_um": NECROSIS_RADIUS_UM, "eps": NECROSIS_EPS, "block_px": BLOCK,
                       "overlap": "twice the radius on every side"},
         "area": "necrotic share of measured tissue: covered by a tile, inside the outline, outside lumina",
         "call_maps": f"<animal>_necrosis.npz: call_E and call_D, uint8 on the map's level from origin_level_rc; "
-                     f"1 necrotic, 0 not, {NOT_MEASURED} not measured",
+                     f"1 necrotic, 0 not, {CALL_NOT_MEASURED} not measured",
         "mean_abs_area_error_vs_drawn": {"n": len(drawn), **error},
         "error_caveat": "against polygons that stop short of the necrosis edge and include pooled blood; information",
         "slides": rows,
         "inputs": {"maps": str(args.maps), "lumen": str(args.lumen), "slides": str(args.slides)},
     }
-    (args.out / "necrosis_slides.json").write_text(json.dumps(record, indent=1) + "\n")
+    (args.out / NECROSIS_RECORD).write_text(json.dumps(record, indent=1) + "\n")
     print(f"=== {len(rows)} slides; mean |area - drawn| over {len(drawn)} drawn slides: {error} ===")
 
 
