@@ -1,4 +1,4 @@
-"""One place to turn logging on, so the entry points agree on the format."""
+"""Logging setup shared by the slideviz entry points."""
 
 from __future__ import annotations
 
@@ -9,7 +9,8 @@ class _Format(logging.Formatter):
     """Plain lines for progress, level and module for anything that went wrong."""
 
     def format(self, record: logging.LogRecord) -> str:
-        if record.levelno <= logging.INFO:  # a report should read as a report
+        """The bare message at INFO and below; level, logger name and traceback above."""
+        if record.levelno <= logging.INFO:
             return record.getMessage()
         return super().format(record)
 

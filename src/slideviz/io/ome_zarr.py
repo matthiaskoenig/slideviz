@@ -16,7 +16,7 @@ from slideviz.io.czi import SlideInfo
 
 log = logging.getLogger(__name__)
 
-# bioformats2raw stores the slide's own thumbnails as extra series (not scenes)
+# bioformats2raw stores the slide's own thumbnails as extra series beside the scenes
 THUMBNAILS = ("label image", "macro image")
 
 
@@ -37,10 +37,14 @@ def _pixel_size_um(ms: dict) -> float:
     scale = ms["datasets"][0]["coordinateTransformations"][0]["scale"]
     sizes = dict(zip(axes, scale))
 
+    unit = next((a.get("unit") for a in ms["axes"] if a["name"] == "x"), None)
+    if unit is not None and unit != "micrometer":
+        raise ValueError(f"x axis unit is {unit}, expected micrometer")
+
     x, y = sizes["x"], sizes.get("y", sizes["x"])
-    if abs(x - y) > 1e-6 * max(x, y):  # anisotropic, one number cannot describe both
+    if abs(x - y) > 1e-6 * max(x, y):  # anisotropic: X and Y pixel sizes differ
         log.warning("anisotropic pixels, X=%.4f um Y=%.4f um; using X", x, y)
-    return x  # OME-Zarr stores it in the axis unit, micrometres here
+    return x  # in the axis unit, micrometres; bioformats2raw writes none
 
 
 def read_info(path: Path, scene: int = 0) -> SlideInfo:

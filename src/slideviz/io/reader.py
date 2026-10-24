@@ -1,8 +1,4 @@
-"""Pick a reader backend by file suffix.
-
-Keeps callers from importing a format-specific reader, so a new format
-is a new backend and an entry below.
-"""
+"""Pick a reader backend by file suffix; a new format is a new module plus an entry in BACKENDS."""
 
 from __future__ import annotations
 
@@ -25,7 +21,7 @@ BACKENDS = {
 
 
 def suffix_of(path: Path) -> str:
-    """Longest known suffix of a path, so .ome.tiff wins over .tiff."""
+    """Longest BACKENDS suffix the lowercased name ends with, else its last suffix."""
     name = path.name.lower()
     matches = [s for s in BACKENDS if name.endswith(s)]
     return max(matches, key=len) if matches else path.suffix.lower()

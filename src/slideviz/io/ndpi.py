@@ -51,7 +51,7 @@ def read_info(path: Path, scene: int = 0) -> SlideInfo:
             y0=0,
             width=width,
             height=height,
-            pixel_size_um=pixel_size_um(level0.keyframe, tolerance=1e-3),  # NDPI rounds the two axes apart
+            pixel_size_um=pixel_size_um(level0.keyframe, tolerance=1e-3),  # NDPI rounds X and Y apart: 43990 against 43991
         )
 
 
@@ -59,6 +59,7 @@ def _chunks(shape: tuple[int, ...]) -> tuple[tuple[int, ...], ...]:
     """Square tiles across one level, with the remainder as a smaller edge tile."""
 
     def along(length: int) -> tuple[int, ...]:
+        """Chunk sizes along one axis: full tiles, then the remainder."""
         full, rest = divmod(length, TILE)
         return (TILE,) * full + ((rest,) if rest else ())
 
@@ -66,7 +67,7 @@ def _chunks(shape: tuple[int, ...]) -> tuple[tuple[int, ...], ...]:
 
 
 def _tile(level: zarr.Array, block_info: dict | None = None) -> np.ndarray:
-    """One tile, read from the level dask asks for it from."""
+    """The block of `level` at the array location dask passes in block_info."""
     (y0, y1), (x0, x1), (c0, c1) = block_info[None]["array-location"]
     return np.asarray(level[y0:y1, x0:x1, c0:c1])
 
@@ -76,6 +77,7 @@ def _decoded_once(level: da.Array) -> Callable[[], np.ndarray]:
     held: list[np.ndarray] = []
 
     def decode() -> np.ndarray:
+        """The decoded level, computed on the first call and held after."""
         if not held:
             held.append(level.compute())
         return held[0]
@@ -98,13 +100,14 @@ def read_pyramid(path: Path, scene: int = 0) -> tuple[SlideInfo, list[da.Array]]
         # the store decodes strips on demand and outlives the handle it was made from
         store = zarr.open(series.aszarr(), mode="r")
 
-    # One task per tile, avoiding 716k tasks that would exhaust memory.
+    # one dask task per TILE x TILE block, each spanning many native NDPI JPEG tiles
+    arrays = [store[str(i)] for i in range(len(shapes))] if len(shapes) > 1 else [store]
     levels = [
-        da.map_blocks(_tile, level=store[str(i)], dtype=np.uint8, chunks=_chunks(shape))
-        for i, shape in enumerate(shapes)
+        da.map_blocks(_tile, level=array, dtype=np.uint8, chunks=_chunks(shape))
+        for array, shape in zip(arrays, shapes, strict=True)
     ]
 
-    # Derive levels below scanner's coarsest, cached and decoded once to save decode time
+    # levels below the scanner's coarsest, decimated from one cached decode of it
     coarsest = _decoded_once(levels[-1])
     step, shape = 1, levels[-1].shape
     while max(shape[:2]) > TILE:

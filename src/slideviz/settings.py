@@ -1,9 +1,6 @@
-"""Where the data and the index live - from the environment.
+"""Data, index, prediction and stain reference paths from SLIDEVIZ_* variables or a .env in the working directory.
 
     export SLIDEVIZ_DATA=/path/to/slides
-
-Reads a .env file in the working directory too, so a machine can be
-configured once without exporting anything.
 """
 
 from __future__ import annotations
@@ -19,7 +16,7 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="SLIDEVIZ_", env_file=".env", extra="ignore")
 
-    data: Path | None = None  # no default: a path baked in here only works on one machine
+    data: Path | None = None  # set per machine through SLIDEVIZ_DATA, .env or --data
     db: Path = Path(user_cache_dir("slideviz")) / "slides.db"
     # per-slide model output, added as layers when a block that has some is opened
     predictions: Path | None = None
