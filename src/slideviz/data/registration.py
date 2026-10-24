@@ -1,4 +1,4 @@
-"""Registration transforms: from a registration run into the sidecars, and out to a viewer."""
+"""Registration transforms: from a run's transforms.json into the sidecars, and out to a viewer."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ def napari_affine(registration: Registration, pixel_size_um: float = 1.0) -> np.
 
 
 def from_valis_run(run_dir: Path, method: str, code: str | None = None) -> dict[str, Registration]:
-    """Read a run's transforms.json, keyed by slide stem; `method` and `code` record what produced it."""
+    """A run's transforms.json as Registrations by slide stem, reference excluded; `method` and `code` record what produced it."""
     data = json.loads((run_dir / "transforms.json").read_text())
     reference = Path(data["reference"]).name.split(".")[0]
 
@@ -99,8 +99,8 @@ def attach_nonrigid(summary_path: Path, slide_dir: Path) -> NonRigid:
     registration = Registration(**data["registration"])
     with np.load(field) as stored:
         if not np.allclose(stored["matrix"], registration.matrix):
-            raise ValueError(f"{summary['slide']}: the field was computed on another matrix "
-                             "than the sidecar carries, so it no longer applies")
+            raise ValueError(f"{summary['slide']}: the field was computed on a different matrix "
+                             "than the sidecar carries")
 
     nonrigid = NonRigid(
         path=f"{FIELD_DIR}/{field.name}",
@@ -111,7 +111,7 @@ def attach_nonrigid(summary_path: Path, slide_dir: Path) -> NonRigid:
         median_um=summary["median_um"],
         p95_um=summary["p95_um"],
         registered=summary["registered"],
-        code=summary.get("code"),  # summaries before 6 Oct 2026 carry none
+        code=summary.get("code"),
     )
     print(f"  {summary['slide']}: {nonrigid.path}, median {nonrigid.median_um} µm")
     (slide_dir / FIELD_DIR).mkdir(exist_ok=True)

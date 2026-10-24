@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 
 
 def default_db() -> Path:
-    """Location of the index, from settings so SLIDEVIZ_DB can move it."""
+    """Location of the index, settings.db (SLIDEVIZ_DB)."""
     return settings.db
 
 
@@ -45,7 +45,7 @@ def split_scenes(data: dict) -> list[dict]:
     scenes = data.pop("scenes", None)
     if not scenes:
         return [{**data, "scene": 0}]
-    # entries override the shared fields, so what is common is written once
+    # a scene's own fields override the shared ones
     return [{**data, **scene, "scene": i if scene.get("scene") is None else scene["scene"]}
             for i, scene in enumerate(scenes)]
 
@@ -71,18 +71,17 @@ def read_sidecars(directory: Path,
         if progress:
             progress(done, len(paths))
         data = json.loads(path.read_text())
-        # predictions, annotations and the stain reference live beside the slides,
-        # so a sidecar is recognised by naming the image it describes
+        # predictions, annotations and the stain reference sit beside the slides;
+        # a slide sidecar names its image in `file`
         if not isinstance(data, dict) or "file" not in data:
             log.debug("skipping %s, not a slide sidecar", path.name)
             continue
-        # a slide the lab marked as a control or a failure is kept on disk for its
-        # provenance but must never reach an analysis as if it were a readout
+        # excluded slides (controls, failures) stay on disk for provenance and out of the index
         if data.get("excluded"):
             log.info("skipping %s (%s)", path.name, data["excluded"])
             continue
-        data["directory"] = str(root)  # the indexed root, so rows stay comparable
-        # relative to the root, so a nested layout keeps its subdirectories
+        data["directory"] = str(root)  # the indexed root
+        # path relative to the indexed root, subdirectories kept
         data["file"] = str(path.relative_to(root).with_name(data["file"]))
         if data["file"] in seen:
             raise ValueError(f"{data['file']} is named by both {seen[data['file']]} and {path}")
@@ -92,7 +91,7 @@ def read_sidecars(directory: Path,
 
 
 def _drop_if_stale(conn: sqlite3.Connection) -> None:
-    """Drop the table when its columns or their NOT NULL marks no longer match the model."""
+    """Drop the table when its columns or their NOT NULL marks differ from the model."""
     existing = [(r[1], bool(r[3])) for r in conn.execute("PRAGMA table_info(slides)")]
     expected = [(name, name in REQUIRED or name in DERIVED) for name in COLUMNS]
     if existing and existing != expected:
@@ -105,7 +104,6 @@ def check(records: list[dict]) -> None:
         name = record.get("file", "<sidecar with no file field>")
         try:
             Slide(**record)
-        # without this the insert fails as a bare IntegrityError, naming neither
         except ValidationError as exc:
             problems = "; ".join(
                 f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()
@@ -119,10 +117,10 @@ def build(directory: Path, db_path: Path | None = None,
     db_path = db_path or default_db()
     db_path.parent.mkdir(parents=True, exist_ok=True)
     records = read_sidecars(directory, progress)
-    check(records)  # fail before touching the database, so the index is not half-baked
+    check(records)  # raises before the database is opened, leaving the old index intact
 
     with sqlite3.connect(db_path) as conn:
-        _drop_if_stale(conn)  # the index is derived, so an old schema is rebuilt
+        _drop_if_stale(conn)
         conn.executescript(SCHEMA)
         # Clear this directory's rows, then reinsert from the sidecars
         conn.execute("DELETE FROM slides WHERE directory = ?", (str(directory.resolve()),))
@@ -149,7 +147,7 @@ def slide_path(row: sqlite3.Row) -> Path:
 
 SUMMARY_SQL = """
 SELECT species, substance, dose_mg_per_kg, stain,
-       COUNT(DISTINCT directory || file) AS n,  -- slides, not rows, so scenes do not inflate it
+       COUNT(DISTINCT directory || file) AS n,  -- distinct slides; n_scenes counts rows
        COUNT(*) AS n_scenes
 FROM slides GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4
 """
@@ -175,7 +173,7 @@ def main() -> None:
     args = parser.parse_args()
     setup(args.verbose)
 
-    if args.schema:  # generated, so it cannot drift from the model
+    if args.schema:
         print(json.dumps(Slide.model_json_schema(), indent=2))
         return
 
@@ -189,7 +187,7 @@ def main() -> None:
     if not args.directory.is_dir():
         parser.error(f"not a directory: {args.directory}")
 
-    if args.check:  # the day a new batch arrives, before it goes near the index
+    if args.check:  # validation only, for a new batch of sidecars
         records = read_sidecars(args.directory)
         check(records)
         log.info("%d records valid", len(records))
@@ -203,7 +201,7 @@ def main() -> None:
     log.info("indexed %d slides%s into %s", files, scenes, db)
 
     for row in query(SUMMARY_SQL, db_path=db):
-        # scene count only where it differs, so single-scene groups read as before
+        # scene count shown only where it differs from the slide count
         scenes = "" if row["n_scenes"] == row["n"] else f"  ({row['n_scenes']} scenes)"
         # substance and dose are left out for slides that carry none
         dose = row["dose_mg_per_kg"]
