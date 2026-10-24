@@ -29,10 +29,8 @@ CALL_LOOK = {
 }
 
 
-def read_lumen(path: Path) -> tuple[np.ndarray, float] | None:
-    """A slide's lumen mask and its um/px from a necrosis_lumen.py file, or None when absent."""
-    if not path.exists():
-        return None
+def read_lumen(path: Path) -> tuple[np.ndarray, float]:
+    """A slide's lumen mask and its um/px from a necrosis_lumen.py file."""
     with np.load(path) as stored:
         return stored["lumen"], float(stored["lumen_um"])
 

@@ -46,7 +46,8 @@ def split_scenes(data: dict) -> list[dict]:
     if not scenes:
         return [{**data, "scene": 0}]
     # entries override the shared fields, so what is common is written once
-    return [{**data, "scene": i, **scene} for i, scene in enumerate(scenes)]
+    return [{**data, **scene, "scene": i if scene.get("scene") is None else scene["scene"]}
+            for i, scene in enumerate(scenes)]
 
 
 def sidecar_paths(root: Path) -> list[Path]:
@@ -65,6 +66,7 @@ def read_sidecars(directory: Path,
     root = directory.resolve()
     paths = sidecar_paths(root)
     records = []
+    seen: dict[str, Path] = {}
     for done, path in enumerate(paths, 1):
         if progress:
             progress(done, len(paths))
@@ -82,6 +84,9 @@ def read_sidecars(directory: Path,
         data["directory"] = str(root)  # the indexed root, so rows stay comparable
         # relative to the root, so a nested layout keeps its subdirectories
         data["file"] = str(path.relative_to(root).with_name(data["file"]))
+        if data["file"] in seen:
+            raise ValueError(f"{data['file']} is named by both {seen[data['file']]} and {path}")
+        seen[data["file"]] = path
         records += split_scenes(data)  # a multi-scene sidecar becomes several rows
     return records
 
@@ -192,7 +197,8 @@ def main() -> None:
 
     db = args.db or default_db()
     count = build(args.directory, db)
-    files = query("SELECT COUNT(DISTINCT directory || file) FROM slides", db_path=db)[0][0]
+    files = query("SELECT COUNT(DISTINCT file) FROM slides WHERE directory = ?",
+                  (str(args.directory.resolve()),), db_path=db)[0][0]
     scenes = "" if count == files else f" ({count} scenes)"  # they differ only on multi-scene data
     log.info("indexed %d slides%s into %s", files, scenes, db)
 

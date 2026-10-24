@@ -182,7 +182,9 @@ def registration_lines(registration: Registration) -> list[str]:
     if nonrigid is None:
         lines.append("non-rigid: none")
     else:
-        lines.append(f"non-rigid: median {nonrigid.median_um:.0f} um, p95 {nonrigid.p95_um:.0f} um")
+        parts = [f"{label} {value:.0f} um" for label, value in
+                 (("median", nonrigid.median_um), ("p95", nonrigid.p95_um)) if value is not None]
+        lines.append("non-rigid: " + (", ".join(parts) or nonrigid.method))
     return lines
 
 
@@ -329,7 +331,7 @@ class SlideList(QWidget):
             box.blockSignals(True)  # filling would otherwise fire refresh once per item
             box.clear()
             box.addItem(ANY)
-            box.addItems([str(row[0]) for row in values])
+            box.addItems([str(row[0]) for row in values if row[0] is not None])
             kept = box.findText(previous)  # -1 when the value is gone from the index
             box.setCurrentIndex(max(kept, 0))
             box.blockSignals(False)
@@ -514,7 +516,7 @@ class SlideList(QWidget):
         # a scene number only means something on the files that hold more than one
         what = f"{stain} stain s{scene}" if info.n_scenes > 1 else f"{stain} stain"
         name = layer_name(animal_name(row["serial_block"], row["substance"]), what)
-        if registration is None:
+        if reference_um is None:
             self._reference_shapes = [level.shape[:2] for level in levels]
         affine = None
         if registration is not None:
