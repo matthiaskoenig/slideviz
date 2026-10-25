@@ -1,0 +1,19 @@
+[workspace]
+authors = ["Michelle Elias <elias.michelle@web.de>", "Matthias König <koenigmx@hu-berlin.de>"]
+channels = ["conda-forge"]
+name = "mesh"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+python = "3.13.*"
+fenics-dolfinx = "==0.11.0"
+mpich = ">=5.0.1,<6"
+petsc = { version = "*", build = "real_*" }
+python-gmsh = "==4.15.2"
+shapely = ">=2.2.0,<3"
+scikit-image = ">=0.26.0,<0.27"
+h5py = { version = ">=3.16.0,<4", build = "mpi_mpich_*" }
+meshio = ">=5.3.5,<6"

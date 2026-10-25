@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+.pixi/
 
 # Tooling caches
 .pytest_cache/
