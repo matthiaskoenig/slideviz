@@ -173,6 +173,7 @@ def round_trip(mesh_path: Path, layers: dict, meta: dict) -> tuple[dict, dict]:
     checks["seconds"] = round(time.time() - start, 2)
     arrays = {
         "corner_xy_um": corners.function_space.tabulate_dof_coordinates()[:, :2],
+        "triangle_corners": corners.function_space.dofmap.list[:n].copy(),  # rows of corner_xy_um, in triangle order
         "cyp2e1_corners": corners.x.array.copy(),
         "triangle_midpoints_um": compute_midpoints(mesh, mesh.topology.dim, np.arange(n, dtype=np.int32))[:, :2],
         "cyp2e1_triangles": cell_values(triangles),
