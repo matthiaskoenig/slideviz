@@ -216,7 +216,7 @@ def registration_lines(registration: Registration) -> list[str]:
 
 
 def mesh_layers(fields_path: Path, animal: str) -> list:
-    """One stored mesh as hidden layers: CYP2E1 at the corners with the triangle sides, necrotic triangles, named edges."""
+    """One stored mesh as layers: CYP2E1 at the corners with the triangle sides, necrotic triangles, named edges."""
     import numpy as np
 
     record = json.loads(fields_path.with_suffix(".json").read_text())
@@ -227,7 +227,7 @@ def mesh_layers(fields_path: Path, animal: str) -> list:
         triangles, cyp2e1, necrotic = stored["triangle_corners"], stored["cyp2e1_corners"], stored["necrotic"]
     with np.load(fields_path.with_name(fields_path.name.removesuffix(MESH_FIELDS) + MESH_VIEW)) as stored:
         points, edges, tags = stored["points_um"][:, ::-1], stored["edges"], stored["edge_tag"]
-    shown = {"units": "um", "blending": MESH_BLENDING, "visible": False}
+    shown = {"units": "um", "blending": MESH_BLENDING}
     return [
         Surface((corners, triangles, cyp2e1), name=layer_name(animal, NAME_SEPARATOR.join([mesh, "CYP2E1"])),
                 colormap=MESH_CYP2E1, contrast_limits=(0, POSITION_SCALE), opacity=STEP_OPACITY,
@@ -741,7 +741,10 @@ class SlideList(QWidget):
                 self.status.setText(f"{path.name}: {type(exc).__name__}: {exc}")
                 continue
             for layer in layers:
+                # under async slicing (view.py) napari slices a Surface or Vectors layer only when it is added
+                # visible; one added hidden stays empty when switched on
                 self.viewer.add_layer(layer)
+                layer.visible = False
         self._fit_mesh_edges()
 
     def _fit_mesh_edges(self, event=None) -> None:
