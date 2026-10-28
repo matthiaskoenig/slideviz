@@ -6,6 +6,7 @@ import json
 import logging
 from pathlib import Path
 
+from napari.layers import Surface, Vectors
 from napari.qt.threading import thread_worker
 from napari.utils.colormaps import Colormap
 from qtpy.QtCore import Qt, QTimer
@@ -27,6 +28,7 @@ from qtpy.QtWidgets import (
 )
 
 from slideviz.analysis.dab import (
+    POSITION_SCALE,
     STEP_ALPHA,
     STEP_OPACITY,
     STEP_RGB,
@@ -36,7 +38,12 @@ from slideviz.analysis.dab import (
 from slideviz.analysis.flatten import DAB_STAINS, FLATTEN_DIR, flatten_levels
 from slideviz.analysis.flatten import load as load_flattening
 from slideviz.analysis.masked import to_rgba
-from slideviz.analysis.prediction import NECROSIS_RECORD, add_call_layer, call_level
+from slideviz.analysis.prediction import (
+    CALL_LOOK,
+    NECROSIS_RECORD,
+    add_call_layer,
+    call_level,
+)
 from slideviz.analysis.stain import normalise_levels
 from slideviz.analysis.stain_stats import read as read_stain_reference
 from slideviz.analysis.tissue import mask_from_level, pick_level
@@ -101,6 +108,29 @@ STEP_COLOURS = Colormap(
     interpolation="zero",
     name="dab gradient",
 )
+
+# mesh/fields.py output in the mesh directory, per mesh: the corners, triangles and values, with its record (.json)
+# and the build_mesh.py view file (named edges) beside it
+MESH_FIELDS = "_fields.npz"
+MESH_VIEW = "_view.npz"
+
+# CYP2E1 on a mesh, clear at the low end to the top step's gold; vispy colours each corner and blends the colours
+# across a triangle, which equals the colour of the blended value on a straight ramp
+MESH_CYP2E1 = Colormap(
+    [[*(c / 255 for c in STEP_RGB[0]), 0.0], [*(c / 255 for c in STEP_RGB[-1]), 1.0]],
+    name="mesh cyp2e1",
+)
+MESH_LINE_RGB = (90 / 255, 90 / 255, 90 / 255)  # triangle sides, as in the mesh pictures
+MESH_LINE_PX = 1  # the wireframe width is in screen pixels
+
+# build_mesh.py edge tags: vessel wall, section edge, cut side, necrosis border, coloured as in the mesh pictures
+MESH_EDGE_RGB = {11: (30, 90, 220), 12: (240, 140, 0), 13: (60, 160, 60), 14: (0, 0, 0)}
+# napari draws a vector's width in data units (um), so the width is reset to this many screen pixels on every zoom
+MESH_EDGE_PX = 2
+MESH_EDGES = "slideviz_mesh_edges"  # metadata key of a mesh's named edge layer
+
+# a flat view needs no depth test; with one, layers on the same plane can hide each other's lines
+MESH_BLENDING = "translucent_no_depth"
 
 # Filter label to the column it restricts
 FILTERS = {"Species": "species", "Stain": "stain", "Dose": "dose_mg_per_kg"}
@@ -183,6 +213,34 @@ def registration_lines(registration: Registration) -> list[str]:
                  (("median", nonrigid.median_um), ("p95", nonrigid.p95_um)) if value is not None]
         lines.append("non-rigid: " + (", ".join(parts) or nonrigid.method))
     return lines
+
+
+def mesh_layers(fields_path: Path, animal: str) -> list:
+    """One stored mesh as hidden layers: CYP2E1 at the corners with the triangle sides, necrotic triangles, named edges."""
+    import numpy as np
+
+    record = json.loads(fields_path.with_suffix(".json").read_text())
+    size = record["mesh"]["size_um"]
+    mesh = f"mesh {record['mesh']['variant']} {size['small']:g}-{size['large']:g} um"
+    with np.load(fields_path) as stored:
+        corners = stored["corner_xy_um"][:, ::-1]  # (x, y) to napari's (row, col), um in the H&E frame
+        triangles, cyp2e1, necrotic = stored["triangle_corners"], stored["cyp2e1_corners"], stored["necrotic"]
+    with np.load(fields_path.with_name(fields_path.name.removesuffix(MESH_FIELDS) + MESH_VIEW)) as stored:
+        points, edges, tags = stored["points_um"][:, ::-1], stored["edges"], stored["edge_tag"]
+    shown = {"units": "um", "blending": MESH_BLENDING, "visible": False}
+    return [
+        Surface((corners, triangles, cyp2e1), name=layer_name(animal, NAME_SEPARATOR.join([mesh, "CYP2E1"])),
+                colormap=MESH_CYP2E1, contrast_limits=(0, POSITION_SCALE), opacity=STEP_OPACITY,
+                wireframe={"visible": True, "color": MESH_LINE_RGB, "width": MESH_LINE_PX}, **shown),
+        Surface((corners, triangles[necrotic], np.ones(len(corners))),
+                name=layer_name(animal, NAME_SEPARATOR.join([mesh, NECROSIS_NAME])),
+                colormap=CALL_LOOK["colormap"], contrast_limits=CALL_LOOK["contrast_limits"],
+                opacity=CALL_LOOK["opacity"], **shown),
+        Vectors(np.stack([points[edges[:, 0]], points[edges[:, 1]] - points[edges[:, 0]]], axis=1),
+                name=layer_name(animal, NAME_SEPARATOR.join([mesh, "edges"])), vector_style="line",
+                edge_color=np.array([MESH_EDGE_RGB[int(t)] for t in tags]) / 255, opacity=1.0,
+                metadata={MESH_EDGES: True}, **shown),
+    ]
 
 
 @thread_worker
@@ -285,6 +343,7 @@ class SlideList(QWidget):
         for control in (left, self.angle, right, self.angle_shown):
             turn.addWidget(control)
         self.viewer.layers.events.inserted.connect(self._place_new)
+        self.viewer.camera.events.zoom.connect(self._fit_mesh_edges)
 
         layout = QVBoxLayout(self)  # passing self installs it as this widget's layout
         layout.addLayout(filters)
@@ -669,6 +728,29 @@ class SlideList(QWidget):
                 visible=False,
             )
 
+    def _load_meshes(self, animal: str) -> None:
+        """Add each mesh stored for the animal, in the H&E frame, with its named edges at a fixed screen width."""
+        directory = settings.meshes_dir()
+        if directory is None or not directory.is_dir():
+            return
+        for path in sorted(directory.glob(f"{animal}_*{MESH_FIELDS}")):
+            try:
+                layers = mesh_layers(path, animal)
+            except (OSError, ValueError, KeyError) as exc:
+                log.exception("could not load mesh %s", path)
+                self.status.setText(f"{path.name}: {type(exc).__name__}: {exc}")
+                continue
+            for layer in layers:
+                self.viewer.add_layer(layer)
+        self._fit_mesh_edges()
+
+    def _fit_mesh_edges(self, event=None) -> None:
+        """Set every mesh edge layer's width to MESH_EDGE_PX screen pixels; the camera zoom is screen pixels per um."""
+        width = MESH_EDGE_PX / self.viewer.camera.zoom
+        for layer in self.viewer.layers:
+            if MESH_EDGES in layer.metadata:
+                layer.edge_width = width
+
     @thread_worker
     def _open_block(self, slides: list):
         """Open a block's slides in order, yielding (row, opened or error) for each."""
@@ -719,6 +801,7 @@ class SlideList(QWidget):
             reference_um = state["reference_um"]
             # CYP2E1 first, so the see-through necrosis lies on top and their overlap mixes
             self._load_readouts(slides)
+            self._load_meshes(animal)
             if reference_um:
                 self._load_necrosis(animal, reference_um)
             log.info("opened %s", block_title(slides[0]))

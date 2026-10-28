@@ -1,4 +1,4 @@
-"""Data, index, prediction and stain reference paths from SLIDEVIZ_* variables or a .env in the working directory.
+"""Data, index, prediction, mesh and stain reference paths from SLIDEVIZ_* variables or a .env in the working directory.
 
     export SLIDEVIZ_DATA=/path/to/slides
 """
@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     db: Path = Path(user_cache_dir("slideviz")) / "slides.db"
     # per-slide model output, added as layers when a block that has some is opened
     predictions: Path | None = None
+    # mesh/fields.py meshes per animal, added as layers when its block is opened
+    meshes: Path | None = None
     # stain reference from stain_stats.py; slides are matched onto its target when found
     stain_reference: Path | None = None
 
@@ -28,6 +30,12 @@ class Settings(BaseSettings):
         if self.predictions is not None:
             return self.predictions
         return self.data / "predictions" if self.data else None
+
+    def meshes_dir(self) -> Path | None:
+        """The mesh directory, falling back to one beside the data."""
+        if self.meshes is not None:
+            return self.meshes
+        return self.data / "meshes" if self.data else None
 
     def stain_reference_file(self) -> Path | None:
         """The stain reference, falling back to the conventional name beside the data."""
