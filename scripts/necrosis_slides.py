@@ -1,16 +1,17 @@
 """The necrosis map on whole slides: per-patch scores snapped to the H&E's edges, on tissue without lumina, and the areas.
 
     uv run python scripts/necrosis_slides.py --slides /data/michelle/slides \
-        --maps <predict_slide_patches.py output> --lumen /data/michelle/necrosis_lumen_2026-10-11 \
-        --out <dir> --workers 5
+        --maps <predict_slide_patches.py output> --out <dir> --workers 5 \
+        [--lumen /data/michelle/necrosis_lumen_2026-10-11]
 
 The necrosis map is the per-patch mean score smoothed with the guided filter on the H&E, at the settings of
 slideviz.analysis.edge_snap, run in blocks that overlap by twice the window. A pixel is necrotic where its
-score reaches the cutoff of the head fitted without its animal. Areas count tissue the tiles cover: the outline
-without lumina (the lumen masks of necrosis_lumen.py), levels mapped by their exact factors. The map is stored as
-call_E and area_E, the map before edge snapping as call_D and area_D, and the tile model's and the drawn
-polygons' areas (necrosis_lumen.py's, lumina out) as area_A_tiles and area_drawn. Writes one call-map file per
-slide and a table.
+score reaches the map's cutoff. Areas count tissue the tiles cover: the outline without lumina
+(necrosis_lumen.slide_lumen on the H&E), levels mapped by their exact factors. The map is stored as call_E and
+area_E, the map before edge snapping as call_D and area_D. With --lumen, a necrosis_lumen.py run, the tile
+model's and the drawn polygons' areas (lumina out) of its animals are added as area_A_tiles and area_drawn.
+Slides open through their sidecars in --slides. Writes one call-map file per slide, named by the slide, and a
+table.
 """
 
 from __future__ import annotations
@@ -23,9 +24,11 @@ from multiprocessing import get_context
 from pathlib import Path
 
 import numpy as np
+from necrosis_lumen import LUMEN_UM, slide_lumen
 
+from slideviz.analysis import dab, tissue
 from slideviz.analysis.edge_snap import NECROSIS_EPS, NECROSIS_RADIUS_UM, guided_filter
-from slideviz.analysis.prediction import CALL_NOT_MEASURED, NECROSIS_RECORD, read_lumen
+from slideviz.analysis.prediction import CALL_NOT_MEASURED, NECROSIS_RECORD
 from slideviz.analysis.tissue import (
     mask_from_level,
     on_level,
@@ -33,6 +36,7 @@ from slideviz.analysis.tissue import (
     pyramid_factor,
 )
 from slideviz.data.provenance import code_version
+from slideviz.data.registration import read_sidecar
 from slideviz.io.reader import open_slide
 
 BLOCK = 4096  # level px per side of one filtering block
@@ -55,11 +59,12 @@ def snapped(score: np.ndarray, level: object, origin: tuple[int, int], radius: i
 
 def one_slide(job: tuple) -> dict:
     """One slide's record with the areas of the necrosis map and of the map before edge snapping; writes both call maps."""
-    path, slides, lumen_dir, out = job
+    path, slides, out = job
     stored = np.load(path)
     meta = json.loads(str(stored["meta"]))
-    animal, cutoff, origin = meta["animal"], meta["cutoff"], meta["origin_level_rc"]
-    _, levels = open_slide(slides / f"{meta['slide']}.ome.tiff")
+    slide, cutoff, origin = meta["slide"], meta["cutoff"], meta["origin_level_rc"]
+    image = slides / read_sidecar(slides, slide)["file"]
+    _, levels = open_slide(image)
     level = levels[meta["level"]]
     width = level.shape[1]
     radius = round(NECROSIS_RADIUS_UM / meta["um_per_px"])
@@ -67,7 +72,7 @@ def one_slide(job: tuple) -> dict:
     score = np.nan_to_num(stored["mean"], nan=0.0)
     covered = stored["count"] > 0
     outline = mask_from_level(np.asarray(levels[pick_level(levels)]))
-    lumen, _ = read_lumen(lumen_dir / f"{animal}_lumen.npz")
+    lumen, lumen_um, _ = slide_lumen(image)
     measured = (covered & on_level(outline, pyramid_factor(width, outline.shape[1]), *origin, score.shape)
                 & ~on_level(lumen, pyramid_factor(width, lumen.shape[1]), *origin, score.shape))
 
@@ -75,22 +80,23 @@ def one_slide(job: tuple) -> dict:
     n = max(1, int(measured.sum()))
     area = {code: round(float((call & measured).sum() / n), 4) for code, call in calls.items()}
     maps = {f"call_{code}": np.where(measured, call, CALL_NOT_MEASURED).astype(np.uint8) for code, call in calls.items()}
-    record = {"animal": animal, "slide": meta["slide"], "cutoff": cutoff, "level": meta["level"],
-              "um_per_px": meta["um_per_px"], "origin_level_rc": origin, "radius_px": radius,
+    record = {"slide": slide, "animal": meta["animal"], "cutoff": cutoff, "level": meta["level"],
+              "um_per_px": meta["um_per_px"], "origin_level_rc": origin, "radius_px": radius, "lumen_um": lumen_um,
               "measured_px": int(measured.sum()), "tissue_mm2": round(n * (meta["um_per_px"] / 1000) ** 2, 3),
               "area_E": area["E"], "area_D": area["D"],
               "map": {"written": meta["written"], "code": meta["code"], "file": path.name}}
-    np.savez_compressed(out / f"{animal}_necrosis.npz", **maps, meta=json.dumps(record))
-    print(f"{animal}: E {area['E']:.1%}, D {area['D']:.1%} of {record['tissue_mm2']} mm2", flush=True)
+    np.savez_compressed(out / f"{slide}_necrosis.npz", **maps, meta=json.dumps(record))
+    print(f"{slide}: E {area['E']:.1%}, D {area['D']:.1%} of {record['tissue_mm2']} mm2", flush=True)
     return record
 
 
 def main() -> None:
     """Call necrosis on every slide map and write the call maps and the area table."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--slides", type=Path, required=True, help="H&E OME-TIFFs")
+    parser.add_argument("--slides", type=Path, required=True, help="H&E slides with their sidecars")
     parser.add_argument("--maps", type=Path, required=True, help="predict_slide_patches.py output")
-    parser.add_argument("--lumen", type=Path, required=True, help="necrosis_lumen.py output")
+    parser.add_argument("--lumen", type=Path, default=None,
+                        help="a necrosis_lumen.py run, for the tile model's and drawn areas of its animals")
     parser.add_argument("--out", type=Path, required=True, help="a new or empty folder")
     parser.add_argument("--workers", type=int, default=1)
     args = parser.parse_args()
@@ -99,16 +105,16 @@ def main() -> None:
     paths = sorted(args.maps.glob("*_patch_slide.npz"))
     if not paths:
         raise SystemExit(f"no slide maps in {args.maps}")
-    lumina = [args.lumen / f"{p.name.removesuffix('_patch_slide.npz')}_lumen.npz" for p in paths]
-    if missing := [str(path) for path in [*lumina, args.lumen / "necrosis_lumen.json"] if not path.exists()]:
-        raise SystemExit("missing lumen inputs:\n  " + "\n  ".join(missing))
+    if args.lumen and not (args.lumen / "necrosis_lumen.json").exists():
+        raise SystemExit(f"no necrosis_lumen.json in {args.lumen}")
     args.out.mkdir(parents=True, exist_ok=True)
 
     with ProcessPoolExecutor(max(1, min(args.workers, len(paths))), mp_context=get_context("spawn")) as pool:
-        rows = list(pool.map(one_slide, [(p, args.slides, args.lumen, args.out) for p in paths]))
+        rows = list(pool.map(one_slide, [(p, args.slides, args.out) for p in paths]))
 
     # the tile model's and the drawn polygons' areas, lumina out, from the lumen run
-    before = {r["animal"]: r for r in json.loads((args.lumen / "necrosis_lumen.json").read_text())["slides_areas"]}
+    before = ({r["animal"]: r for r in json.loads((args.lumen / "necrosis_lumen.json").read_text())["slides_areas"]}
+              if args.lumen else {})
     for row in rows:
         old = before.get(row["animal"], {})
         row["area_A_tiles"] = old.get("area_predicted_no_lumen")
@@ -124,12 +130,16 @@ def main() -> None:
         "edge_snap": {"radius_um": NECROSIS_RADIUS_UM, "eps": NECROSIS_EPS, "block_px": BLOCK,
                       "overlap": "twice the radius on every side"},
         "area": "necrotic share of measured tissue: covered by a tile, inside the outline, outside lumina",
-        "call_maps": f"<animal>_necrosis.npz: call_E and call_D, uint8 on the map's level from origin_level_rc; "
+        "lumen": {"rule": "necrosis_lumen.slide_lumen: tissue.lumen_mask on dab.glass_like inside the tissue outline",
+                  "settings": {"LUMEN_UM": LUMEN_UM, "GLASS_OD": dab.GLASS_OD,
+                               "LUMEN_OPEN_UM": tissue.LUMEN_OPEN_UM, "LUMEN_MIN_UM2": tissue.LUMEN_MIN_UM2}},
+        "call_maps": f"<slide>_necrosis.npz: call_E and call_D, uint8 on the map's level from origin_level_rc; "
                      f"1 necrotic, 0 not, {CALL_NOT_MEASURED} not measured",
         "mean_abs_area_error_vs_drawn": {"n": len(drawn), **error},
         "error_caveat": "against polygons that stop short of the necrosis edge and include pooled blood; information",
         "slides": rows,
-        "inputs": {"maps": str(args.maps), "lumen": str(args.lumen), "slides": str(args.slides)},
+        "inputs": {"maps": str(args.maps), "lumen": str(args.lumen) if args.lumen else None,
+                   "slides": str(args.slides)},
     }
     (args.out / NECROSIS_RECORD).write_text(json.dumps(record, indent=1) + "\n")
     print(f"=== {len(rows)} slides; mean |area - drawn| over {len(drawn)} drawn slides: {error} ===")
