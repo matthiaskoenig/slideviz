@@ -4,11 +4,12 @@
         --embeddings <its training cache> --tiles <export_field_tiles.py --slide output> \
         --out <dir> --device cuda:0
 
-Every tile passes the frozen encoder once, its patch
-descriptions are rounded to half precision as the training ones were and scored by the head fitted without
-the slide's animal, and each pixel's map value is the mean of the scores of the tiles covering it. The
-descriptions (about 90 GB a slide) are discarded after scoring. The head must first reproduce its stored
-training scores bit for bit.
+Every tile passes the frozen encoder once, its patch descriptions are rounded to half precision as the training
+ones were and scored, and each pixel's map value is the mean of the scores of the tiles covering it. A training
+slide is scored by the head fitted without its animal; a slide outside training (another animal or species) by
+the mean of every head's score, against the mean of their cutoffs. The descriptions (about 90 GB a slide) are
+discarded after scoring. Each head used must first reproduce its stored training scores bit for bit. Tiles must
+match the training tiles in pixel size and edge in um within TILE_TOLERANCE.
 """
 
 from __future__ import annotations
@@ -36,10 +37,28 @@ from torch.utils.data import DataLoader
 from train_necrosis import code_version
 from train_patch_head import CHUNK, patch_score  # check_head scores by this chunk
 
+TILE_TOLERANCE = 0.05  # relative; rat level 1 is 0.4546 um/px, the mouse training tiles' 0.4421
+
 
 def score(patches: np.ndarray, part: np.ndarray, heads: np.lib.npyio.NpzFile, k: int) -> np.ndarray:
     """Necrosis scores per patch for the tiles in part, by head k, in train_patch_head.py's arithmetic."""
     return patch_score(patches[part], heads["mean"][k], heads["scale"][k], heads["coef"][k], heads["intercept"][k])
+
+
+def mean_score(patches: np.ndarray, heads: np.lib.npyio.NpzFile, chosen: list[int]) -> np.ndarray:
+    """Mean necrosis score per patch over the chosen heads, each folded into one weight column and offset."""
+    coef, scale, mean = heads["coef"][chosen], heads["scale"][chosen], heads["mean"][chosen]
+    weight = (coef / scale).T.astype(np.float32)  # (dim, heads)
+    offset = (heads["intercept"][chosen] - (mean / scale * coef).sum(axis=1)).astype(np.float32)
+    logit = np.asarray(patches, np.float32) @ weight + offset
+    return (1 / (1 + np.exp(-logit))).mean(axis=-1, dtype=np.float32)
+
+
+def slide_scores(patches: np.ndarray, heads: np.lib.npyio.NpzFile, chosen: list[int]) -> np.ndarray:
+    """Scores per patch: by one head in the training arithmetic, or the mean over several."""
+    if len(chosen) == 1:
+        return score(patches, np.arange(len(patches)), heads, chosen[0])
+    return mean_score(patches, heads, chosen)
 
 
 def check_head(heads: np.lib.npyio.NpzFile, k: int, animal: str, train_patches: np.ndarray,
@@ -55,13 +74,30 @@ def check_head(heads: np.lib.npyio.NpzFile, k: int, animal: str, train_patches: 
     return {"tiles": int(part.size), "patches_different": differ}
 
 
-def load_heads(heads_dir: Path) -> tuple[np.lib.npyio.NpzFile, dict, list[str], set[tuple[int, int]]]:
-    """The heads, their results record, their animal names and the (level, size_px) pairs their labels were cut at."""
+def load_heads(heads_dir: Path) -> tuple[np.lib.npyio.NpzFile, dict, list[str], dict]:
+    """The heads, their results record, their animal names and the pixel size and tile edge in um of their labels."""
     heads = np.load(heads_dir / "heads.npz")
     results = json.loads((heads_dir / "patch_head_results.json").read_text())
-    label_meta = json.loads((Path(results["inputs"]["labels"]) / "patch_labels_meta.json").read_text())
-    trained_on = {(level, size) for level in label_meta["geometry"]["level"] for size in label_meta["geometry"]["size_px"]}
-    return heads, results, heads["animals"].tolist(), trained_on
+    geometry = json.loads((Path(results["inputs"]["labels"]) / "patch_labels_meta.json").read_text())["geometry"]
+    um_per_px = float(np.median(list(geometry["um_per_px"].values())))
+    (size_px,) = geometry["size_px"]
+    return heads, results, heads["animals"].tolist(), {"um_per_px": um_per_px, "tile_um": size_px * um_per_px}
+
+
+def unlike_training(geometry: dict, trained: dict) -> str | None:
+    """How the tiles' pixel size or edge differs from the training tiles' beyond TILE_TOLERANCE, or None."""
+    edge = geometry["size_px"] * geometry["um_per_px"]
+    for name, value, train in (("pixel size", geometry["um_per_px"], trained["um_per_px"]),
+                               ("tile edge", edge, trained["tile_um"])):
+        if abs(value / train - 1) > TILE_TOLERANCE:
+            return f"{name} {value:.4f} um is {value / train - 1:+.1%} off the training tiles' {train:.4f} um"
+    return None
+
+
+def training_animal(embeddings_meta: dict, slide: str) -> str | None:
+    """The animal a training slide belongs to, from the tile manifest the embeddings were made from; None outside training."""
+    rows = json.loads(Path(embeddings_meta["source_manifest"]).read_text())["tiles"]
+    return next((r["animal"] for r in rows if r["slide"] == slide), None)
 
 
 def map_frame(rows: list[dict]) -> tuple[int, int, tuple[int, int], int]:
@@ -93,29 +129,36 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=WORKERS)
     args = parser.parse_args()
 
-    heads, results, names, trained_on = load_heads(args.heads)
+    heads, results, names, trained = load_heads(args.heads)
     train_meta = json.loads((args.embeddings / "embeddings_meta.json").read_text())
     manifest = json.loads((args.tiles / "manifest.json").read_text())
     rows = manifest["tiles"]
-    ((animal, geometry),) = manifest["fields"].items()
+    ((_, geometry),) = manifest["fields"].items()
+    slide = geometry["slide"]
     if not geometry.get("whole_slide"):
         raise SystemExit(f"{args.tiles} holds a field, not a whole slide")
     if (str(heads["encoder"]) != MODEL or train_meta["input_px"] != INPUT_PX or train_meta.get("stain_matched")
             or (train_meta.get("patches") or {}).get("dtype") != str(PATCH_DTYPE).removeprefix("torch.")):
         raise SystemExit("the heads were fitted on descriptions made differently from this script's")
-    if {(r["level"], r["size_px"]) for r in rows} - trained_on:
-        raise SystemExit(f"tiles are not cut like the training tiles {sorted(trained_on)}")
-    out = args.out / f"{animal}_patch_slide.npz"
+    unlike = unlike_training(geometry, trained)
+    if unlike:
+        raise SystemExit(f"tiles are not cut like the training tiles: {unlike}")
+    out = args.out / f"{slide}_patch_slide.npz"
     if out.exists():
         raise SystemExit(f"{out} exists; give a new --out")
 
-    k = names.index(animal)
-    cutoff = float(heads["cutoff"][k])
+    animal = training_animal(train_meta, slide)
+    chosen = [names.index(animal)] if animal is not None else list(range(len(names)))
+    cutoff = float(np.mean(heads["cutoff"][chosen]))
     train_patches = np.load(args.embeddings / "patches.npy", mmap_mode="r")
     train_animals = np.array((args.embeddings / "animals.txt").read_text().split())
-    check = check_head(heads, k, animal, train_patches, train_animals,
-                       np.load(args.heads / "patch_scores.npy", mmap_mode="r"))
-    print(f"=== {animal}: head reproduces its stored scores bit for bit; {len(rows):,} tiles ===", flush=True)
+    stored = np.load(args.heads / "patch_scores.npy", mmap_mode="r")
+    check = {names[k]: check_head(heads, k, names[k], train_patches, train_animals, stored) for k in chosen}
+    head = (f"heads.npz index {chosen[0]}, fitted without {animal}" if animal is not None else
+            f"mean score of all {len(chosen)} heads in heads.npz, the slide being outside training; "
+            "cutoff the mean of theirs")
+    print(f"=== {slide}: {head}; {len(chosen)} head(s) reproduce their stored scores bit for bit; "
+          f"{len(rows):,} tiles ===", flush=True)
 
     encoder = timm.create_model(MODEL, pretrained=True, num_classes=0).eval().to(args.device, dtype=DTYPE)
     config = timm.data.resolve_model_data_config(encoder)
@@ -135,7 +178,7 @@ def main() -> None:
             tokens = encoder.forward_features(batch.to(args.device, dtype=DTYPE, non_blocking=True))
             # rounded to half precision as embed_tiles.py --patches stores the training descriptions
             patches = tokens[:, prefix:].reshape(len(batch), *grid, dim).to(PATCH_DTYPE).cpu().numpy()
-            for i, patch_scores in zip(index.tolist(), score(patches, np.arange(len(batch)), heads, k), strict=True):
+            for i, patch_scores in zip(index.tolist(), slide_scores(patches, heads, chosen), strict=True):
                 y, x = rows[i]["y"] - top, rows[i]["x"] - left
                 total[y:y + size, x:x + size] += patch_scores[np.ix_(expand, expand)]
                 count[y:y + size, x:x + size] += 1
@@ -148,9 +191,9 @@ def main() -> None:
     meta = {
         "written": datetime.now(UTC).isoformat(timespec="seconds"),
         "code": code_version(Path(__file__).name),
-        "animal": animal,
-        "slide": geometry["slide"],
-        "head": f"heads.npz index {k}, fitted without {animal}",
+        "animal": animal,  # the training animal; None outside training
+        "slide": slide,
+        "head": head,
         "cutoff": cutoff,
         "check": check,
         "level": rows[0]["level"],
@@ -170,7 +213,7 @@ def main() -> None:
     }
     args.out.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(out, mean=mean, count=count.astype(np.uint8), meta=json.dumps(meta))
-    print(f"=== {animal}: {meta['called_share_of_covered']:.1%} of covered pixels called, "
+    print(f"=== {slide}: {meta['called_share_of_covered']:.1%} of covered pixels called, "
           f"{meta['seconds']:.0f} s, written to {out} ===")
 
 
