@@ -20,6 +20,8 @@ CALL_RGB = (0.0, 234 / 255, 248 / 255)
 CALL_OPACITY = 0.42
 # a necrosis call map is shown on the H&E level nearest this, about 80 MB for a mouse slide
 CALL_SHOWN_UM = 0.9
+# or on the first coarser level within this many pixels; a rat slide's 0.9 um level holds about 600 MB
+CALL_SHOWN_MAX_PX = 160_000_000
 # how napari draws a necrotic call: 1 in see-through cyan, 0 clear, no blend between the two
 CALL_LOOK = {
     "colormap": {"colors": [[0.0, 0.0, 0.0, 0.0], [*CALL_RGB, 1.0]], "controls": [0.0, 0.5, 1.0],
@@ -74,8 +76,10 @@ def calls_on_level(
 
 
 def call_level(path: Path, level_shapes: list[tuple[int, int]], level0_um: float) -> tuple[np.ndarray, float]:
-    """A necrosis call map's necrotic mask on the H&E level nearest CALL_SHOWN_UM, and that level's um/px."""
+    """A necrosis call map's necrotic mask on the H&E level nearest CALL_SHOWN_UM within CALL_SHOWN_MAX_PX, and its um/px."""
     index = pick_level_um(level_shapes, level0_um, CALL_SHOWN_UM)
+    while index + 1 < len(level_shapes) and level_shapes[index][0] * level_shapes[index][1] > CALL_SHOWN_MAX_PX:
+        index += 1
     necrotic, _, _ = calls_on_level(path, level_shapes, index)
     return necrotic.astype(np.uint8), level0_um * pyramid_factor(level_shapes[0][1], level_shapes[index][1])
 

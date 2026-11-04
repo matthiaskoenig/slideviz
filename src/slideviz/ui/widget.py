@@ -150,6 +150,13 @@ def slide_stem(row) -> str:
     return Path(row["file"]).name.split(".")[0]
 
 
+def scan_label(row) -> str:
+    """The slide name after its stain, which tells a block's scans of one stain apart (run130_20260402); else empty."""
+    marker = f"_{row['stain']}_"
+    stem = slide_stem(row)
+    return stem.split(marker, 1)[1] if marker in stem else ""
+
+
 def stain_name(stain: str) -> str:
     """How a stain is written in layer names and the info panel."""
     return STAIN_NAMES.get(stain, stain.upper())
@@ -244,9 +251,10 @@ def mesh_layers(fields_path: Path, animal: str) -> list:
 
 
 @thread_worker
-def placed_map(path: Path, level_shapes: list[tuple[int, int]], level0_um: float) -> tuple:
-    """The necrosis map on the H&E pyramid level it is shown on, off the UI thread."""
-    return call_level(path, level_shapes, level0_um)
+def placed_maps(maps: list[tuple[Path, list[tuple[int, int]], float, str]]):
+    """Each necrosis map on its H&E slide's pyramid level it is shown on, off the UI thread, with its layer name."""
+    for path, level_shapes, level0_um, name in maps:
+        yield (*call_level(path, level_shapes, level0_um), name)
 
 
 class SlideList(QWidget):
@@ -468,14 +476,26 @@ class SlideList(QWidget):
                 lines.append(f"<br><b>{stain_name(row['stain'])}</b>")
                 lines.extend(details)
 
-        animal = animal_name(block, slides[0]["substance"])
-        mapped = self._necrosis_record().get(animal)
-        if mapped is not None:
-            lines.append(f"<br><b>Necrosis</b> (necrosis map, {mapped['written'][:10]})")
-            drawn = f", drawn {mapped['area_drawn']:.1%}" if mapped.get("area_drawn") is not None else ""
-            lines.append(f"{mapped['area_E']:.1%} of tissue without lumina{drawn}")
+        lines.extend(self._necrosis_lines(animal_name(block, slides[0]["substance"]), slides))
         lines.extend(self._readout_lines(slides))
         self.info.setText("<br>".join(lines))
+
+    def _necrosis_lines(self, animal: str, slides: list) -> list[str]:
+        """Info lines with each H&E slide's necrotic share from the necrosis run's record."""
+        record = self._necrosis_record()
+        he = [row for row in slides if row["stain"] == REFERENCE_STAIN]
+        found = [(row, record.get(slide_stem(row))) for row in he]
+        if len(he) == 1 and found[0][1] is None:  # the mouse runs keyed their rows by animal
+            found = [(he[0], record.get(animal))]
+        lines = []
+        for row, mapped in found:
+            if mapped is None:
+                continue
+            scan = scan_label(row)
+            lines.append(f"<br><b>Necrosis{' ' + scan if scan else ''}</b> (necrosis map, {mapped['written'][:10]})")
+            drawn = f", drawn {mapped['area_drawn']:.1%}" if mapped.get("area_drawn") is not None else ""
+            lines.append(f"{mapped['area_E']:.1%} of tissue without lumina{drawn}")
+        return lines
 
     def _readout_record(self) -> dict:
         """The newest CYP2E1 readout run's record from the prediction directory, read once and kept."""
@@ -494,7 +514,7 @@ class SlideList(QWidget):
         return self._readout
 
     def _necrosis_record(self) -> dict:
-        """The necrosis run's areas per animal, each with the run's date, read once and kept."""
+        """The necrosis run's areas per slide and per animal, each with the run's date, read once and kept."""
         if self._necrosis_areas is None:
             self._necrosis_areas = {}
             directory = settings.predictions_dir()
@@ -502,8 +522,11 @@ class SlideList(QWidget):
             if path is not None and path.exists():
                 try:
                     record = json.loads(path.read_text())
-                    self._necrosis_areas = {row["animal"]: row | {"written": record["written"]}
-                                            for row in record["slides"]}
+                    for row in record["slides"]:
+                        # rows name their slide; the mouse runs' rows name their animal, None outside training
+                        for key in (row.get("slide"), row.get("animal")):
+                            if key:
+                                self._necrosis_areas.setdefault(key, row | {"written": record["written"]})
                 except (OSError, ValueError, KeyError) as exc:
                     log.warning("unreadable necrosis record %s: %s", path, exc)
         return self._necrosis_areas
@@ -550,7 +573,8 @@ class SlideList(QWidget):
         stain = stain_name(row["stain"])
         # a scene number only means something on the files that hold more than one
         what = f"{stain} stain s{scene}" if info.n_scenes > 1 else f"{stain} stain"
-        name = layer_name(animal_name(row["serial_block"], row["substance"]), what)
+        scan = scan_label(row)
+        name = layer_name(animal_name(row["serial_block"], row["substance"]), f"{what} {scan}" if scan else what)
         if reference_um is None:
             self._reference_shapes = [level.shape[:2] for level in levels]
         affine = None
@@ -567,6 +591,7 @@ class SlideList(QWidget):
             shown_um, affine = reference_um, None
         return {"row": row, "pyramids": pyramids, "name": name, "shown_um": shown_um,
                 "affine": affine, "pixel_size_um": info.pixel_size_um,
+                "level_shapes": [level.shape[:2] for level in levels],
                 "registered": registration is not None}
 
     @staticmethod
@@ -660,23 +685,31 @@ class SlideList(QWidget):
             layer.data = self._levels_for(layer.metadata)
 
     @staticmethod
-    def _necrosis_map(animal: str) -> Path | None:
-        """The necrosis map for one animal, when the prediction directory holds one."""
+    def _necrosis_map(name: str) -> Path | None:
+        """The necrosis map for one slide or animal, when the prediction directory holds one."""
         directory = settings.predictions_dir()
-        path = directory / f"{animal}{NECROSIS_SUFFIX}" if directory is not None else None
+        path = directory / f"{name}{NECROSIS_SUFFIX}" if directory is not None else None
         return path if path is not None and path.exists() else None
 
-    def _load_necrosis(self, animal: str, reference_um: float) -> None:
-        """Add the animal's necrosis map, when one exists, placed on the H&E pyramid off the UI thread."""
-        path = self._necrosis_map(animal)
-        if path is None or not self._reference_shapes:
+    def _load_necrosis(self, animal: str, shown: list[dict]) -> None:
+        """Add each H&E slide's necrosis map, when one exists, placed on that slide's pyramid off the UI thread."""
+        maps = []
+        for opened in shown:
+            row = opened["row"]
+            path = self._necrosis_map(slide_stem(row))
+            if path is None and len(shown) == 1:  # the mouse runs named their maps by animal
+                path = self._necrosis_map(animal)
+            if path is not None:
+                scan = scan_label(row)
+                maps.append((path, opened["level_shapes"], opened["pixel_size_um"],
+                             layer_name(animal, f"{NECROSIS_NAME} {scan}" if scan else NECROSIS_NAME)))
+        if not maps:
             return
-        name = layer_name(animal, NECROSIS_NAME)
-        self._set_busy(True)  # Load, Add, Clear and the list stay locked until the map arrives
-        self._show_activity(f"{animal}: placing the necrosis map")
-        worker = placed_map(path, list(self._reference_shapes), reference_um)
-        worker.returned.connect(lambda placed: add_call_layer(self.viewer, *placed, name=name))
-        worker.errored.connect(lambda exc: self.status.setText(f"{path.name}: {type(exc).__name__}: {exc}"))
+        self._set_busy(True)  # Load, Add, Clear and the list stay locked until the maps arrive
+        self._show_activity(f"{animal}: placing {len(maps)} necrosis map{'s' if len(maps) > 1 else ''}")
+        worker = placed_maps(maps)
+        worker.yielded.connect(lambda placed: add_call_layer(self.viewer, placed[0], placed[1], name=placed[2]))
+        worker.errored.connect(lambda exc: self.status.setText(f"{animal} necrosis map: {type(exc).__name__}: {exc}"))
         worker.finished.connect(self._map_done)  # emitted after an error too
         self._map_worker = worker
         worker.start()
@@ -777,7 +810,8 @@ class SlideList(QWidget):
             return
 
         animal = animal_name(block, slides[0]["substance"])
-        state = {"reference_um": None, "unaligned": [], "done": 0}
+        # "he": the opened H&E slides shown on their own pixel grid, where their necrosis maps are drawn
+        state = {"reference_um": None, "unaligned": [], "done": 0, "he": []}
         self._reference_shapes = []  # filled from this block's reference as it opens
         self.status.setText("")  # the status line only carries this load's problems
         self._set_busy(True)
@@ -794,6 +828,9 @@ class SlideList(QWidget):
                     state["reference_um"] = opened["pixel_size_um"]
                 elif not opened["registered"]:
                     state["unaligned"].append(row["stain"])
+                if (row["stain"] == REFERENCE_STAIN and opened["affine"] is None
+                        and opened["shown_um"] == opened["pixel_size_um"]):
+                    state["he"].append(opened)
             if state["done"] < len(slides):
                 self._step(animal, slides[state["done"]], state["done"], len(slides))
 
@@ -801,12 +838,10 @@ class SlideList(QWidget):
             """Add the prediction maps and warn about slides shown without registration."""
             self._worker = None
             self._set_busy(False)
-            reference_um = state["reference_um"]
             # CYP2E1 first, so the see-through necrosis lies on top and their overlap mixes
             self._load_readouts(slides)
             self._load_meshes(animal)
-            if reference_um:
-                self._load_necrosis(animal, reference_um)
+            self._load_necrosis(animal, state["he"])
             log.info("opened %s", block_title(slides[0]))
             if state["unaligned"]:
                 self.status.setText(f"{block}: overlaid, not registered: {', '.join(state['unaligned'])}")
