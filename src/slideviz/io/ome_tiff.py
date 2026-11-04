@@ -17,8 +17,8 @@ from slideviz.io.czi import SlideInfo
 
 log = logging.getLogger(__name__)
 
-# the scanner's own overview pictures, stored as extra series beside the slide
-THUMBNAILS = ("label image", "macro image")
+# the scanner's own overview pictures, stored as extra series beside the slide; NDPI adds a macro mask
+THUMBNAILS = ("label image", "macro image", "macro mask image")
 
 
 def image_series(slide: tifffile.TiffFile) -> list[tifffile.TiffPageSeries]:

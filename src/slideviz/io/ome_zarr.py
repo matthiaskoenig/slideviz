@@ -16,8 +16,8 @@ from slideviz.io.czi import SlideInfo
 
 log = logging.getLogger(__name__)
 
-# bioformats2raw stores the slide's own thumbnails as extra series beside the scenes
-THUMBNAILS = ("label image", "macro image")
+# bioformats2raw stores the slide's own thumbnails as extra series beside the scenes; NDPI adds a macro mask
+THUMBNAILS = ("label image", "macro image", "macro mask image")
 
 
 def _multiscales(path: Path, series: str) -> dict:
