@@ -2,8 +2,10 @@
 
     uv run python predict_slide_patches.py --heads <train_patch_head.py output> \
         --embeddings <its training cache> --tiles <export_field_tiles.py --slide output> \
-        --out <dir> --device cuda:0
+        --out <dir> --device cuda:0 [--stain-reference <stain_stats.py output>]
 
+With --stain-reference, each tile's colours are matched onto the reference's target before the encoder (Reinhard
+in LAB), from the slide's statistics in the reference, or from a fixed sample of its tiles when it is not listed.
 Every tile passes the frozen encoder once, its patch descriptions are rounded to half precision as the training
 ones were and scored, and each pixel's map value is the mean of the scores of the tiles covering it. A training
 slide is scored by the head fitted without its animal; a slide outside training (another animal or species) by
@@ -33,6 +35,7 @@ from embed_tiles import (
     TileSet,
     build_transform,
 )
+from stain_norm import read_reference, tile_stats
 from torch.utils.data import DataLoader
 from train_necrosis import code_version
 from train_patch_head import CHUNK, patch_score  # check_head scores by this chunk
@@ -127,6 +130,8 @@ def main() -> None:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--batch", type=int, default=BATCH)
     parser.add_argument("--workers", type=int, default=WORKERS)
+    parser.add_argument("--stain-reference", type=Path, default=None,
+                        help="stain_stats.py output: match each tile onto its target before the encoder")
     args = parser.parse_args()
 
     heads, results, names, trained = load_heads(args.heads)
@@ -157,15 +162,25 @@ def main() -> None:
     head = (f"heads.npz index {chosen[0]}, fitted without {animal}" if animal is not None else
             f"mean score of all {len(chosen)} heads in heads.npz, the slide being outside training; "
             "cutoff the mean of theirs")
+    stain = None
+    if args.stain_reference:
+        target, per_slide = read_reference(args.stain_reference)
+        listed = slide in per_slide
+        stain = {"reference": str(args.stain_reference), "target": target,
+                 "source": per_slide[slide] if listed else tile_stats(args.tiles, rows),
+                 "source_from": "the reference" if listed else "a sample of this slide's tiles"}
     print(f"=== {slide}: {head}; {len(chosen)} head(s) reproduce their stored scores bit for bit; "
-          f"{len(rows):,} tiles ===", flush=True)
+          f"{len(rows):,} tiles; {'stain matched, statistics from ' + stain['source_from'] if stain else 'raw'} ===",
+          flush=True)
 
     encoder = timm.create_model(MODEL, pretrained=True, num_classes=0).eval().to(args.device, dtype=DTYPE)
     config = timm.data.resolve_model_data_config(encoder)
     prefix, grid, dim = encoder.num_prefix_tokens, tuple(encoder.patch_embed.grid_size), encoder.num_features
     if list(grid) != heads["grid"].tolist():
         raise SystemExit("the encoder's patch grid differs from the heads'")
-    loader = DataLoader(TileSet(args.tiles, rows, build_transform(config["mean"], config["std"])),
+    tiles = TileSet(args.tiles, rows, build_transform(config["mean"], config["std"]),
+                    target=stain["target"] if stain else None, per_slide={slide: stain["source"]} if stain else None)
+    loader = DataLoader(tiles,
                         batch_size=args.batch, shuffle=False, num_workers=args.workers, pin_memory=True,
                         prefetch_factor=4 if args.workers else None)
 
@@ -195,6 +210,7 @@ def main() -> None:
         "slide": slide,
         "head": head,
         "cutoff": cutoff,
+        "stain": stain,  # None: raw tiles
         "check": check,
         "level": rows[0]["level"],
         "um_per_px": geometry["um_per_px"],
