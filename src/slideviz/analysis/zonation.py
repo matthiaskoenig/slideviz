@@ -29,7 +29,7 @@ EDGE_UM = 200.0  # profile pixels at least this far inside the section outline, 
 LOBULE_BIN_MIN_UM2 = 10.0  # tissue a lobule needs in a bin for its own mean there
 VESSEL_REACH_UM = 15.0  # a lumen this close to a peak or valley is its vessel, measured from its wall
 VESSEL_MAX_UM2 = 30000.0  # larger glass-like areas inside the outline are tears or glass, never a vessel wall
-WALL_UM = 4.0  # tissue this close to a lumen is vessel wall and pixels half on glass, left out of the profiles
+WALL_UM = 12.0  # tissue this close to a lumen is vessel wall, its connective tissue and pixels half on glass, left out
 
 POSITIONS = np.linspace(0, 1, 40)  # the positions of the SPT model's pattern scan
 EDGES = np.concatenate([[0.0], (POSITIONS[:-1] + POSITIONS[1:]) / 2, [1.0]])  # bins centred on POSITIONS
