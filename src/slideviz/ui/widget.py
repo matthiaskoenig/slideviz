@@ -135,19 +135,7 @@ MESH_BLENDING = "translucent_no_depth"
 # scripts/zonation_layers.py output beside the predictions, per DAB slide: the CYP2E1 landscape and its lobule borders
 LOBULES_SUFFIX = "_lobules.npz"
 BORDERS_NAME = "lobule borders"
-RELIEF_NAME = "landscape 3D"
-LANDSCAPE_RGB = ((255, 250, 220), (120, 50, 5))  # the landscape from its low to its high end, pale to brown
-RELIEF_COLOURS = Colormap([[c / 255 for c in rgb] + [1.0] for rgb in LANDSCAPE_RGB], name="cyp2e1 relief")
 BORDER_COLOURS = Colormap([[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]], interpolation="zero", name="lobule borders")
-RELIEF_UM = 500.0  # height of the landscape's high value in the 3D view
-RELIEF_ANGLES = (0.0, 40.0, 0.0)  # camera angles the 3D view starts at with a relief: tilted, lit from the front
-RELIEF_STRIDE = 2  # the relief uses every 2nd landscape pixel
-RELIEF = "slideviz_relief"  # metadata key of a landscape relief layer, shown in the 3D view only
-# napari draws an image layer as a shrunk grey volume in the 3D view, so there each one is drawn as a flat picture
-SHEET = "slideviz_sheet"  # metadata key of an image layer's flat picture for the 3D view: the name of that layer
-SHEET_NAME = "3D"
-SHEET_PX = 4096  # longest side of a sheet's picture
-FLAT_EYE = "slideviz_flat_eye"  # metadata key of an image layer in the 3D view: its eye in the flat view
 
 # Filter label to the column it restricts
 FILTERS = {"Species": "species", "Stain": "stain", "Dose": "dose_mg_per_kg"}
@@ -267,85 +255,19 @@ def mesh_layers(fields_path: Path, animal: str) -> list:
     ]
 
 
-def relief(landscape, low: float, high: float, um: float, offset: float) -> tuple:
-    """The landscape as a height surface: corners (height, row, col) in units of RELIEF_UM, triangles, values."""
-    import numpy as np
-
-    field = landscape[::RELIEF_STRIDE, ::RELIEF_STRIDE]
-    rows, cols = np.nonzero(np.isfinite(field))
-    number = np.full(field.shape, -1, np.int64)
-    number[rows, cols] = np.arange(len(rows))
-    values = field[rows, cols]
-    # heights stay below 1: in the flat view napari draws the triangles whose corners' whole-number heights are 0
-    height = np.clip((values - low) / (high - low), 0, 0.999)
-    step = RELIEF_STRIDE * um
-    # all three axes share one scale, which keeps the light on the slopes right
-    corners = np.stack([height, (rows * step + offset) / RELIEF_UM, (cols * step + offset) / RELIEF_UM],
-                       axis=1).astype(np.float32)
-    a, b, c, d = number[:-1, :-1], number[:-1, 1:], number[1:, :-1], number[1:, 1:]
-    whole = (a >= 0) & (b >= 0) & (c >= 0) & (d >= 0)
-    a, b, c, d = a[whole], b[whole], c[whole], d[whole]
-    return corners, np.concatenate([np.stack([a, b, d], axis=1), np.stack([a, d, c], axis=1)]), values
-
-
-def sheet_picture(layer: Image):
-    """An image layer's pixels in its colours, at the finest size whose longest side fits SHEET_PX."""
-    import numpy as np
-
-    if layer.multiscale:
-        fitting = [level for level in layer.data if max(level.shape[:2]) <= SHEET_PX]
-        pixels = np.asarray(fitting[0] if fitting else layer.data[-1])
-    else:
-        step = -(-max(layer.data.shape[:2]) // SHEET_PX)
-        pixels = np.asarray(layer.data[::step, ::step])
-    if layer.rgb:
-        return pixels
-    low, high = layer.contrast_limits
-    share = np.clip((pixels.astype(np.float32) - low) / (high - low), 0, 1) ** layer.gamma
-    return (layer.colormap.map(share.ravel()).reshape(*share.shape, 4) * 255).round().astype(np.uint8)
-
-
-def sheet(layer: Image) -> Surface:
-    """An image layer as a flat picture at height 0 for the 3D view, placed like the layer."""
-    import numpy as np
-
-    rows, cols = (layer.data[0] if layer.multiscale else layer.data).shape[:2]
-    # a pixel is centred on its index, so the picture starts half a pixel before pixel 0
-    top, left, bottom, right = -0.5, -0.5, rows - 0.5, cols - 0.5
-    corners = np.array([[0, top, left], [0, top, right], [0, bottom, left], [0, bottom, right]], np.float32)
-    # picture coordinates are (col, row) shares, the row counted from the picture's last row
-    shares = np.array([[0, 1], [1, 1], [0, 0], [1, 0]], np.float32)
-    flat = layer.metadata.get(BASE_AFFINE, layer.affine.affine_matrix)
-    return Surface((corners, np.array([[0, 1, 3], [0, 3, 2]]), np.ones(4, np.float32)),
-                   texture=sheet_picture(layer), texcoords=shares, name=f"{layer.name} {SHEET_NAME}",
-                   scale=(1.0, *layer.scale), translate=(0.0, *layer.translate), units="um", shading="none",
-                   contrast_limits=(0, 1), opacity=layer.opacity,
-                   blending="additive" if layer.blending == "additive" else MESH_BLENDING,
-                   affine=np.block([[np.eye(1), np.zeros((1, 3))], [np.zeros((3, 1)), flat]]),
-                   metadata={SHEET: layer.name})
-
-
-def lobule_layers(path: Path, animal: str, stain: str, sha256: str | None) -> list:
-    """One stored landscape as layers: its lobule borders, and the landscape as a relief for the 3D view."""
+def lobule_borders(path: Path, animal: str, sha256: str | None) -> Image:
+    """The stored lobule borders of one slide as a layer of black lines, on its H&E partner's grid."""
     import numpy as np
 
     with np.load(path) as stored:
         if sha256 is not None and str(stored["nonrigid_sha256"]) != sha256:
             raise ValueError("measured on another registration")
-        landscape, border = stored["landscape"], stored["border"]
+        border = stored["border"]
         um, offset = float(stored["um_per_px"]), float(stored["offset_um"])
-        low, high = float(stored["low"]), float(stored["high"])
-    # landscape pixel (r, c) is centred at offset + (r, c) * um in the H&E frame
-    placed = {"scale": (um, um), "translate": (offset, offset), "units": "um", "interpolation2d": "nearest",
-              "blending": MESH_BLENDING}
-    name = stain_name(stain)
-    return [
-        Image(border, name=layer_name(animal, BORDERS_NAME), colormap=BORDER_COLOURS, contrast_limits=(0, 1),
-              **placed),
-        Surface(relief(landscape, low, high, um, offset), name=layer_name(animal, f"{name} {RELIEF_NAME}"),
-                scale=(RELIEF_UM,) * 3, units="um", colormap=RELIEF_COLOURS, contrast_limits=(low, high),
-                shading="smooth", metadata={RELIEF: True}),
-    ]
+    # border pixel (r, c) is centred at offset + (r, c) * um in the H&E frame
+    return Image(border, name=layer_name(animal, BORDERS_NAME), colormap=BORDER_COLOURS, contrast_limits=(0, 1),
+                 scale=(um, um), translate=(offset, offset), units="um", interpolation2d="nearest",
+                 blending=MESH_BLENDING)
 
 
 @thread_worker
@@ -402,11 +324,6 @@ class SlideList(QWidget):
         )
         self.even_staining.toggled.connect(self._apply_display)
 
-        self.three = QCheckBox("3D landscape")
-        self.three.setToolTip("Show the CYP2E1 landscape as hills over the slide; drag to tilt, Shift-drag to move")
-        self.three.toggled.connect(self._set_three)
-        self._switching = False  # True while this widget sets layer eyes for the flat or the 3D view
-
         load = QPushButton("Load")
         load.clicked.connect(self._replace)
         add = QPushButton("Add")
@@ -454,9 +371,7 @@ class SlideList(QWidget):
         for control in (left, self.angle, right, self.angle_shown):
             turn.addWidget(control)
         self.viewer.layers.events.inserted.connect(self._place_new)
-        self.viewer.layers.events.removed.connect(lambda event: QTimer.singleShot(0, self._drop_orphans))
         self.viewer.camera.events.zoom.connect(self._fit_mesh_edges)
-        self.viewer.dims.events.ndisplay.connect(self._show_reliefs)
 
         layout = QVBoxLayout(self)  # passing self installs it as this widget's layout
         layout.addLayout(filters)
@@ -464,7 +379,6 @@ class SlideList(QWidget):
         layout.addWidget(self.info)
         layout.addWidget(self.hide_background)
         layout.addWidget(self.even_staining)
-        layout.addWidget(self.three)
         layout.addLayout(turn)
         layout.addLayout(buttons)
         busy = QHBoxLayout()
@@ -789,12 +703,6 @@ class SlideList(QWidget):
             if SOURCE_LEVELS not in layer.metadata:  # a layer this widget did not load
                 continue
             layer.data = self._levels_for(layer.metadata)
-        stains = {layer.name: layer for layer in self.viewer.layers if SOURCE_LEVELS in layer.metadata}
-        for layer in [layer for layer in self.viewer.layers if layer.metadata.get(SHEET) in stains]:
-            if self.viewer.dims.ndisplay == 3:
-                layer.texture = sheet_picture(stains[layer.metadata[SHEET]])
-            else:  # made again from the changed pixels on the next switch to the 3D view
-                self.viewer.layers.remove(layer)
 
     @staticmethod
     def _necrosis_map(name: str) -> Path | None:
@@ -874,12 +782,10 @@ class SlideList(QWidget):
             )
 
     def _load_lobules(self, slides: list) -> None:
-        """Add the stored lobule borders and landscape relief of each DAB slide, on its H&E partner's grid."""
+        """Add the stored lobule borders of each DAB slide, hidden, on its H&E partner's grid."""
         directory = settings.predictions_dir()
         if directory is None or not directory.is_dir():
-            self._show_reliefs()
             return
-        added = False
         for row in slides:
             path = directory / f"{slide_stem(row)}{LOBULES_SUFFIX}"
             if row["stain"] not in DAB_STAINS or not path.exists():
@@ -887,106 +793,13 @@ class SlideList(QWidget):
             try:
                 registration = self._registration(row)
                 sha256 = registration.nonrigid.sha256 if registration and registration.nonrigid else None
-                layers = lobule_layers(path, animal_name(row["serial_block"], row["substance"]), row["stain"], sha256)
+                layer = lobule_borders(path, animal_name(row["serial_block"], row["substance"]), sha256)
             except (OSError, ValueError, KeyError) as exc:
                 log.exception("could not load lobules %s", path)
                 self.status.setText(f"{path.name}: {type(exc).__name__}: {exc}")
                 continue
-            for layer in layers:
-                # under async slicing (view.py) napari slices a Surface layer only when it is added visible
-                self.viewer.add_layer(layer)
-                layer.visible = False
-            layers[-1].events.visible.connect(self._relief_eye)
-            added = True
-        self._show_reliefs(tilt=added)
-
-    def _show_reliefs(self, event=None, tilt: bool = False) -> None:
-        """Show the reliefs and the stains' flat pictures in the 3D view, tilted on entering it; hide them in the flat view."""
-        three = self.viewer.dims.ndisplay == 3
-        self.three.blockSignals(True)
-        self.three.setChecked(three)
-        self.three.blockSignals(False)
-        reliefs = [layer for layer in self.viewer.layers if RELIEF in layer.metadata]
-        self._switching = True
-        try:
-            self._show_sheets(three)
-            for layer in reliefs:
-                layer.visible = three
-                if three:
-                    # a Surface switched on under async slicing keeps its last slice, so it is sliced here
-                    layer.set_view_slice()
-                    layer.events.set_data()
-        finally:
-            self._switching = False
-        if three and reliefs and (event is not None or tilt):
-            self.viewer.camera.angles = RELIEF_ANGLES
-
-    def _show_sheets(self, three: bool) -> None:
-        """Swap each flat image layer for its flat picture in the 3D view, and back in the flat view."""
-        sheets = {layer.metadata[SHEET]: layer for layer in self.viewer.layers if SHEET in layer.metadata}
-        for layer in [layer for layer in self.viewer.layers if isinstance(layer, Image) and layer.ndim == 2]:
-            flat = sheets.get(layer.name)
-            if three and FLAT_EYE not in layer.metadata:
-                layer.metadata[FLAT_EYE] = layer.visible
-                self._show_sheet(layer, flat, layer.visible)
-                layer.visible = False
-            elif not three and FLAT_EYE in layer.metadata:
-                eye = layer.metadata.pop(FLAT_EYE)
-                layer.visible = flat.visible if flat is not None else eye
-        if three:
-            # the pictures are drawn without a depth test, so the reliefs are drawn after them
-            for layer in [layer for layer in self.viewer.layers if RELIEF in layer.metadata]:
-                self.viewer.layers.move(self.viewer.layers.index(layer), len(self.viewer.layers))
-        else:
-            for flat in sheets.values():
-                flat.visible = False
-
-    def _show_sheet(self, layer, flat, shown: bool) -> None:
-        """Set the eye of an image layer's flat picture, making the picture on its first showing."""
-        if flat is None and shown:
-            self.viewer.layers.insert(self.viewer.layers.index(layer) + 1, sheet(layer))
-        elif flat is not None:
-            flat.opacity = layer.opacity
-            flat.visible = shown
-            if shown:
-                # a Surface switched on under async slicing keeps its last slice, so it is sliced here
-                flat.set_view_slice()
-                flat.events.set_data()
-
-    def _flat_eye(self, event) -> None:
-        """In the 3D view an image layer's eye shows its flat picture; the layer itself stays hidden."""
-        layer = event.source
-        if self._switching or self.viewer.dims.ndisplay != 3 or not layer.visible or layer.ndim != 2:
-            return
-        sheets = {flat.metadata[SHEET]: flat for flat in self.viewer.layers if SHEET in flat.metadata}
-        self._switching = True
-        try:
-            layer.metadata.setdefault(FLAT_EYE, True)
-            self._show_sheet(layer, sheets.get(layer.name), True)
+            self.viewer.add_layer(layer)
             layer.visible = False
-        finally:
-            self._switching = False
-
-    def _set_three(self, three: bool) -> None:
-        """Switch between the flat and the 3D view."""
-        self.viewer.dims.ndisplay = 3 if three else 2
-
-    def _relief_eye(self, event) -> None:
-        """A relief's eye switches the view, once napari has set every eye it is changing."""
-        if not self._switching:
-            QTimer.singleShot(0, self._follow_reliefs)
-
-    def _follow_reliefs(self) -> None:
-        """The 3D view while any relief's eye is on, the flat view when all are off."""
-        reliefs = [layer for layer in self.viewer.layers if RELIEF in layer.metadata]
-        if reliefs:
-            self._set_three(any(layer.visible for layer in reliefs))
-
-    def _drop_orphans(self) -> None:
-        """Remove the flat pictures whose image layer is gone."""
-        names = {layer.name for layer in self.viewer.layers}
-        for layer in [layer for layer in self.viewer.layers if layer.metadata.get(SHEET, "") not in names | {""}]:
-            self.viewer.layers.remove(layer)
 
     def _load_meshes(self, animal: str) -> None:
         """Add each mesh stored for the animal, in the H&E frame, with its named edges at a fixed screen width."""
@@ -1133,25 +946,16 @@ class SlideList(QWidget):
 
     def _place(self, layer) -> None:
         """Lay the view's turn over a layer's own placement."""
-        import numpy as np
-
-        turn = turned(self._angle)
-        if layer.ndim == 3:  # a relief turns in its row and col axes, the height stays
-            turn = np.block([[np.eye(1), np.zeros((1, 3))], [np.zeros((3, 1)), turn]])
-        layer.affine = turn @ layer.metadata[BASE_AFFINE]
+        layer.affine = turned(self._angle) @ layer.metadata[BASE_AFFINE]
 
     def _place_new(self, event) -> None:
         """Keep a new layer's own placement, then turn it with the view."""
         layer = event.value
-        if isinstance(layer, Image):
-            layer.events.visible.connect(self._flat_eye)
-        if layer.ndim not in (2, 3):  # the turn is in the row and col axes of a flat layer or a relief
+        if layer.ndim != 2:  # the turn is 2D; anything else is left as it comes
             return
         layer.metadata[BASE_AFFINE] = layer.affine.affine_matrix.copy()
         if self._angle:
             self._place(layer)
-        if isinstance(layer, Image) and self.viewer.dims.ndisplay == 3:
-            QTimer.singleShot(0, self._show_reliefs)  # once its loader has set its eye
 
     def _replace(self) -> None:
         """Drop the open layers and show the selected block on its own."""
