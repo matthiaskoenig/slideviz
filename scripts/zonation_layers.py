@@ -85,8 +85,7 @@ def measure(job: tuple) -> dict:
     lobules = np.where(within, expand_labels(basins, round(HOLE_UM / land.um_per_px)), 0)
     border = borders(lobules)
 
-    scored = land.usable if land.usable.any() else land.solid
-    low, high = (float(v) for v in np.percentile(land.field[scored], (LOW_PCT, HIGH_PCT)))
+    low, high = (float(v) for v in np.percentile(land.field[land.usable], (LOW_PCT, HIGH_PCT)))
     offset = (land.block - 1) / 2 * um
     meta = {
         "slide": stem,
