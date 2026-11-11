@@ -6,7 +6,7 @@ import json
 import logging
 from pathlib import Path
 
-from napari.layers import Surface, Vectors
+from napari.layers import Image, Surface, Vectors
 from napari.qt.threading import thread_worker
 from napari.utils.colormaps import Colormap
 from qtpy.QtCore import Qt, QTimer
@@ -132,6 +132,20 @@ MESH_EDGES = "slideviz_mesh_edges"  # metadata key of a mesh's named edge layer
 # a flat view needs no depth test; with one, layers on the same plane can hide each other's lines
 MESH_BLENDING = "translucent_no_depth"
 
+# scripts/zonation_layers.py output beside the predictions, per DAB slide: the CYP2E1 landscape and its lobule borders
+LOBULES_SUFFIX = "_lobules.npz"
+LANDSCAPE_NAME = "landscape"
+BORDERS_NAME = "lobule borders"
+RELIEF_NAME = "landscape 3D"
+LANDSCAPE_RGB = ((255, 250, 220), (120, 50, 5))  # the landscape from its low to its high end, pale to brown
+RELIEF_COLOURS = Colormap([[c / 255 for c in rgb] + [1.0] for rgb in LANDSCAPE_RGB], name="cyp2e1 relief")
+BORDER_COLOURS = Colormap([[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]], interpolation="zero", name="lobule borders")
+LANDSCAPE_OPACITY = 0.8
+RELIEF_UM = 500.0  # height of the landscape's high value in the 3D view
+RELIEF_ANGLES = (0.0, 40.0, 0.0)  # camera angles the 3D view starts at with a relief: tilted, lit from the front
+RELIEF_STRIDE = 2  # the relief uses every 2nd landscape pixel
+RELIEF = "slideviz_relief"  # metadata key of a landscape relief layer, shown in the 3D view only
+
 # Filter label to the column it restricts
 FILTERS = {"Species": "species", "Stain": "stain", "Dose": "dose_mg_per_kg"}
 
@@ -250,6 +264,55 @@ def mesh_layers(fields_path: Path, animal: str) -> list:
     ]
 
 
+def relief(landscape, low: float, high: float, um: float, offset: float) -> tuple:
+    """The landscape as a height surface: corners (height 0 to 1, row um, col um), triangles and the corners' values."""
+    import numpy as np
+
+    field = landscape[::RELIEF_STRIDE, ::RELIEF_STRIDE]
+    rows, cols = np.nonzero(np.isfinite(field))
+    number = np.full(field.shape, -1, np.int64)
+    number[rows, cols] = np.arange(len(rows))
+    values = field[rows, cols]
+    # heights stay below 1: in the flat view napari draws the triangles whose corners' whole-number heights are 0
+    height = np.clip((values - low) / (high - low), 0, 0.999)
+    step = RELIEF_STRIDE * um
+    corners = np.stack([height, rows * step + offset, cols * step + offset], axis=1).astype(np.float32)
+    a, b, c, d = number[:-1, :-1], number[:-1, 1:], number[1:, :-1], number[1:, 1:]
+    whole = (a >= 0) & (b >= 0) & (c >= 0) & (d >= 0)
+    a, b, c, d = a[whole], b[whole], c[whole], d[whole]
+    return corners, np.concatenate([np.stack([a, b, d], axis=1), np.stack([a, d, c], axis=1)]), values
+
+
+def lobule_layers(path: Path, animal: str, stain: str, sha256: str | None) -> list:
+    """One stored landscape as layers: the landscape, its lobule borders, and the landscape as a relief for 3D."""
+    import numpy as np
+
+    with np.load(path) as stored:
+        if sha256 is not None and str(stored["nonrigid_sha256"]) != sha256:
+            raise ValueError("measured on another registration")
+        landscape, border = stored["landscape"], stored["border"]
+        um, offset = float(stored["um_per_px"]), float(stored["offset_um"])
+        low, high = float(stored["low"]), float(stored["high"])
+    tissue = np.isfinite(landscape)
+    share = np.clip((np.where(tissue, landscape, low) - low) / (high - low), 0, 1)[..., None]
+    pale, brown = (np.array(rgb, float) for rgb in LANDSCAPE_RGB)
+    # drawn as colours, clear outside the tissue
+    shown = np.dstack([pale + share * (brown - pale), np.where(tissue, 255, 0)]).round().astype(np.uint8)
+    # landscape pixel (r, c) is centred at offset + (r, c) * um in the H&E frame
+    placed = {"scale": (um, um), "translate": (offset, offset), "units": "um", "interpolation2d": "nearest",
+              "blending": MESH_BLENDING}
+    name = stain_name(stain)
+    return [
+        Image(shown, name=layer_name(animal, f"{name} {LANDSCAPE_NAME}"), rgb=True, opacity=LANDSCAPE_OPACITY,
+              **placed),
+        Image(border, name=layer_name(animal, BORDERS_NAME), colormap=BORDER_COLOURS, contrast_limits=(0, 1),
+              **placed),
+        Surface(relief(landscape, low, high, um, offset), name=layer_name(animal, f"{name} {RELIEF_NAME}"),
+                scale=(RELIEF_UM, 1.0, 1.0), units="um", colormap=RELIEF_COLOURS, contrast_limits=(low, high),
+                shading="smooth", metadata={RELIEF: True}),
+    ]
+
+
 @thread_worker
 def placed_maps(maps: list[tuple[Path, list[tuple[int, int]], float, str]]):
     """Each necrosis map on its H&E slide's pyramid level it is shown on, off the UI thread, with its layer name."""
@@ -352,6 +415,7 @@ class SlideList(QWidget):
             turn.addWidget(control)
         self.viewer.layers.events.inserted.connect(self._place_new)
         self.viewer.camera.events.zoom.connect(self._fit_mesh_edges)
+        self.viewer.dims.events.ndisplay.connect(self._show_reliefs)
 
         layout = QVBoxLayout(self)  # passing self installs it as this widget's layout
         layout.addLayout(filters)
@@ -761,6 +825,42 @@ class SlideList(QWidget):
                 visible=False,
             )
 
+    def _load_lobules(self, slides: list) -> None:
+        """Add the stored landscape, lobule borders and relief of each DAB slide, on its H&E partner's grid."""
+        directory = settings.predictions_dir()
+        if directory is None or not directory.is_dir():
+            return
+        for row in slides:
+            path = directory / f"{slide_stem(row)}{LOBULES_SUFFIX}"
+            if row["stain"] not in DAB_STAINS or not path.exists():
+                continue
+            registration = self._registration(row)
+            sha256 = registration.nonrigid.sha256 if registration and registration.nonrigid else None
+            try:
+                layers = lobule_layers(path, animal_name(row["serial_block"], row["substance"]), row["stain"], sha256)
+            except (OSError, ValueError, KeyError) as exc:
+                log.exception("could not load lobules %s", path)
+                self.status.setText(f"{path.name}: {type(exc).__name__}: {exc}")
+                continue
+            for layer in layers:
+                # under async slicing (view.py) napari slices a Surface layer only when it is added visible
+                self.viewer.add_layer(layer)
+                layer.visible = False
+        self._show_reliefs()
+
+    def _show_reliefs(self, event=None) -> None:
+        """Show each landscape relief in the 3D view and hide it in the flat view."""
+        three = self.viewer.dims.ndisplay == 3
+        reliefs = [layer for layer in self.viewer.layers if RELIEF in layer.metadata]
+        for layer in reliefs:
+            layer.visible = three
+            if three:
+                # a Surface switched on under async slicing keeps its last slice, so it is sliced here
+                layer.set_view_slice()
+                layer.events.set_data()
+        if three and reliefs and event is not None:
+            self.viewer.camera.angles = RELIEF_ANGLES
+
     def _load_meshes(self, animal: str) -> None:
         """Add each mesh stored for the animal, in the H&E frame, with its named edges at a fixed screen width."""
         directory = settings.meshes_dir()
@@ -840,6 +940,7 @@ class SlideList(QWidget):
             self._set_busy(False)
             # CYP2E1 first, so the see-through necrosis lies on top and their overlap mixes
             self._load_readouts(slides)
+            self._load_lobules(slides)
             self._load_meshes(animal)
             self._load_necrosis(animal, state["he"])
             log.info("opened %s", block_title(slides[0]))
@@ -905,12 +1006,17 @@ class SlideList(QWidget):
 
     def _place(self, layer) -> None:
         """Lay the view's turn over a layer's own placement."""
-        layer.affine = turned(self._angle) @ layer.metadata[BASE_AFFINE]
+        import numpy as np
+
+        turn = turned(self._angle)
+        if layer.ndim == 3:  # a relief turns in its row and col axes, the height stays
+            turn = np.block([[np.eye(1), np.zeros((1, 3))], [np.zeros((3, 1)), turn]])
+        layer.affine = turn @ layer.metadata[BASE_AFFINE]
 
     def _place_new(self, event) -> None:
         """Keep a new layer's own placement, then turn it with the view."""
         layer = event.value
-        if layer.ndim != 2:  # the turn is 2D; anything else is left as it comes
+        if layer.ndim not in (2, 3):  # the turn is in the row and col axes of a flat layer or a relief
             return
         layer.metadata[BASE_AFFINE] = layer.affine.affine_matrix.copy()
         if self._angle:
