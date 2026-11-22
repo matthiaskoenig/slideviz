@@ -1,4 +1,4 @@
-"""CYP2E1-positive area and its gradient on the H&E grid, split by the necrosis map."""
+"""DAB-positive area of each stained slide and its gradient on the H&E grid, split by the necrosis map."""
 
 from __future__ import annotations
 
@@ -111,7 +111,7 @@ def readout(rgb: np.ndarray, glass: np.ndarray, outline: np.ndarray, um_per_px: 
 
 
 def measure(job: tuple) -> dict:
-    """One CYP2E1 slide: readout and gradient on its H&E partner's grid, raw and optionally flattened."""
+    """One DAB slide: readout and gradient on its H&E partner's grid, raw and optionally flattened."""
     cyp_stem, slides, calls, out, flattened, provenance = job
     side = read_sidecar(slides, cyp_stem)
     registration = Registration.model_validate(side["registration"])
@@ -119,8 +119,8 @@ def measure(job: tuple) -> dict:
     if field is None:
         raise RuntimeError(f"{cyp_stem}: no valid non-rigid field")
 
-    he_info, he = open_slide(slides / f"{registration.reference}.ome.tiff")
-    cyp_info, cyp = open_slide(slides / f"{cyp_stem}.ome.tiff")
+    he_info, he = open_slide(slides / read_sidecar(slides, registration.reference)["file"])
+    cyp_info, cyp = open_slide(slides / side["file"])
     he_shapes = [level.shape[:2] for level in he]
     warped = nonrigid_levels(cyp, he_shapes, registration, field, he_info.pixel_size_um)
     index = pick_level_um([level.shape for level in he], he_info.pixel_size_um, WORK_UM)
@@ -191,7 +191,7 @@ def panel(image: np.ndarray) -> Image.Image:
 
 
 def write_sheet(results: list[dict], path: Path) -> None:
-    """One PNG: raw CYP2E1 on the H&E grid beside its gradient map, for every slide."""
+    """One PNG: the raw DAB slide on the H&E grid beside its gradient map, for every slide."""
     rows = math.ceil(len(results) / COLUMNS)
     sheet = Image.new("RGB", (COLUMNS * 2 * PANEL_PX, rows * (PANEL_PX + CAPTION_PX)), "white")
     draw = ImageDraw.Draw(sheet)
@@ -207,10 +207,35 @@ def write_sheet(results: list[dict], path: Path) -> None:
     sheet.save(path)
 
 
+def necrosis_map(directory: Path, row: dict) -> Path:
+    """A necrosis run's call map for one record row: named by its slide, or by its animal in the older mouse runs."""
+    path = directory / f"{row['slide']}_necrosis.npz"
+    if path.exists() or not row.get("animal"):
+        return path
+    return directory / f"{row['animal']}_necrosis.npz"
+
+
+def chosen_slides(slides: Path, stains: list[str], blocks: list[str] | None) -> dict[str, dict]:
+    """Sidecars by stem of the included slides in `slides` with one of the stains and a stem containing a block."""
+    found = {}
+    for path in slides.glob("*.json"):
+        stem = path.name.removesuffix(".json").removesuffix(".ome")
+        sidecar = json.loads(path.read_text())
+        # run records and the stain reference sit beside the slides; slide sidecars name their file
+        if not isinstance(sidecar, dict) or "file" not in sidecar:
+            continue
+        if (sidecar.get("stain") in stains and not sidecar.get("excluded")
+                and (not blocks or any(block in stem for block in blocks))):
+            found[stem] = sidecar
+    return dict(sorted(found.items()))
+
+
 def main() -> None:
-    """Measure every CYP2E1 slide in --slides and write maps, numbers and settings."""
+    """Measure every slide of the given DAB stains in --slides and write maps, numbers and settings."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--slides", type=Path, required=True)
+    parser.add_argument("--stain", nargs="+", default=["cyp2e1"], dest="stains",
+                        help="the sidecars' stains, e.g. cyp1a2 hmgb1; all go into one run record")
     parser.add_argument("--necrosis", type=Path, help="necrosis_slides.py output: the necrosis map per H&E slide")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--blocks", nargs="*", help="only stems containing one of these")
@@ -224,23 +249,31 @@ def main() -> None:
     calls, necrosis_run = {}, None
     if args.necrosis:
         necrosis_run = json.loads((args.necrosis / NECROSIS_RECORD).read_text())
-        calls = {row["slide"]: args.necrosis / f"{row['animal']}_necrosis.npz" for row in necrosis_run["slides"]}
+        calls = {row["slide"]: necrosis_map(args.necrosis, row) for row in necrosis_run["slides"]}
         if missing := [str(path) for path in calls.values() if not path.exists()]:
             raise SystemExit("necrosis maps listed but missing:\n  " + "\n  ".join(missing))
 
     code = code_version(Path(__file__))
     settings = ({name: getattr(dab, name) for name in DAB_SETTINGS}
                 | {name: getattr(tissue, name) for name in TISSUE_SETTINGS})
-    jobs = []
-    for path in sorted(args.slides.glob("*_cyp2e1.ome.tiff")):
-        stem = path.name.removesuffix(".ome.tiff")
-        if args.blocks and not any(block in stem for block in args.blocks):
+    chosen = chosen_slides(args.slides, args.stains, args.blocks)
+    if not chosen:
+        raise SystemExit(f"no {', '.join(args.stains)} slides in {args.slides}")
+    jobs, problems = [], []
+    for stem, side in chosen.items():
+        if not side.get("registration"):
+            problems.append(f"{stem}: not registered")
             continue
-        reference = read_sidecar(args.slides, stem)["registration"]["reference"]
+        # the H&E partner is the registration's reference, an H&E of the same block
+        reference = side["registration"]["reference"]
+        partner = read_sidecar(args.slides, reference)
+        if partner.get("stain") != "he" or partner.get("serial_block") != side.get("serial_block"):
+            problems.append(f"{stem}: registered to {reference}, not an H&E of block {side.get('serial_block')}")
+            continue
         jobs.append((stem, args.slides, calls.get(reference), args.out, args.flattened,
                      {"code": code, "settings": settings}))
-    if not jobs:
-        raise SystemExit(f"no CYP2E1 slides in {args.slides}")
+    if problems:
+        raise SystemExit("cannot measure:\n  " + "\n  ".join(problems))
     if args.flattened:
         missing = [job[0] for job in jobs if not (args.slides / FLATTEN_DIR / f"{job[0]}_flatten.npz").exists()]
         if missing:
@@ -253,6 +286,7 @@ def main() -> None:
         "written": datetime.now(UTC).isoformat(timespec="seconds"),
         "code": code,
         "slides": str(args.slides),
+        "stains": args.stains,
         "necrosis": {"maps": str(args.necrosis), "written": necrosis_run["written"], "code": necrosis_run["code"],
                      "split": "necrotic where most of the map's measured pixels in a working pixel are necrotic"}
         if necrosis_run is not None else None,
