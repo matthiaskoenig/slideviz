@@ -4,10 +4,11 @@ A rotation sweep over the tissue outlines fixes the pose to within a degree,
 ~100 um at the slide edge; maximising gradient correlation refines it from there.
 Scale is held at 1.0, the size two sections off one block share.
 
-Runs in this folder's venv. Writes transforms.json, the schema
-slideviz.data.registration.from_valis_run reads, and outline_error.csv.
+Runs in the slideviz venv and reads every format slideviz.io.reader knows. Writes
+transforms.json, the schema slideviz.data.registration.from_valis_run reads, and
+outline_error.csv.
 
-    uv run python outline_register.py <slides_dir> <out_dir> --reference <name>
+    uv run python registration/outline_register.py <slides_dir> <out_dir> --reference <name>
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from functools import cache
 from pathlib import Path
 
 import numpy as np
@@ -32,56 +34,49 @@ MAX_SHIFT_PX = 60  # the range the outline pose lands in
 ANGLE_WINDOW_DEG = 4.0
 
 
+@cache
+def open_cached(path: Path) -> tuple:
+    """The slide's (info, zoom levels) from slideviz.io.reader, opened once per process."""
+    from slideviz.io.reader import open_slide
+
+    return open_slide(path)
+
+
 def full_size(path: Path) -> tuple[int, int]:
     """The slide's full-resolution (width, height)."""
-    import pyvips
-
-    image = pyvips.Image.new_from_file(str(path), page=0)
-    return image.width, image.height
+    info, _ = open_cached(path)
+    return info.width, info.height
 
 
 def pyramid_level(path: Path, target: float) -> tuple[int, int]:
-    """The deepest SubIFD at least `target` px wide and its width; -1 and the full width for level 0."""
-    import pyvips
-
-    width, _ = full_size(path)
-    level, level_width = -1, width
-    for candidate in range(16):
-        try:
-            probe = pyvips.Image.new_from_file(str(path), page=0, subifd=candidate)
-        except pyvips.Error:
+    """The deepest zoom level at least `target` px wide and its width; 0 is full resolution."""
+    _, levels = open_cached(path)
+    level = 0
+    for candidate, array in enumerate(levels):
+        if array.shape[1] < target:
             break
-        if probe.width < target:
-            break
-        level, level_width = candidate, probe.width
-    return level, level_width
+        level = candidate
+    return level, levels[level].shape[1]
 
 
-def read_level(path: Path, downsample: float) -> np.ndarray:
-    """A greyscale view of a slide shrunk by `downsample`, its three one-band pages averaged."""
-    import pyvips
+def read_rgb(path: Path, downsample: float) -> np.ndarray:
+    """An RGB view of a slide shrunk by `downsample`, resized with pyvips' Lanczos 3 and gap 2."""
+    from PIL import Image
 
     width, _ = full_size(path)
     target = width / downsample
     level, level_width = pyramid_level(path, target)
+    rgb = np.asarray(open_cached(path)[1][level].compute(scheduler="synchronous"))
+    if level_width > target:
+        scale = target / level_width
+        size = (int(level_width * scale + 0.5), int(rgb.shape[0] * scale + 0.5))
+        rgb = np.asarray(Image.fromarray(rgb).resize(size, Image.LANCZOS, reducing_gap=2.0))
+    return rgb
 
-    channels = []
-    for page in range(3):
-        try:
-            image = pyvips.Image.new_from_file(str(path), page=page, subifd=level)
-        except pyvips.Error:
-            break
-        if image.width != level_width:  # a thumbnail page, so the channels ended
-            break
-        if image.width > target:
-            image = image.resize(target / image.width)
-        data = np.ndarray(buffer=image.write_to_memory(), dtype=np.uint8,
-                          shape=[image.height, image.width, image.bands])
-        channels.append(data[..., :3].mean(axis=-1) if data.shape[-1] >= 3
-                        else data[..., 0])
 
-    smallest = min(c.shape for c in channels)
-    return np.mean([c[:smallest[0], :smallest[1]] for c in channels], axis=0)
+def read_level(path: Path, downsample: float) -> np.ndarray:
+    """A greyscale view of a slide shrunk by `downsample`, its three channels averaged."""
+    return read_rgb(path, downsample).mean(axis=-1)
 
 
 def shared_downsample(paths, edge_px: int) -> float:
@@ -216,9 +211,10 @@ def main() -> None:
     parser.add_argument("--reference", required=True, help="the fixed slide's filename")
     args = parser.parse_args()
 
+    from slideviz.io.reader import BACKENDS, suffix_of
+
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    slides = sorted(p for p in args.slide_dir.iterdir()
-                    if p.name.endswith((".ome.tiff", ".tiff", ".tif", ".ndpi")))
+    slides = sorted(p for p in args.slide_dir.iterdir() if suffix_of(p) in BACKENDS)
     reference = args.slide_dir / args.reference
     moving_slides = [p for p in slides if p != reference]
     if not reference.exists() or not moving_slides:
@@ -266,14 +262,12 @@ def main() -> None:
                     args.out_dir / f"{moving_path.name.split('.')[0]}_overlap.png")
 
         # the pose is in shrunk pixels, the stored matrix in full resolution
-        import pyvips
-
-        fixed_image = pyvips.Image.new_from_file(str(reference), n=1)
-        moving_image = pyvips.Image.new_from_file(str(moving_path), n=1)
-        to_full = np.diag([fixed_image.width / fixed_pose.shape[1],
-                           fixed_image.height / fixed_pose.shape[0], 1.0])
-        from_full = np.diag([moving_pose.shape[1] / moving_image.width,
-                             moving_pose.shape[0] / moving_image.height, 1.0])
+        fixed_width, fixed_height = full_size(reference)
+        moving_width, moving_height = full_size(moving_path)
+        to_full = np.diag([fixed_width / fixed_pose.shape[1],
+                           fixed_height / fixed_pose.shape[0], 1.0])
+        from_full = np.diag([moving_pose.shape[1] / moving_width,
+                             moving_pose.shape[0] / moving_height, 1.0])
         full = to_full @ matrix @ from_full
 
         name = moving_path.name.split(".")[0]
@@ -285,7 +279,7 @@ def main() -> None:
             "matrix": full.tolist(),
             # a rotation and a shift, so exactly affine
             "residual_px": 0.0,
-            "slide_shape_rc": [moving_image.height, moving_image.width],
+            "slide_shape_rc": [moving_height, moving_width],
             "outline_dice": final_dice,
         }
         scores[name] = score
