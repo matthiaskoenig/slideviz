@@ -5,6 +5,7 @@ block, its H&E is the reference, and every other slide not marked excluded is
 registered onto it. A block with no H&E, several, or nothing else is reported and skipped.
 A slide file no sidecar names, or a sidecar without serial_block or stain, is reported,
 the rest is registered, and the run exits 1, as it does when nothing was registered.
+Pairs posed on one piece (outline_register.py) are listed at the end for a check by eye.
 
 Works on copies. The run directory gets links to the slides and copies of their
 sidecars, and the transforms go into those copies, so the source set stays as it is
@@ -57,6 +58,8 @@ NONRIGID_INPUT = "haematoxylin"
 RIGID_METHOD = (f"outline rigid (slideviz): rotation sweep of the tissue outlines at "
                 f"{POSE_EDGE_PX} px, gradient correlation refine at "
                 f"{' then '.join(str(e) for e in REFINE_EDGES_PX)} px, scale held at 1")
+ANCHOR_METHOD = ("whole outline failed the check, so posed on its best-fitting piece (piece Dice "
+                 "{:.4f}) and refined on the whole slide; the pair rests on serial_block alone")
 
 
 def check_geometry(matrix) -> str | None:
@@ -189,6 +192,11 @@ def rigid(reference: str, slide: str, sidecars: dict[str, dict], run: Path, code
     implausible = check_geometry(registration.matrix)
     if implausible:
         raise RuntimeError(f"rigid: {implausible}")
+    entry = json.loads((out / "transforms.json").read_text())["slides"][slide]
+    anchor = {}
+    if "anchor_dice" in entry:
+        anchor = {"anchor_dice": round(entry["anchor_dice"], 4)}
+        registration.method = f"{RIGID_METHOD}; {ANCHOR_METHOD.format(anchor['anchor_dice'])}"
     write_to_sidecars(registrations, run / "slides")
 
     matrix = np.array(registration.matrix)
@@ -198,6 +206,7 @@ def rigid(reference: str, slide: str, sidecars: dict[str, dict], run: Path, code
         "angle_deg": round(float(np.degrees(np.arctan2(matrix[1, 0], matrix[0, 0]))), 3),
         "scale": round(float(np.sqrt(abs(np.linalg.det(matrix[:2, :2])))), 4),
         "outline_dice": round(registration.outline_dice, 4),
+        **anchor,
         "correlation": round(correlation, 4),
     }
 
@@ -346,11 +355,18 @@ def main() -> None:
         if "failed" in row:
             print(f"{row['slide']:{width}s} FAILED: {row['failed']}")
             continue
+        marker = f"  anchored, piece {row['anchor_dice']:.4f}" if "anchor_dice" in row else ""
         print(f"{row['slide']:{width}s} {row['angle_deg']:9.2f} {row['scale']:7.4f} "
-              f"{row['outline_dice']:7.4f} {row['median_um']:6.1f} µm {row['p95_um']:5.1f} µm")
+              f"{row['outline_dice']:7.4f} {row['median_um']:6.1f} µm {row['p95_um']:5.1f} µm"
+              f"{marker}")
     failed = sum("failed" in row for row in rows)
     print(f"\n{len(rows) - failed} of {len(rows)} slides registered, record in "
           f"{run / 'pipeline.json'}")
+    anchored = [row["slide"] for row in rows if "anchor_dice" in row]
+    if anchored:
+        print("posed on one piece, so check by eye that each pair belongs together:")
+        for slide in anchored:
+            print(f"  {run / 'rigid' / slide / f'{slide}_overlap.png'}")
     if skipped:
         print(f"skipped, see above: {', '.join(skipped)}")
     if in_no_block:

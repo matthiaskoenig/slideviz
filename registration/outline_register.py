@@ -4,6 +4,13 @@ A rotation sweep over the tissue outlines fixes the pose to within a degree,
 ~100 um at the slide edge; maximising gradient correlation refines it from there.
 Scale is held at 1.0, the size two sections off one block share.
 
+A pair whose whole outline fails the outline check starts from one piece instead: the
+largest moving piece that a reference piece fits at the check's Dice, upright beating
+mirrored, sets the starting pose, the refine runs on the whole slide as for every pair,
+and the pair registers when that piece pair still overlaps at the check's Dice. Lobes of
+different rats fit each other at piece Dice up to 0.95 as well, so an anchored pair's
+identity rests on serial_block from the sorting alone.
+
 Runs in the slideviz venv and reads every format slideviz.io.reader knows. Writes
 transforms.json, the schema slideviz.data.registration.from_valis_run reads, and
 outline_error.csv.
@@ -23,15 +30,25 @@ import numpy as np
 from scipy.ndimage import binary_fill_holes
 from scipy.optimize import minimize
 from skimage.filters import sobel
+from skimage.measure import label, regionprops
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-from slideviz.analysis.outline import SWAP_XY, align, outline_qc, warp_mask
+from slideviz.analysis.outline import (
+    MIN_DICE,
+    SWAP_XY,
+    align,
+    best_rotation,
+    outline_qc,
+    warp_mask,
+)
 
 POSE_EDGE_PX = 400  # a sweep takes seconds at this size
 REFINE_EDGES_PX = (400, 800)
 
 MAX_SHIFT_PX = 60  # the range the outline pose lands in
 ANGLE_WINDOW_DEG = 4.0
+
+ANCHOR_SHARE = 0.25  # pieces down to this share of their slide's largest one can anchor the pose
 
 
 @cache
@@ -183,6 +200,34 @@ def pose_from_outline(fixed_mask: np.ndarray, moving_mask: np.ndarray):
     return report, matrix
 
 
+def pieces(mask: np.ndarray) -> list[np.ndarray]:
+    """The mask's pieces as masks of its full frame, largest first, down to ANCHOR_SHARE of the largest."""
+    labelled = label(mask)
+    regions = sorted(regionprops(labelled), key=lambda region: -region.area)
+    return [labelled == region.label for region in regions
+            if region.area >= ANCHOR_SHARE * regions[0].area]
+
+
+def cropped(mask: np.ndarray) -> np.ndarray:
+    """The mask cut to its bounding box."""
+    rows, cols = np.nonzero(mask)
+    return mask[rows.min(): rows.max() + 1, cols.min(): cols.max() + 1]
+
+
+def pose_from_piece(fixed_mask: np.ndarray, moving_mask: np.ndarray):
+    """The largest moving piece a fixed piece fits at MIN_DICE, upright beating mirrored, as (fixed piece, moving piece, angle, sweep Dice, matrix in mask pixels); None if none fits."""
+    fixed_pieces = pieces(fixed_mask)
+    for moving_piece in pieces(moving_mask):
+        fits = [(best_rotation(cropped(piece), cropped(moving_piece)), piece)
+                for piece in fixed_pieces]
+        (angle, score, _, mirrored), fixed_piece = max(fits, key=lambda fit: fit[0][1])
+        if score >= MIN_DICE and score > mirrored:
+            matrix, _ = align(fixed_piece, moving_piece, fixed_mask.shape, moving_mask.shape,
+                              angle=angle)
+            return fixed_piece, moving_piece, angle, score, matrix
+    return None
+
+
 def mask_dice(fixed_mask: np.ndarray, moving_mask: np.ndarray, matrix) -> float:
     """Dice of the fixed outline and the moving one warped by `matrix`, in the mask's own pixel grid."""
     warped = warp_mask(moving_mask, matrix, fixed_mask.shape)
@@ -237,8 +282,15 @@ def main() -> None:
               f"sharpness {report.sharpness:.4f}, {report.verdict}")
         for note in report.notes:
             print(f"    ! {note}")
+        anchor = None
         if not report.ok:
-            sys.exit("  the pair fails outline QC; not registering it")
+            anchor = pose_from_piece(fixed_mask, moving_mask)
+            if anchor is None:
+                sys.exit("  the pair fails outline QC and no piece fits; not registering it")
+            fixed_piece, moving_piece, angle, sweep_dice, matrix = anchor
+            pixel_um = open_cached(moving_path)[0].pixel_size_um * pose_ds
+            print(f"  anchored on a {moving_piece.sum() * pixel_um**2 / 1e6:.1f} mm2 piece: "
+                  f"angle {angle:.2f} deg, piece dice {sweep_dice:.4f}")
 
         # coarse to fine, each level improving on the one before
         for edge_px in REFINE_EDGES_PX:
@@ -282,6 +334,13 @@ def main() -> None:
             "slide_shape_rc": [moving_height, moving_width],
             "outline_dice": final_dice,
         }
+        if anchor is not None:
+            anchor_dice = mask_dice(fixed_piece, moving_piece, matrix)
+            print(f"  final anchor piece dice {anchor_dice:.4f}")
+            if anchor_dice < MIN_DICE:
+                sys.exit(f"  the refine leaves the anchor pieces at dice {anchor_dice:.4f}, "
+                         f"below {MIN_DICE:.2f}; not registering it")
+            entries[name]["anchor_dice"] = anchor_dice
         scores[name] = score
         print(f"  scale {float(np.sqrt(abs(np.linalg.det(full[:2, :2])))):.4f}")
 
