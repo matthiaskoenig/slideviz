@@ -35,7 +35,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
-from nonrigid_register import EDGE_PX, code_version
+from nonrigid_register import GRID_UM, code_version
 from outline_register import POSE_EDGE_PX, REFINE_EDGES_PX
 
 from slideviz.data.registration import (
@@ -202,12 +202,12 @@ def rigid(reference: str, slide: str, sidecars: dict[str, dict], run: Path, code
     }
 
 
-def nonrigid(slide: str, run: Path, edge: int) -> dict:
+def nonrigid(slide: str, run: Path, grid_um: float) -> dict:
     """Compute the DeepFlow field on the new matrix and attach it to the sidecar copy."""
     fields = run / "nonrigid"
     run_script(SLIDEVIZ_PYTHON, ["nonrigid_register.py", "inputs", slide,
                                  "--slides", str(run / "slides"), "--out", str(fields),
-                                 "--edge", str(edge), "--input", NONRIGID_INPUT],
+                                 "--grid-um", str(grid_um), "--input", NONRIGID_INPUT],
                fields / f"{slide}_inputs_log.txt")
     run_script(REGISTRATION_PYTHON, ["nonrigid_register.py", "flow", slide, "--out", str(fields)],
                fields / f"{slide}_log.txt")
@@ -226,14 +226,14 @@ def set_aside(names: list[str], run: Path, into: str = "failed") -> None:
 
 
 def register_slide(reference: str, slide: str, sidecars: dict[str, dict], source: Path,
-                   run: Path, code: str, edge: int) -> dict:
+                   run: Path, code: str, grid_um: float) -> dict:
     """Both steps for one slide of a block, as one row of the run record."""
     start = time.time()
     row = {"block": sidecars[slide]["serial_block"], "slide": slide, "reference": reference}
     try:
         prepare(reference, slide, sidecars, source, run)
         row.update(rigid(reference, slide, sidecars, run, code))
-        row.update(nonrigid(slide, run, edge))
+        row.update(nonrigid(slide, run, grid_um))
     except Exception as exc:  # noqa: BLE001, any failure is this slide's, recorded in its row
         row["failed"] = f"{type(exc).__name__}: {exc}"
         set_aside([slide], run)
@@ -243,10 +243,10 @@ def register_slide(reference: str, slide: str, sidecars: dict[str, dict], source
 
 
 def register_block(sidecars: dict[str, dict], source: Path, run: Path, code: str,
-                   edge: int) -> list[dict]:
+                   grid_um: float) -> list[dict]:
     """Every slide of one block onto its H&E, as rows of the run record."""
     reference = reference_of(sidecars)
-    rows = [register_slide(reference, slide, sidecars, source, run, code, edge)
+    rows = [register_slide(reference, slide, sidecars, source, run, code, grid_um)
             for slide in sorted(sidecars) if slide != reference]
     if all("failed" in row for row in rows):
         set_aside([reference], run)
@@ -279,8 +279,8 @@ def main() -> None:
     parser.add_argument("--slides", type=Path, required=True,
                         help="slides with their sidecars, named <stem>.json or <stem>.ome.json")
     parser.add_argument("--out", type=Path, required=True, help="run directory")
-    parser.add_argument("--edge", type=int, default=EDGE_PX,
-                        help="longest edge of the non-rigid grid in px")
+    parser.add_argument("--grid-um", type=float, default=GRID_UM,
+                        help="pixel size of the non-rigid grid in um")
     parser.add_argument("--jobs", type=int, default=1, help="blocks registered at once")
     parser.add_argument("--allow-dirty", action="store_true",
                         help="run with uncommitted changes, for tests; the recorded commit "
@@ -324,14 +324,14 @@ def main() -> None:
 
     print(f"{len(blocks)} blocks, code {code}, into {run}", flush=True)
     this_run = {"started": now(), "host": socket.gethostname(), "command": sys.argv,
-                "code": code, "source": str(source), "edge_px": args.edge,
+                "code": code, "source": str(source), "grid_um": args.grid_um,
                 "blocks": list(blocks), "skipped": skipped, "excluded": excluded,
                 "in_no_block": in_no_block}
     run.mkdir(parents=True, exist_ok=True)
     set_aside(sorted(excluded), run, "excluded")
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         rows = [row for block_rows in pool.map(
-            lambda b: register_block(blocks[b], source, run, code, args.edge), blocks)
+            lambda b: register_block(blocks[b], source, run, code, args.grid_um), blocks)
             for row in block_rows]
     this_run["finished"] = now()
     if code_version() != code:

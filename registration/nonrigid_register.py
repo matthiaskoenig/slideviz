@@ -25,11 +25,10 @@ from outline_register import (
     open_cached,
     read_level,
     read_rgb,
-    shared_downsample,
     tissue_mask,
 )
 
-EDGE_PX = 2048  # longest edge of the DeepFlow grid, ~4 um/px on a mouse slide
+GRID_UM = 4.5  # pixel size of the DeepFlow grid in um
 MIN_AGREEMENT = 0.99  # own resampling against VALIS's warped image
 INPUTS = {"density": "tissue density", "haematoxylin": "haematoxylin channel"}
 
@@ -79,7 +78,7 @@ def haematoxylin(rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
                     0).astype(np.uint8)
 
 
-def inputs(slide: str, slides: Path, out: Path, edge: int,
+def inputs(slide: str, slides: Path, out: Path, grid_um_target: float,
            source: str = "haematoxylin") -> Path:
     """Write the DeepFlow inputs of a registered slide: its reference, and it on its matrix."""
     from slideviz.data.registration import read_sidecar
@@ -90,7 +89,7 @@ def inputs(slide: str, slides: Path, out: Path, edge: int,
     moving_path = slides / read_sidecar(slides, slide)["file"]
     matrix = np.array(registration["matrix"], float)
 
-    downsample = shared_downsample([fixed_path, moving_path], edge)
+    downsample = max(1.0, grid_um_target / um_per_px(fixed_path))
     grid_um = um_per_px(fixed_path) * downsample
 
     fixed_grey = read_level(fixed_path, downsample)
@@ -110,7 +109,7 @@ def inputs(slide: str, slides: Path, out: Path, edge: int,
     out.mkdir(parents=True, exist_ok=True)
     path = out / f"{slide}_input.npz"
     np.savez_compressed(path, fixed=fixed, moving=moving, mask=mask, matrix=matrix,
-                        grid_um_per_px=grid_um, reference=reference, source=source, edge=edge)
+                        grid_um_per_px=grid_um, reference=reference, source=source)
     return path
 
 
@@ -124,7 +123,6 @@ def flow(slide: str, out: Path) -> dict:
         fixed, moving, mask = stored["fixed"], stored["moving"], stored["mask"]
         matrix, grid_um = stored["matrix"], float(stored["grid_um_per_px"])
         reference, source = str(stored["reference"]), str(stored["source"])
-        edge = int(stored["edge"])
 
     start = time.time()
     warped, _grid, dxdy = OpticalFlowWarper().register(
@@ -138,7 +136,7 @@ def flow(slide: str, out: Path) -> dict:
 
     shift_um = np.hypot(*dxdy)[mask] * grid_um
     method = (f"valis-{valis.__version__} OpticalFlowWarper (DeepFlow), {INPUTS[source]} "
-              f"input at {edge} px, after the sidecar matrix")
+              f"input at {grid_um:.2f} um/px, after the sidecar matrix")
     summary = {
         "slide": slide,
         "reference": reference,
@@ -176,7 +174,7 @@ def main() -> None:
     parser.add_argument("--slides", type=Path,
                         help="inputs: slides and sidecars, the registered ones with a matrix")
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--edge", type=int, default=EDGE_PX, help="longest edge in px")
+    parser.add_argument("--grid-um", type=float, default=GRID_UM, help="DeepFlow grid pixel size in um")
     parser.add_argument("--input", choices=tuple(INPUTS), default="haematoxylin",
                         help="haematoxylin: the counterstain both slides carry, DAB split off; "
                              "density: inverted grey inside the tissue")
@@ -187,7 +185,7 @@ def main() -> None:
     refused = []
     for slide in args.slide:
         if args.step == "inputs":
-            print(f"{slide}: {inputs(slide, args.slides, args.out, args.edge, args.input)}")
+            print(f"{slide}: {inputs(slide, args.slides, args.out, args.grid_um, args.input)}")
             continue
         try:
             s = flow(slide, args.out)
