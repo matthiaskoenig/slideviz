@@ -33,7 +33,7 @@ from skimage.morphology import disk
 
 VIEW_UM = 7.0  # resolution the fit reads; the nearest pyramid level is used
 GRID_UM = 28.0  # field grid, about four view pixels
-DAB_STAINS = ("cyp2e1", "cyp1a2")
+DAB_STAINS = ("cyp2e1", "cyp1a2", "gs", "cyp2d6", "cyp3a4")
 FLATTEN_DIR = "flatten"  # beside the slides, holding <stem>_flatten.npz
 CHANNELS = (0, 1, 2)  # skimage hed order: haematoxylin, eosin (residual on DAB slides), DAB
 
