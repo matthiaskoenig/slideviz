@@ -7,11 +7,11 @@
 With --stain-reference, each tile's colours are matched onto the reference's target before the encoder (Reinhard
 in LAB), from the slide's statistics in the reference, or from a fixed sample of its tiles when it is not listed.
 Every tile passes the frozen encoder once, its patch descriptions are rounded to half precision as the training
-ones were and scored, and each pixel's map value is the mean of the scores of the tiles covering it. A training
-slide is scored by the head fitted without its animal; a slide outside training (another animal or species) by
-the mean of every head's score, against the mean of their cutoffs. The descriptions (about 90 GB a slide) are
-discarded after scoring. Each head used must first reproduce its stored training scores bit for bit. Tiles must
-match the training tiles in pixel size and edge in um within TILE_TOLERANCE.
+ones were and scored on the CPU while the GPU embeds the next batch, and each pixel's map value is the mean of the
+scores of the tiles covering it. A training slide is scored by the head fitted without its animal; a slide outside
+training (another animal or species) by the mean of every head's score, against the mean of their cutoffs. The
+descriptions (about 90 GB a slide) are discarded after scoring. Each head used must first reproduce its stored
+training scores bit for bit. Tiles must match the training tiles in pixel size and edge in um within TILE_TOLERANCE.
 """
 
 from __future__ import annotations
@@ -19,6 +19,8 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -41,6 +43,7 @@ from train_necrosis import code_version
 from train_patch_head import CHUNK, patch_score  # check_head scores by this chunk
 
 TILE_TOLERANCE = 0.05  # relative; rat level 1 is 0.4546 um/px, the mouse training tiles' 0.4421
+QUEUE = 2  # batches copied off the GPU and waiting for the scoring thread
 
 
 def score(patches: np.ndarray, part: np.ndarray, heads: np.lib.npyio.NpzFile, k: int) -> np.ndarray:
@@ -187,19 +190,34 @@ def main() -> None:
     top, left, shape, size = map_frame(rows)
     total, count = np.zeros(shape, np.float64), np.zeros(shape, np.uint16)
     expand = pixel_patch(size, grid[0])
-    start, done = time.time(), 0
-    with torch.inference_mode():
+
+    def add_batch(ready: torch.cuda.Event, patches: torch.Tensor, index: torch.Tensor) -> None:
+        """Score one batch once its copy has arrived and add its tiles onto the map, in manifest order."""
+        ready.synchronize()
+        for i, patch_scores in zip(index.tolist(), slide_scores(patches.numpy(), heads, chosen), strict=True):
+            y, x = rows[i]["y"] - top, rows[i]["x"] - left
+            total[y:y + size, x:x + size] += patch_scores[np.ix_(expand, expand)]
+            count[y:y + size, x:x + size] += 1
+
+    start, done, pending = time.time(), 0, deque()
+    # one scoring thread adds the batches onto the map in loader order
+    with torch.inference_mode(), ThreadPoolExecutor(max_workers=1) as scorer:
         for batch, index in loader:
             tokens = encoder.forward_features(batch.to(args.device, dtype=DTYPE, non_blocking=True))
-            # rounded to half precision as embed_tiles.py --patches stores the training descriptions
-            patches = tokens[:, prefix:].reshape(len(batch), *grid, dim).to(PATCH_DTYPE).cpu().numpy()
-            for i, patch_scores in zip(index.tolist(), slide_scores(patches, heads, chosen), strict=True):
-                y, x = rows[i]["y"] - top, rows[i]["x"] - left
-                total[y:y + size, x:x + size] += patch_scores[np.ix_(expand, expand)]
-                count[y:y + size, x:x + size] += 1
+            # rounded to half precision as embed_tiles.py --patches stores the training descriptions, widened to
+            # float32 and copied into pinned memory without waiting for the GPU
+            patches = (tokens[:, prefix:].reshape(len(batch), *grid, dim).to(PATCH_DTYPE).float()
+                       .to("cpu", non_blocking=True))
+            ready = torch.cuda.Event()
+            ready.record(torch.cuda.current_stream(args.device))
+            if len(pending) == QUEUE:
+                pending.popleft().result()
+            pending.append(scorer.submit(add_batch, ready, patches, index))
             done += len(batch)
             if done % (args.batch * 40) < args.batch or done == len(rows):
                 print(f"  {done:>8,}/{len(rows):,}  {done / (time.time() - start):.0f} tiles/s", flush=True)
+        for job in pending:
+            job.result()
 
     seen = count > 0
     mean = mean_map(total, count)
