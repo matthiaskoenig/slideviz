@@ -93,8 +93,11 @@ READOUT_SUFFIX = "_readout.npz"
 # that run's per-slide numbers, beside the maps; a rerun is added under a dated name, and the newest is shown
 READOUT_RECORDS = "cyp2e1_readout*.json"
 
-# necrosis_slides.py output beside the predictions: the necrosis map per animal and the run's areas
+# necrosis_slides.py output beside the predictions: the necrosis map per slide or animal and the run's areas
 NECROSIS_SUFFIX = "_necrosis.npz"
+
+# the runs' area records; a rerun is added under a dated name, and the newest record holding a slide is shown
+NECROSIS_RECORDS = f"{Path(NECROSIS_RECORD).stem}*.json"
 
 # the share of necrotic tissue that is DAB positive is shown from this much necrosis on, as reported
 NECROTIC_SHOWN_PCT = 5.0
@@ -287,7 +290,7 @@ class SlideList(QWidget):
         self.directory = str(directory.resolve()) if directory else None
         self._stain = None  # read on first use, then kept
         self._readout = None  # the readout run's numbers, read on first use, then kept
-        self._necrosis_areas = None  # the necrosis run's areas per animal, read on first use, then kept
+        self._necrosis_areas = None  # the necrosis runs' areas per slide and animal, read on first use, then kept
         self._map_worker = None  # the necrosis map being placed on the H&E pyramid
         # level shapes of the block's reference slide, the grid a non-rigid layer is drawn on
         self._reference_shapes: list[tuple[int, int]] = []
@@ -534,21 +537,27 @@ class SlideList(QWidget):
         return self._readout
 
     def _necrosis_record(self) -> dict:
-        """The necrosis run's areas per slide and per animal, each with the run's date, read once and kept."""
+        """Areas per slide and per animal from the newest necrosis run record holding each, with its date, read once."""
         if self._necrosis_areas is None:
             self._necrosis_areas = {}
             directory = settings.predictions_dir()
-            path = directory / NECROSIS_RECORD if directory is not None else None
-            if path is not None and path.exists():
+            paths = sorted(directory.glob(NECROSIS_RECORDS)) if directory is not None and directory.is_dir() else []
+            records = []
+            for path in paths:
                 try:
                     record = json.loads(path.read_text())
-                    for row in record["slides"]:
-                        # rows name their slide; the mouse runs' rows name their animal, None outside training
-                        for key in (row.get("slide"), row.get("animal")):
-                            if key:
-                                self._necrosis_areas.setdefault(key, row | {"written": record["written"]})
-                except (OSError, ValueError, KeyError) as exc:
+                    written, rows = record["written"], record["slides"]
+                    if not isinstance(written, str) or not all(isinstance(row, dict) for row in rows):
+                        raise ValueError("'written' is not text or 'slides' holds no rows")
+                    records.append((written, rows))
+                except (OSError, ValueError, KeyError, TypeError) as exc:
                     log.warning("unreadable necrosis record %s: %s", path, exc)
+            for written, rows in sorted(records, key=lambda r: r[0], reverse=True):
+                for row in rows:
+                    # rows name their slide; the mouse runs' rows name their animal, None outside training
+                    for key in (row.get("slide"), row.get("animal")):
+                        if key:
+                            self._necrosis_areas.setdefault(key, row | {"written": written})
         return self._necrosis_areas
 
     def _readout_lines(self, slides: list) -> list[str]:
