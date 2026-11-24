@@ -3,6 +3,12 @@
     uv run python predict_slide_patches.py --heads <train_patch_head.py output> \
         --embeddings <its training cache> --tiles <export_field_tiles.py --slide output> \
         --out <dir> --device cuda:0 [--stain-reference <stain_stats.py output>]
+    HF_HUB_CACHE=<model>/hf HF_HUB_OFFLINE=1 uv run python predict_slide_patches.py --heads <model folder> \
+        --tiles <...> --out <dir> --device cuda:0
+
+A model folder (model.json beside heads.npz, built by make_model_folder.py) needs no training cache: the tile
+geometry and encoder settings come from model.json, heads.npz must match its recorded sha256, every slide is scored
+as outside training, and its stain_reference.json is used unless --stain-reference names another.
 
 With --stain-reference, each tile's colours are matched onto the reference's target before the encoder (Reinhard
 in LAB), from the slide's statistics in the reference, or from a fixed sample of its tiles when it is not listed.
@@ -17,6 +23,7 @@ training scores bit for bit. Tiles must match the training tiles in pixel size a
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import time
 from collections import deque
@@ -81,8 +88,13 @@ def check_head(heads: np.lib.npyio.NpzFile, k: int, animal: str, train_patches: 
 
 
 def load_heads(heads_dir: Path) -> tuple[np.lib.npyio.NpzFile, dict, list[str], dict]:
-    """The heads, their results record, their animal names and the pixel size and tile edge in um of their labels."""
+    """The heads, their results record (or model.json), their animal names and the pixel size and tile edge in um of
+    their labels."""
     heads = np.load(heads_dir / "heads.npz")
+    if (heads_dir / "model.json").exists():
+        model = json.loads((heads_dir / "model.json").read_text())
+        tile = model["tile"]
+        return heads, model, heads["animals"].tolist(), {"um_per_px": tile["um_per_px"], "tile_um": tile["tile_um"]}
     results = json.loads((heads_dir / "patch_head_results.json").read_text())
     geometry = json.loads((Path(results["inputs"]["labels"]) / "patch_labels_meta.json").read_text())["geometry"]
     um_per_px = float(np.median(list(geometry["um_per_px"].values())))
@@ -126,8 +138,10 @@ def pixel_patch(size_px: int, grid: int) -> np.ndarray:
 def main() -> None:
     """Check the slide's head, embed and score every tile, average onto the slide, and write the map."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--heads", type=Path, required=True, help="train_patch_head.py output")
-    parser.add_argument("--embeddings", type=Path, required=True, help="the training cache the heads were fitted on")
+    parser.add_argument("--heads", type=Path, required=True,
+                        help="train_patch_head.py output, or a model folder (model.json beside heads.npz)")
+    parser.add_argument("--embeddings", type=Path, default=None,
+                        help="the training cache the heads were fitted on; not needed with a model folder")
     parser.add_argument("--tiles", type=Path, required=True, help="export_field_tiles.py --slide output, one slide")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--device", default="cuda:0")
@@ -138,7 +152,16 @@ def main() -> None:
     args = parser.parse_args()
 
     heads, results, names, trained = load_heads(args.heads)
-    train_meta = json.loads((args.embeddings / "embeddings_meta.json").read_text())
+    folder = (args.heads / "model.json").exists()
+    if folder:
+        train_meta = {"input_px": results["input_px"], "stain_matched": results["stain_matched_training"],
+                      "patches": {"dtype": results["patch_dtype"]}}
+        if args.stain_reference is None and (args.heads / "stain_reference.json").exists():
+            args.stain_reference = args.heads / "stain_reference.json"
+    elif args.embeddings is None:
+        raise SystemExit(f"{args.heads} is no model folder (no model.json), so --embeddings is needed")
+    else:
+        train_meta = json.loads((args.embeddings / "embeddings_meta.json").read_text())
     manifest = json.loads((args.tiles / "manifest.json").read_text())
     rows = manifest["tiles"]
     ((_, geometry),) = manifest["fields"].items()
@@ -155,13 +178,19 @@ def main() -> None:
     if out.exists():
         raise SystemExit(f"{out} exists; give a new --out")
 
-    animal = training_animal(train_meta, slide)
+    animal = None if folder else training_animal(train_meta, slide)
     chosen = [names.index(animal)] if animal is not None else list(range(len(names)))
     cutoff = float(np.mean(heads["cutoff"][chosen]))
-    train_patches = np.load(args.embeddings / "patches.npy", mmap_mode="r")
-    train_animals = np.array((args.embeddings / "animals.txt").read_text().split())
-    stored = np.load(args.heads / "patch_scores.npy", mmap_mode="r")
-    check = {names[k]: check_head(heads, k, names[k], train_patches, train_animals, stored) for k in chosen}
+    if folder:
+        found = hashlib.sha256((args.heads / "heads.npz").read_bytes()).hexdigest()
+        if found != results["files"]["heads.npz"]:
+            raise SystemExit(f"{args.heads / 'heads.npz'} differs from the sha256 in model.json")
+        check = {"heads_sha256": found}
+    else:
+        train_patches = np.load(args.embeddings / "patches.npy", mmap_mode="r")
+        train_animals = np.array((args.embeddings / "animals.txt").read_text().split())
+        stored = np.load(args.heads / "patch_scores.npy", mmap_mode="r")
+        check = {names[k]: check_head(heads, k, names[k], train_patches, train_animals, stored) for k in chosen}
     head = (f"heads.npz index {chosen[0]}, fitted without {animal}" if animal is not None else
             f"mean score of all {len(chosen)} heads in heads.npz, the slide being outside training; "
             "cutoff the mean of theirs")
@@ -172,7 +201,9 @@ def main() -> None:
         stain = {"reference": str(args.stain_reference), "target": target,
                  "source": per_slide[slide] if listed else tile_stats(args.tiles, rows),
                  "source_from": "the reference" if listed else "a sample of this slide's tiles"}
-    print(f"=== {slide}: {head}; {len(chosen)} head(s) reproduce their stored scores bit for bit; "
+    checked = ("heads.npz matches model.json" if folder else
+               f"{len(chosen)} head(s) reproduce their stored scores bit for bit")
+    print(f"=== {slide}: {head}; {checked}; "
           f"{len(rows):,} tiles; {'stain matched, statistics from ' + stain['source_from'] if stain else 'raw'} ===",
           flush=True)
 
@@ -239,8 +270,9 @@ def main() -> None:
         "called_share_of_covered": round(float((mean[seen] >= cutoff).mean()), 4),
         "seconds": round(time.time() - start, 1),
         "map": "per level pixel, the mean patch score of every tile covering it; NaN where none does",
-        "inputs": {"heads": str(args.heads), "heads_code": str(heads["code"]), "heads_written": results["written"],
-                   "embeddings": str(args.embeddings), "tiles": str(args.tiles),
+        "inputs": {"heads": str(args.heads), "heads_code": str(heads["code"]),
+                   "heads_written": results.get("written") or results.get("built"),
+                   "embeddings": str(args.embeddings) if args.embeddings else None, "tiles": str(args.tiles),
                    "tiles_written": manifest["written"], "device": args.device, "batch": args.batch,
                    "cudnn_tf32": torch.backends.cudnn.allow_tf32, "torch": torch.__version__,
                    "timm": timm.__version__},

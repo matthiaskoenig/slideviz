@@ -9,6 +9,11 @@ Writes into <out> only. A rerun into the same <out> skips the work already done.
    other formats are listed as skipped, slides with a broken header as unreadable. --check stops here.
 2. Registration: every other stain onto the H&E of its animal and lobe (registration/pipeline.py: outline rigid, then
    DeepFlow non-rigid) into registration/, its log in registration.log. Blocks with a record are not run again.
+3. Necrosis map on every H&E: tiles (scripts/export_field_tiles.py, CPU, several slides at once), the map on the next
+   free GPU (ml/predict_slide_patches.py with the --model folder, colour matched onto its stain reference, the encoder
+   from its hf/ cache with downloads off), the tiles removed; then the calls and areas (scripts/necrosis_slides.py)
+   once every H&E has a map. necrosis/maps/, necrosis/calls/ (necrosis_slides.json), a log per slide in
+   necrosis/logs/. Finished maps and calls are kept on a rerun.
 """
 
 from __future__ import annotations
@@ -18,9 +23,12 @@ import csv
 import json
 import logging
 import os
+import queue
 import re
+import shutil
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -44,6 +52,12 @@ SKIP = (".", "@", "#")
 PIXEL_UM = (0.05, 5.0)
 REPO = Path(__file__).resolve().parents[2]
 REGISTRATION = REPO / "registration" / "pipeline.py"
+TILES = REPO / "scripts" / "export_field_tiles.py"
+CALLS = REPO / "scripts" / "necrosis_slides.py"
+ML = REPO / "ml"
+# the shared model folder on gpu1 (copy on the NAS: image.analysis/slideviz_models/)
+MODEL = Path(os.environ.get("SLIDEVIZ_MODEL", "/data/slideviz/models/necrosis_map_2026-11-22"))
+NECROSIS_RECORD = "necrosis_slides.json"
 TABLE = ["original_name", "stem", "dose_mg_per_kg", "animal", "lobe", "stain", "pixel_size_um", "width", "height",
          "scenes", "status", "source_path"]
 
@@ -181,7 +195,7 @@ def overview(rows: list[dict]) -> list[str]:
 
 
 def main() -> None:
-    """Run the steps in order: the slide list, then (without --check) the registration."""
+    """Run the steps in order: the slide list, then (without --check) the registration and the necrosis map."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("folder", type=Path, help=f"slides named {PATTERN}, e.g. {EXAMPLE}")
     parser.add_argument("--species", required=True, choices=[s.value for s in Species])
@@ -191,6 +205,11 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=8, help="headers read at once")
     parser.add_argument("--jobs", type=int, default=max(1, min(10, (os.cpu_count() or 8) // 8)),
                         help="blocks registered at once (default: one per 8 cores, at most 10)")
+    parser.add_argument("--model", type=Path, default=MODEL,
+                        help=f"necrosis model folder (default {MODEL}, or SLIDEVIZ_MODEL)")
+    parser.add_argument("--gpus", type=int, default=None, help="GPUs used for the necrosis map (default: all)")
+    parser.add_argument("--tile-jobs", type=int, default=max(1, min(16, (os.cpu_count() or 16) // 16)),
+                        help="slides cut into tiles at once (default: one per 16 cores, at most 16)")
     parser.add_argument("--check", action="store_true", help="stop after the slide list")
     args = parser.parse_args()
     log.setup()
@@ -208,6 +227,107 @@ def main() -> None:
         logger.info("--check: stopped after the slide list")
         return
     register(ok, out, args.jobs)
+    necrosis(ok, out, args.model.resolve(), args.gpus, args.tile_jobs)
+
+
+def gpu_devices(limit: int | None) -> list[int]:
+    """Torch device numbers of the GPUs to use: CUDA_VISIBLE_DEVICES when set, else every GPU nvidia-smi lists."""
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible is not None:
+        count = len([v for v in visible.split(",") if v.strip()])
+    else:
+        try:
+            listed = subprocess.run(["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
+                                    capture_output=True, text=True, check=True).stdout
+        except (OSError, subprocess.CalledProcessError):
+            return []
+        count = len(listed.split())
+    return list(range(count if limit is None else min(limit, count)))
+
+
+def run_quiet(command: list[str], log_path: Path, cwd: Path, env: dict | None = None) -> int:
+    """Run a command with its output into log_path only; its exit code."""
+    with log_path.open("a") as log_file:
+        log_file.write(f"\n=== {datetime.now(UTC).isoformat(timespec='seconds')}  {' '.join(command)}\n")
+        log_file.flush()
+        return subprocess.run(command, cwd=cwd, stdout=log_file, stderr=subprocess.STDOUT, env=env,
+                              check=False).returncode
+
+
+def necrosis_one(stem: str, out: Path, model: Path, slots: queue.Queue, env: dict) -> str:
+    """Tiles, the map on the next free GPU, then the tiles removed, for one H&E; a status line."""
+    base = out / "necrosis"
+    tiles, maps, logs = base / "tiles" / stem, base / "maps", base / "logs"
+    if (maps / f"{stem}_patch_slide.npz").exists():
+        shutil.rmtree(tiles, ignore_errors=True)
+        return f"{stem}: map kept"
+    start = time.time()
+    if not (tiles / "manifest.json").exists():
+        shutil.rmtree(tiles, ignore_errors=True)
+        command = [sys.executable, str(TILES), "--slides", str(out / "slides"), "--out", str(tiles), "--slide", stem]
+        code = run_quiet(command, logs / f"tiles_{stem}.log", REPO)
+        if code:
+            return f"{stem}: tiles FAILED (exit {code}), see {logs / f'tiles_{stem}.log'}"
+    gpu = slots.get()
+    try:
+        command = ["uv", "run", "--no-sync", "python", "predict_slide_patches.py", "--heads", str(model),
+                   "--tiles", str(tiles), "--out", str(maps), "--device", f"cuda:{gpu}"]
+        code = run_quiet(command, logs / f"map_{stem}.log", ML, env)
+    finally:
+        slots.put(gpu)
+    if code:
+        return f"{stem}: map FAILED (exit {code}), see {logs / f'map_{stem}.log'}"
+    shutil.rmtree(tiles, ignore_errors=True)
+    return f"{stem}: map done ({time.time() - start:.0f} s, cuda:{gpu})"
+
+
+def necrosis(ok: list[dict], out: Path, model: Path, gpus: int | None, tile_jobs: int) -> None:
+    """Step 3: the necrosis map on every H&E, then the calls and areas once every H&E has a map."""
+    stems = sorted(r["stem"] for r in ok if r["stain"] == Stain.HE.value)
+    base = out / "necrosis"
+    calls = base / "calls"
+    logger.info("step 3, necrosis map: %d H&E slides", len(stems))
+    if (calls / NECROSIS_RECORD).exists():
+        logger.info("necrosis: calls kept, %s", calls / NECROSIS_RECORD)
+        return
+    if not (model / "model.json").exists():
+        logger.error("no model folder at %s (model.json missing); give --model or set SLIDEVIZ_MODEL", model)
+        return
+    devices = gpu_devices(gpus)
+    if not devices:
+        logger.error("no GPU found (nvidia-smi); the necrosis map needs one")
+        return
+    env = {**os.environ, "HF_HUB_OFFLINE": "1"}
+    if (model / "hf").is_dir():
+        env["HF_HUB_CACHE"] = str(model / "hf")
+    (base / "logs").mkdir(parents=True, exist_ok=True)
+    check = run_quiet(["uv", "run", "python", "-c", "import torch, timm"], base / "logs" / "env_check.log", ML, env)
+    if check:
+        logger.error("the ml environment cannot import torch and timm; see %s", base / "logs" / "env_check.log")
+        return
+    slots: queue.Queue = queue.Queue()
+    for device in devices:
+        slots.put(device)
+    logger.info("necrosis: %d GPUs, %d slides cut into tiles at once, model %s", len(devices), tile_jobs, model)
+    with ThreadPoolExecutor(max(1, tile_jobs)) as pool:
+        jobs = [pool.submit(necrosis_one, stem, out, model, slots, env) for stem in stems]
+        for k, job in enumerate(jobs, 1):
+            logger.info("  %d/%d %s", k, len(stems), job.result())
+    missing = [s for s in stems if not (base / "maps" / f"{s}_patch_slide.npz").exists()]
+    if missing:
+        logger.warning("necrosis: %d H&E without a map (%s); calls wait until every H&E has one, rerun to retry",
+                       len(missing), ", ".join(missing))
+        return
+    command = [sys.executable, str(CALLS), "--slides", str(out / "slides"), "--maps", str(base / "maps"),
+               "--out", str(calls), "--workers", str(max(1, min(len(stems), (os.cpu_count() or 8) // 16)))]
+    code = run_quiet(command, base / "logs" / "calls.log", REPO)
+    if code:
+        logger.error("necrosis calls exited %d; see %s", code, base / "logs" / "calls.log")
+        shutil.rmtree(calls, ignore_errors=True)
+        return
+    rows = json.loads((calls / NECROSIS_RECORD).read_text())["slides"]
+    logger.info("necrosis: %d slides, necrotic share of tissue %.1f to %.1f %%; %s", len(rows),
+                100 * min(r["area_E"] for r in rows), 100 * max(r["area_E"] for r in rows), calls / NECROSIS_RECORD)
 
 
 def run_logged(command: list[str], log_path: Path, cwd: Path) -> int:
