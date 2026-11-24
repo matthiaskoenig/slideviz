@@ -1,11 +1,14 @@
-"""Run a set of slides named <dose>mg_<animal>_<lobe>_<stain>.<format> through the pipeline; step 1: the slide list.
+"""Run a set of slides named <dose>mg_<animal>_<lobe>_<stain>.<format> through the pipeline, every step in order.
 
-    uv run slideviz-run <folder> --species mouse --substance apap --out <run folder>
+    uv run slideviz-run <folder> --species mouse --substance apap --out <run folder> [--check]
 
-Step 1 reads every file name and header under <folder> (subfolders too), prints one row per animal and lobe with the
-stains found, and writes into <out> only: slides/ (a link and a sidecar per readable slide, named by stem), slides.tsv
-(one row per file with its status) and slides.json (the run record). A name that does not fit the pattern stops the
-run before anything is written; files in other formats are listed as skipped, slides with a broken header as unreadable.
+Writes into <out> only. A rerun into the same <out> skips the work already done.
+1. Slide list: every file name and header under <folder> (subfolders too), one row per animal and lobe with the stains
+   found; slides/ (a link and a sidecar per readable slide, named by stem), slides.tsv (one row per file with its
+   status), slides.json. A name that does not fit the pattern stops the run before anything is written; files in
+   other formats are listed as skipped, slides with a broken header as unreadable. --check stops here.
+2. Registration: every other stain onto the H&E of its animal and lobe (registration/pipeline.py: outline rigid, then
+   DeepFlow non-rigid) into registration/, its log in registration.log. Blocks with a record are not run again.
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
@@ -38,6 +42,8 @@ STAINS = [s.value for s in Stain]
 SKIP = (".", "@", "#")
 # scanner pixel sizes in um; a header outside this range holds no physical scale (e.g. 72 dpi)
 PIXEL_UM = (0.05, 5.0)
+REPO = Path(__file__).resolve().parents[2]
+REGISTRATION = REPO / "registration" / "pipeline.py"
 TABLE = ["original_name", "stem", "dose_mg_per_kg", "animal", "lobe", "stain", "pixel_size_um", "width", "height",
          "scenes", "status", "source_path"]
 
@@ -175,7 +181,7 @@ def overview(rows: list[dict]) -> list[str]:
 
 
 def main() -> None:
-    """Read the names and headers, print the overview, write the links, sidecars, table and record."""
+    """Run the steps in order: the slide list, then (without --check) the registration."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("folder", type=Path, help=f"slides named {PATTERN}, e.g. {EXAMPLE}")
     parser.add_argument("--species", required=True, choices=[s.value for s in Species])
@@ -183,6 +189,9 @@ def main() -> None:
     parser.add_argument("--modality", default=Modality.BRIGHTFIELD.value, choices=[m.value for m in Modality])
     parser.add_argument("--out", type=Path, required=True, help="run folder; nothing is written anywhere else")
     parser.add_argument("--workers", type=int, default=8, help="headers read at once")
+    parser.add_argument("--jobs", type=int, default=max(1, min(10, (os.cpu_count() or 8) // 8)),
+                        help="blocks registered at once (default: one per 8 cores, at most 10)")
+    parser.add_argument("--check", action="store_true", help="stop after the slide list")
     args = parser.parse_args()
     log.setup()
 
@@ -194,6 +203,58 @@ def main() -> None:
     if not TOKEN.fullmatch(args.substance):
         sys.exit(f"--substance '{args.substance}': lowercase letters, digits and hyphens only")
 
+    ok = slide_list(args, folder, out)
+    if args.check:
+        logger.info("--check: stopped after the slide list")
+        return
+    register(ok, out, args.jobs)
+
+
+def run_logged(command: list[str], log_path: Path, cwd: Path) -> int:
+    """Run a command with its output shown and added to log_path; its exit code."""
+    with log_path.open("a") as log_file:
+        log_file.write(f"\n=== {datetime.now(UTC).isoformat(timespec='seconds')}  {' '.join(command)}\n")
+        with subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                              bufsize=1) as process:
+            for line in process.stdout:
+                log_file.write(line)
+                log_file.flush()
+                print(line, end="", flush=True)
+    return process.returncode
+
+
+def recorded(path: Path) -> list[dict]:
+    """The slide rows of a registration run record, none when it does not exist."""
+    return json.loads(path.read_text()).get("slides", []) if path.exists() else []
+
+
+def register(ok: list[dict], out: Path, jobs: int) -> None:
+    """Register every block with one H&E and another stain that the run record does not hold yet."""
+    stains: dict[str, list[str]] = {}
+    for r in ok:
+        stains.setdefault(r["block"], []).append(r["stain"])
+    blocks = sorted(b for b, s in stains.items() if s.count(Stain.HE.value) == 1 and len(s) > 1)
+    record = out / "registration" / "pipeline.json"
+    done = {row["block"] for row in recorded(record)}
+    todo = [b for b in blocks if b not in done]
+    logger.info("step 2, registration: %d blocks, %d done before, %d to run", len(blocks), len(done & set(blocks)),
+                len(todo))
+    if todo:
+        command = [sys.executable, str(REGISTRATION), *todo, "--slides", str(out / "slides"),
+                   "--out", str(out / "registration"), "--jobs", str(jobs)]
+        code = run_logged(command, out / "registration.log", REPO)
+        if code:
+            logger.warning("the registration exited %d; see the lines above and %s", code, out / "registration.log")
+    rows = [row for row in recorded(record) if row["block"] in blocks]
+    failed = [row for row in rows if "failed" in row]
+    logger.info("registration: %d of %d slides registered, record %s", len(rows) - len(failed), len(rows), record)
+    for row in failed:
+        logger.warning("  %s: %s", row["slide"], row["failed"])
+
+
+def slide_list(args: argparse.Namespace, folder: Path, out: Path) -> list[dict]:
+    """Step 1: read the names and headers, print the overview, write the links, sidecars, table and record; the
+    readable slides."""
     files, failed = find_files(folder)
     rows = [parse(p) for p in files] + failed
     mark_clashes(rows, folder)
@@ -266,6 +327,7 @@ def main() -> None:
         for r in notes:
             logger.warning("  %s: %s", r["path"].relative_to(folder), r["status"])
     logger.info("written: %s/slides/ (links and sidecars), slides.tsv, slides.json", out)
+    return ok
 
 
 if __name__ == "__main__":
