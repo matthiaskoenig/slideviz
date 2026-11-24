@@ -14,6 +14,12 @@ Writes into <out> only. A rerun into the same <out> skips the work already done.
    from its hf/ cache with downloads off), the tiles removed; then the calls and areas (scripts/necrosis_slides.py)
    once every H&E has a map. necrosis/maps/, necrosis/calls/ (necrosis_slides.json), a log per slide in
    necrosis/logs/. Finished maps and calls are kept on a rerun.
+4. Readout: the relative DAB readout of every registered stained slide, split by the necrosis map
+   (scripts/cyp2e1_readout.py) into readout/, its log in readout.log; kept on a rerun once its record exists.
+5. Results: results.tsv, one row per dose, animal and lobe (tissue, necrotic share, each stain's positive share), and
+   results.png / results.pdf (necrotic share per dose and per lobe, each stain's positive share per dose).
+6. View: view/, every slide with its newest sidecar, the non-rigid fields and the maps as predictions/, for
+   slideviz-view --data <out>/view.
 """
 
 from __future__ import annotations
@@ -58,6 +64,11 @@ ML = REPO / "ml"
 # the shared model folder on gpu1 (copy on the NAS: image.analysis/slideviz_models/)
 MODEL = Path(os.environ.get("SLIDEVIZ_MODEL", "/data/slideviz/models/necrosis_map_2026-11-22"))
 NECROSIS_RECORD = "necrosis_slides.json"
+READOUT = REPO / "scripts" / "cyp2e1_readout.py"
+READOUT_RECORD = "cyp2e1_readout.json"
+# Okabe-Ito, readable with colour vision deficiency; markers tell lobes apart as well
+COLOURS = ["#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9", "#F0E442", "#000000"]
+MARKERS = ["o", "s", "^", "D", "v", "P", "X", "*"]
 TABLE = ["original_name", "stem", "dose_mg_per_kg", "animal", "lobe", "stain", "pixel_size_um", "width", "height",
          "scenes", "status", "source_path"]
 
@@ -195,7 +206,7 @@ def overview(rows: list[dict]) -> list[str]:
 
 
 def main() -> None:
-    """Run the steps in order: the slide list, then (without --check) the registration and the necrosis map."""
+    """Run every step in order; --check stops after the slide list."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("folder", type=Path, help=f"slides named {PATTERN}, e.g. {EXAMPLE}")
     parser.add_argument("--species", required=True, choices=[s.value for s in Species])
@@ -228,6 +239,137 @@ def main() -> None:
         return
     register(ok, out, args.jobs)
     necrosis(ok, out, args.model.resolve(), args.gpus, args.tile_jobs)
+    readout(ok, out)
+    results(ok, out)
+    view(ok, out)
+
+
+def readout(ok: list[dict], out: Path) -> None:
+    """Step 4: the relative DAB readout of every registered stained slide, split by the necrosis map."""
+    stains = sorted({r["stain"] for r in ok if r["stain"] != Stain.HE.value})
+    registered, target = out / "registration" / "slides", out / "readout"
+    if not stains or not registered.is_dir():
+        logger.info("step 4, readout: no registered stained slide")
+        return
+    if (target / READOUT_RECORD).exists():
+        logger.info("step 4, readout: kept, %s", target / READOUT_RECORD)
+        return
+    logger.info("step 4, readout of %s", ", ".join(stains))
+    command = [sys.executable, str(READOUT), "--slides", str(registered), "--stain", *stains, "--out", str(target),
+               "--workers", str(max(1, min(10, (os.cpu_count() or 8) // 16))), "--sheet",
+               str(target / "contact_sheet.png")]
+    calls = out / "necrosis" / "calls"
+    if (calls / NECROSIS_RECORD).exists():
+        command += ["--necrosis", str(calls)]
+    code = run_quiet(command, out / "readout.log", REPO)
+    if code:
+        logger.error("the readout exited %d; see %s", code, out / "readout.log")
+        return
+    measured = json.loads((target / READOUT_RECORD).read_text())["slides_measured"]
+    logger.info("readout: %d slides, %s", len(measured), target / READOUT_RECORD)
+
+
+def results(ok: list[dict], out: Path) -> None:
+    """Step 5: one row per dose, animal and lobe with the necrotic share and each stain's readout, and the figure."""
+    path = out / "necrosis" / "calls" / NECROSIS_RECORD
+    necrotic = {r["slide"]: r for r in json.loads(path.read_text())["slides"]} if path.exists() else {}
+    path = out / "readout" / READOUT_RECORD
+    measured = json.loads(path.read_text())["slides_measured"] if path.exists() else {}
+    registered = {row["slide"]: row for row in recorded(out / "registration" / "pipeline.json")}
+    blocks: dict[str, list[dict]] = {}
+    for r in ok:
+        blocks.setdefault(r["block"], []).append(r)
+    rows = []
+    for block, slides in sorted(blocks.items()):
+        row = {"dose_mg_per_kg": slides[0]["dose_mg_per_kg"], "animal": slides[0]["animal"],
+               "lobe": slides[0]["lobe"], "block": block, "tissue_mm2": None, "necrotic_pct": None}
+        for s in sorted(slides, key=lambda s: STAINS.index(s["stain"])):
+            if s["stain"] == Stain.HE.value:
+                if s["stem"] in necrotic:
+                    row["tissue_mm2"] = necrotic[s["stem"]]["tissue_mm2"]
+                    row["necrotic_pct"] = round(100 * necrotic[s["stem"]]["area_E"], 2)
+                continue
+            reg = registered.get(s["stem"], {})
+            row[f"{s['stain']}_registered"] = "failed" if "failed" in reg else "yes" if reg else "no"
+            row[f"{s['stain']}_positive_pct"] = measured.get(s["stem"], {}).get("positive_pct")
+            row[f"{s['stain']}_positive_surviving_pct"] = measured.get(s["stem"], {}).get("positive_surviving_pct")
+        rows.append(row)
+    columns = list(dict.fromkeys(key for row in rows for key in row))
+    with (out / "results.tsv").open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, columns, delimiter="\t", lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+    figure(rows, out)
+    logger.info("step 5, results: %d animal-lobe rows, %s and results.png / .pdf", len(rows), out / "results.tsv")
+
+
+def figure(rows: list[dict], out: Path) -> None:
+    """Necrotic share per dose and per lobe, and each stain's positive share per dose, as results.png and .pdf."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    doses = sorted({r["dose_mg_per_kg"] for r in rows})
+    lobes = sorted({r["lobe"] for r in rows})
+    stains = [k.removesuffix("_positive_pct") for k in rows[0] if k.endswith("_positive_pct")] if rows else []
+    necrotic = ("necrotic_pct", "necrotic share of tissue (%)")
+    panels = [(*necrotic, "dose"), (*necrotic, "lobe"),
+              *[(f"{s}_positive_pct", f"{s.upper()} positive share (%)", "dose") for s in stains]]
+    fig, axes = plt.subplots(1, len(panels), figsize=(4.2 * len(panels), 3.8), squeeze=False)
+    for ax, (key, label, by) in zip(axes[0], panels):
+        # x by dose with one series per lobe, or x by lobe with one series per dose
+        groups, series = (doses, lobes) if by == "dose" else (lobes, doses)
+        on_x, in_series = ("dose_mg_per_kg", "lobe") if by == "dose" else ("lobe", "dose_mg_per_kg")
+        for k, name in enumerate(series):
+            points = [r for r in rows if r[in_series] == name and r.get(key) is not None]
+            x = [groups.index(r[on_x]) + 0.08 * (k - (len(series) - 1) / 2) for r in points]
+            ax.scatter(x, [r[key] for r in points], marker=MARKERS[k % len(MARKERS)], s=28,
+                       color=COLOURS[k % len(COLOURS)], edgecolor="black", linewidth=0.4,
+                       label=name if by == "dose" else f"{name} mg/kg", zorder=3)
+        for g, group in enumerate(groups if by == "dose" else []):  # a mean per lobe would mix the doses
+            values = [r[key] for r in rows if r.get(key) is not None and r[on_x] == group]
+            if values:
+                ax.hlines(sum(values) / len(values), g - 0.3, g + 0.3, color="black", linewidth=1.2, zorder=2)
+        ax.set_xticks(range(len(groups)), [f"{g}" for g in groups])
+        ax.set_xlabel("dose (mg/kg)" if by == "dose" else "lobe")
+        ax.set_ylabel(label)
+        ax.spines[["top", "right"]].set_visible(False)
+    axes[0][0].legend(title="lobe", frameon=False, fontsize=8)
+    axes[0][1].legend(title="dose", frameon=False, fontsize=8)
+    fig.tight_layout()
+    for suffix in ("png", "pdf"):
+        fig.savefig(out / f"results.{suffix}", dpi=200)
+    plt.close(fig)
+
+
+def relink(path: Path, target: Path) -> None:
+    """Point path at target, replacing an older link and never a file."""
+    if path.is_symlink():
+        path.unlink()
+    elif path.exists():
+        raise SystemExit(f"{path} is a file, not a link; the view folder holds links and sidecar copies only")
+    path.symlink_to(target)
+
+
+def view(ok: list[dict], out: Path) -> None:
+    """Step 6: view/ with every slide, its newest sidecar, the non-rigid fields and the maps under predictions/."""
+    folder, registered = out / "view", out / "registration" / "slides"
+    (folder / "predictions").mkdir(parents=True, exist_ok=True)
+    for r in ok:
+        relink(folder / f"{r['stem']}{r['suffix']}", Path(r["source_path"]))
+        newest = registered / f"{r['stem']}.json"
+        source = newest if newest.exists() else out / "slides" / f"{r['stem']}.json"
+        (folder / f"{r['stem']}.json").write_text(source.read_text())
+    if (registered / "transforms").is_dir():
+        relink(folder / "transforms", registered / "transforms")
+    shown = [*sorted((out / "necrosis" / "calls").glob("*_necrosis.npz")),
+             *sorted((out / "necrosis" / "calls").glob(NECROSIS_RECORD)),
+             *sorted((out / "readout").glob("*_readout.npz")), *sorted((out / "readout").glob(READOUT_RECORD))]
+    for path in shown:
+        relink(folder / "predictions" / path.name, path)
+    logger.info("step 6, view: %d slides, %d maps and records; open with: uv run slideviz-view --data %s",
+                len(ok), len(shown), folder)
 
 
 def gpu_devices(limit: int | None) -> list[int]:
