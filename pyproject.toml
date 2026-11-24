@@ -38,6 +38,7 @@ dependencies = [
 [project.scripts]
 slideviz-view = "slideviz.ui.view:main"
 slideviz-index = "slideviz.data.catalog:main"
+slideviz-run = "slideviz.run:main"
 
 [project.urls]
 Repository = "https://github.com/matthiaskoenig/slideviz"
