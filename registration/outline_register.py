@@ -27,7 +27,7 @@ from functools import cache
 from pathlib import Path
 
 import numpy as np
-from scipy.ndimage import binary_fill_holes
+from scipy.ndimage import binary_dilation, binary_fill_holes
 from scipy.optimize import minimize
 from skimage.filters import sobel
 from skimage.measure import label, regionprops
@@ -47,6 +47,7 @@ REFINE_EDGES_PX = (400, 800)
 
 MAX_SHIFT_PX = 60  # the range the outline pose lands in
 ANGLE_WINDOW_DEG = 4.0
+TISSUE_RIM_PX = 3  # edges kept this far outside the tissue, so its own border counts
 
 ANCHOR_SHARE = 0.25  # pieces down to this share of their slide's largest one can anchor the pose
 
@@ -122,12 +123,19 @@ def tissue_mask(grey: np.ndarray) -> np.ndarray:
     return binary_fill_holes(mask)
 
 
-def gradient(grey: np.ndarray) -> np.ndarray:
-    """Edge magnitude, the representation shared across stains."""
+def edges(grey: np.ndarray) -> np.ndarray:
+    """Edge magnitude scaled to 0..1, the representation shared across stains."""
     inverted = 1.0 - grey.astype(float) / 255.0  # tissue bright, background dark
-    edges = sobel(inverted)
-    spread = edges.max() - edges.min()
-    return (edges - edges.min()) / spread if spread > 0 else np.zeros_like(edges)
+    found = sobel(inverted)
+    spread = found.max() - found.min()
+    return (found - found.min()) / spread if spread > 0 else np.zeros_like(found)
+
+
+def gradient(grey: np.ndarray) -> np.ndarray:
+    """Edges in the tissue and a TISSUE_RIM_PX rim around it; the scan border and other background edges are zero."""
+    found = edges(grey)
+    found[~binary_dilation(tissue_mask(grey), iterations=TISSUE_RIM_PX)] = 0.0
+    return found
 
 
 def _rigid_matrix(angle_deg: float, tx: float, ty: float, centre) -> np.ndarray:
@@ -152,9 +160,8 @@ def _warp(image: np.ndarray, matrix: np.ndarray, shape) -> np.ndarray:
     )
 
 
-def correlation(fixed: np.ndarray, moving: np.ndarray) -> float:
-    """Normalised cross-correlation over the pixels the warp actually covers."""
-    covered = moving > 0
+def correlation(fixed: np.ndarray, moving: np.ndarray, covered: np.ndarray) -> float:
+    """Normalised cross-correlation over the covered pixels."""
     # catches a warp that slid off the canvas
     if covered.sum() < 0.02 * covered.size:
         return 0.0
@@ -172,6 +179,7 @@ def refine(
     shape = (max(fixed.shape[0], moving.shape[0]), max(fixed.shape[1], moving.shape[1]))
     fixed_gradient = on_canvas(gradient(fixed), shape)
     moving_gradient = on_canvas(gradient(moving), shape)
+    moving_edges = on_canvas(edges(moving), shape)  # nonzero wherever the moving slide's warp covers the canvas
     centre = np.array(fixed.shape[::-1], float) / 2
 
     def corrected(parameters):
@@ -185,7 +193,8 @@ def refine(
         if abs(angle_deg) > window or max(abs(tx), abs(ty)) > MAX_SHIFT_PX:
             return 1.0  # outside the trust region
         warped = _warp(moving_gradient, corrected(parameters), shape)
-        return 1.0 - correlation(fixed_gradient, warped)
+        covered = _warp(moving_edges, corrected(parameters), shape) > 0
+        return 1.0 - correlation(fixed_gradient, warped, covered)
 
     result = minimize(cost, np.zeros(3), method="Powell",
                       options={"xtol": 0.01, "ftol": 1e-6, "maxiter": 2000})
