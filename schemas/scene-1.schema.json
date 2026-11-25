@@ -1,0 +1,136 @@
+{
+  "$defs": {
+    "LengthUnit": {
+      "enum": [
+        "um"
+      ],
+      "type": "string"
+    },
+    "MapSpec": {
+      "additionalProperties": false,
+      "description": "A raster map: one float value per pixel, placed in the scene's um coordinates.",
+      "properties": {
+        "id": {
+          "description": "Unique map id: an ASCII letter, then ASCII letters, digits and `_`.",
+          "pattern": "^[A-Za-z][A-Za-z0-9_]*$",
+          "type": "string"
+        },
+        "no_value": {
+          "description": "Pixel value that marks \"no data\", if any.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "origin_um": {
+          "description": "Position `[x, y]` in um of the centre of pixel (row 0, col 0); rows run along y, columns\nalong x.",
+          "items": {
+            "format": "double",
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "path": {
+          "description": "Path of the raster file; relative paths resolve against the directory of the scene\nfile (`Scene::load` stores the absolute path).",
+          "type": "string"
+        },
+        "um_per_px": {
+          "description": "Pixel size in um, must be > 0.",
+          "exclusiveMinimum": 0,
+          "format": "double",
+          "type": "number"
+        },
+        "units": {
+          "description": "Units of the map values, free text (e.g. `1` for a dimensionless coordinate).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "path",
+        "units",
+        "um_per_px",
+        "origin_um"
+      ],
+      "type": "object"
+    },
+    "MeshFormat": {
+      "enum": [
+        "gmsh"
+      ],
+      "type": "string"
+    },
+    "MeshRef": {
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "$ref": "#/$defs/MeshFormat",
+          "description": "Mesh file format."
+        },
+        "path": {
+          "description": "Path of the mesh file; relative paths resolve against the directory of\nthe scene file (`Scene::load` stores the absolute path).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "format",
+        "path"
+      ],
+      "type": "object"
+    },
+    "Units": {
+      "additionalProperties": false,
+      "properties": {
+        "length": {
+          "$ref": "#/$defs/LengthUnit",
+          "description": "Length unit of the mesh coordinates; only `um` (micrometre) is supported."
+        }
+      },
+      "required": [
+        "length"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`scene/1`: the geometry description written by slideviz.",
+  "properties": {
+    "dimension": {
+      "description": "Spatial dimension of the mesh (2 or 3).",
+      "format": "uint8",
+      "maximum": 3,
+      "minimum": 2,
+      "type": "integer"
+    },
+    "maps": {
+      "description": "Raster maps over the tissue (e.g. a zonation coordinate); studies refer to them by id.",
+      "items": {
+        "$ref": "#/$defs/MapSpec"
+      },
+      "type": "array"
+    },
+    "mesh": {
+      "$ref": "#/$defs/MeshRef"
+    },
+    "units": {
+      "$ref": "#/$defs/Units"
+    },
+    "version": {
+      "const": "scene/1",
+      "description": "Contract version, exactly `scene/1`.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "version",
+    "dimension",
+    "units",
+    "mesh"
+  ],
+  "title": "Scene",
+  "type": "object"
+}
