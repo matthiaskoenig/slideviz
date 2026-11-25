@@ -31,7 +31,7 @@ from slideviz.analysis.warp import load_field, nonrigid_levels
 from slideviz.data.provenance import code_version
 from slideviz.data.registration import read_sidecar, sha256
 from slideviz.data.schema import Registration
-from slideviz.io.reader import open_slide
+from slideviz.io.reader import find_slide, open_slide, slide_paths, slide_stem
 
 NECROTIC_MIN_SHARE = 0.01  # below 1 % of the covered tissue necrotic (specks on the controls), no necrotic readout
 DAB_SETTINGS = ("GLASS_OD", "SMOOTH_UM", "WINDOW_UM", "STEP_UM", "CELL_UM", "LOW_Q", "HIGH_Q",
@@ -119,8 +119,8 @@ def measure(job: tuple) -> dict:
     if field is None:
         raise RuntimeError(f"{cyp_stem}: no valid non-rigid field")
 
-    he_info, he = open_slide(slides / f"{registration.reference}.ome.tiff")
-    cyp_info, cyp = open_slide(slides / f"{cyp_stem}.ome.tiff")
+    he_info, he = open_slide(find_slide(slides, registration.reference))
+    cyp_info, cyp = open_slide(find_slide(slides, cyp_stem))
     he_shapes = [level.shape[:2] for level in he]
     warped = nonrigid_levels(cyp, he_shapes, registration, field, he_info.pixel_size_um)
     index = pick_level_um([level.shape for level in he], he_info.pixel_size_um, WORK_UM)
@@ -232,8 +232,8 @@ def main() -> None:
     settings = ({name: getattr(dab, name) for name in DAB_SETTINGS}
                 | {name: getattr(tissue, name) for name in TISSUE_SETTINGS})
     jobs = []
-    for path in sorted(args.slides.glob("*_cyp2e1.ome.tiff")):
-        stem = path.name.removesuffix(".ome.tiff")
+    for path in slide_paths(args.slides, "*_cyp2e1"):
+        stem = slide_stem(path)
         if args.blocks and not any(block in stem for block in args.blocks):
             continue
         reference = read_sidecar(args.slides, stem)["registration"]["reference"]

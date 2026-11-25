@@ -22,7 +22,7 @@ from slideviz.analysis.tiling import pick_level_um
 from slideviz.analysis.tissue import lumen_mask, mask_from_level, pick_level
 from slideviz.data.provenance import code_version
 from slideviz.data.registration import sha256
-from slideviz.io.reader import open_slide
+from slideviz.io.reader import find_slide, open_slide, slide_paths, slide_stem
 
 LUMEN_UM = dab.WORK_UM
 
@@ -73,7 +73,7 @@ def one_slide(job: tuple) -> dict:
     """Write one slide's lumen file; the row for the run record."""
     path, slides, out, code = job
     record = json.loads(path.read_text())
-    lumen, lumen_um, sizes = slide_lumen(slides / f"{record['slide']}.ome.tiff")
+    lumen, lumen_um, sizes = slide_lumen(find_slide(slides, record['slide']))
     shares = tile_shares(record, lumen, lumen_um, sizes[record["level"]])
     row = areas(record, shares)
     for name in ("area_predicted", "area_annotated"):

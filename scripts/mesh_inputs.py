@@ -25,7 +25,7 @@ from slideviz.analysis.tissue import (
 )
 from slideviz.data.provenance import code_version
 from slideviz.data.registration import sha256
-from slideviz.io.reader import open_slide
+from slideviz.io.reader import find_slide, open_slide, slide_paths, slide_stem
 
 OUT_NAME = "{animal}_mesh_inputs.npz"
 
@@ -99,7 +99,7 @@ def main() -> None:
     if args.out.exists() and any(args.out.iterdir()):
         raise SystemExit(f"{args.out} is not empty; give a new --out")
 
-    stem = args.he.name.removesuffix(".ome.tiff")
+    stem = slide_stem(args.he)
     info, levels = open_slide(args.he)
     shapes = [tuple(level.shape[:2]) for level in levels]
 
