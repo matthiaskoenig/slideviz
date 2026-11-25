@@ -90,6 +90,22 @@ def _decimated(decode: Callable[[], np.ndarray], step: int) -> np.ndarray:
     return decode()[::step, ::step]
 
 
+def _halved(level: da.Array) -> da.Array:
+    """The level at half size, each pixel the rounded mean of a 2 x 2 block."""
+    height, width = level.shape[0] // 2 * 2, level.shape[1] // 2 * 2
+    return da.coarsen(np.mean, level[:height, :width], {0: 2, 1: 2}).round().astype(np.uint8)
+
+
+def _fill_halvings(levels: list[da.Array]) -> list[da.Array]:
+    """Levels with the halvings the scanner skipped put in, so each level is half the one above."""
+    filled = [levels[0]]
+    for level in levels[1:]:
+        while filled[-1].shape[1] / level.shape[1] > 2.5:
+            filled.append(_halved(filled[-1]))
+        filled.append(level)
+    return filled
+
+
 def read_pyramid(path: Path, scene: int = 0) -> tuple[SlideInfo, list[da.Array]]:
     """Return (info, zoom levels) for one scene, with level 0 at full resolution."""
     info = read_info(path, scene)
@@ -106,6 +122,8 @@ def read_pyramid(path: Path, scene: int = 0) -> tuple[SlideInfo, list[da.Array]]
         da.map_blocks(_tile, level=array, dtype=np.uint8, chunks=_chunks(shape))
         for array, shape in zip(arrays, shapes, strict=True)
     ]
+    # some scans store levels in steps of 4 (0.23, 0.91, 3.64 um/px)
+    levels = _fill_halvings(levels)
 
     # levels below the scanner's coarsest, decimated from one cached decode of it
     coarsest = _decoded_once(levels[-1])

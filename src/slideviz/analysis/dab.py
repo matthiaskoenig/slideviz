@@ -1,4 +1,4 @@
-"""DAB signal quantification for CYP2E1 slides.
+"""DAB signal quantification for DAB-stained slides (CYP2E1, CYP1A2, GS, CYP2D6, CYP3A4).
 
 Optical density against each slide's glass with fixed Ruifrok vectors. A pixel is
 positive when its DAB exceeds the midpoint of its surroundings' low and high level;

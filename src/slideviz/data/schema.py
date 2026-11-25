@@ -36,6 +36,9 @@ class Stain(StrEnum):
     CYP2E1 = "cyp2e1"  # mouse pericentral zonation marker
     CYP1A2 = "cyp1a2"  # the rat analogue of CYP2E1
     HMGB1 = "hmgb1"  # nuclear-integrity loss, reads out necrosis
+    GS = "gs"  # glutamine synthetase, the ring of cells around central veins
+    CYP2D6 = "cyp2d6"
+    CYP3A4 = "cyp3a4"
 
 
 class Modality(StrEnum):
@@ -134,6 +137,13 @@ class Slide(BaseModel):
     lobes: str | None = None
     antibody_dilution: str | None = None
     staining_run: str | None = None
+    section_index: int | None = Field(default=None, ge=1)  # position in the block's cut order, 1 is cut first
+
+    # study condition, as the lab's sheets give it
+    condition: str | None = None  # e.g. normal, steatosis
+    diet: str | None = None  # e.g. MCD+HF; None is standard feed or not an animal study
+    diet_weeks: int | None = Field(default=None, ge=0)
+    grade_lab: str | None = None  # the lab's histology grade as written, e.g. 50%macro pp+50%micro pc
 
     # acquisition provenance, read from the vendor file
     acquired: Timestamp | None = None

@@ -1,7 +1,14 @@
 """Refine slide alignment with DeepFlow and save the displacement field and summary.
 
-    uv run python nonrigid_register.py 281mg_m2 375mg_m3 \
+Two steps in two venvs. `inputs` runs in the slideviz venv: it reads a registered slide
+and the reference its sidecar names, in any format slideviz.io.reader knows, and writes
+the DeepFlow inputs to <out>/<slide>_input.npz. `flow` runs in this folder's venv, which
+holds VALIS: it writes <slide>_nonrigid.npz and <slide>_nonrigid.json, then deletes the inputs.
+
+    uv run python registration/nonrigid_register.py inputs mouse_apap_281mg_m2_cyp2e1 \
         --slides /data/michelle/slides --out /data/michelle/c1/fields
+    cd registration && uv run python nonrigid_register.py flow mouse_apap_281mg_m2_cyp2e1 \
+        --out /data/michelle/c1/fields
 """
 
 from __future__ import annotations
@@ -15,15 +22,15 @@ from pathlib import Path
 import numpy as np
 from outline_register import (
     _warp,
-    full_size,
-    pyramid_level,
+    open_cached,
     read_level,
-    shared_downsample,
+    read_rgb,
     tissue_mask,
 )
 
-EDGE_PX = 2048  # longest edge of the DeepFlow grid, ~4 um/px on a mouse slide
+GRID_UM = 4.5  # pixel size of the DeepFlow grid in um
 MIN_AGREEMENT = 0.99  # own resampling against VALIS's warped image
+INPUTS = {"density": "tissue density", "haematoxylin": "haematoxylin channel"}
 
 
 def code_version() -> str:
@@ -36,19 +43,9 @@ def code_version() -> str:
 
 
 def um_per_px(path: Path) -> float:
-    """Full-resolution pixel size from the TIFF resolution tag."""
-    import pyvips
-
-    image = pyvips.Image.new_from_file(str(path), page=0)
-    return 1000.0 / image.xres  # vips stores pixels per mm
-
-
-def sidecar_matrix(slides: Path, slide: str) -> np.ndarray:
-    """The moving slide's matrix onto its reference, from its sidecar."""
-    names = (slides / f"{slide}.json", slides / f"{slide}.ome.json")
-    path = next((p for p in names if p.exists()), names[0])
-    registration = json.loads(path.read_text())["registration"]
-    return np.array(registration["matrix"], float)
+    """Full-resolution pixel size, as slideviz.io.reader reads it."""
+    info, _ = open_cached(path)
+    return info.pixel_size_um
 
 
 def scaled(matrix: np.ndarray, downsample: float) -> np.ndarray:
@@ -71,25 +68,6 @@ def agreement(moving: np.ndarray, warped: np.ndarray, dxdy: np.ndarray, mask) ->
     return float(np.corrcoef(mine[mask], np.asarray(warped, float)[mask])[0, 1])
 
 
-def read_rgb(path: Path, downsample: float) -> np.ndarray:
-    """An RGB view of a slide at the shared shrink, from its three one-band pages."""
-    import pyvips
-
-    width, _ = full_size(path)
-    target = width / downsample
-    level, _ = pyramid_level(path, target)
-
-    bands = []
-    for page in range(3):
-        image = pyvips.Image.new_from_file(str(path), page=page, subifd=level)
-        image = image.resize(target / image.width)
-        bands.append(np.ndarray(buffer=image.write_to_memory(), dtype=np.uint8,
-                                shape=[image.height, image.width, image.bands])[..., 0])
-    rows = min(b.shape[0] for b in bands)
-    cols = min(b.shape[1] for b in bands)
-    return np.dstack([b[:rows, :cols] for b in bands])
-
-
 def haematoxylin(rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
     """Haematoxylin density inside the tissue, 1 to 255, zero outside; DAB split off."""
     from skimage.color import rgb2hed
@@ -100,34 +78,51 @@ def haematoxylin(rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
                     0).astype(np.uint8)
 
 
-def register_block(block: str, slides: Path, out: Path, edge: int,
-                   source: str = "haematoxylin") -> dict:
-    """Run DeepFlow on one block and write its field and summary."""
-    import valis
-    from valis.non_rigid_registrars import OpticalFlowWarper
+def inputs(slide: str, slides: Path, out: Path, grid_um_target: float,
+           source: str = "haematoxylin") -> Path:
+    """Write the DeepFlow inputs of a registered slide: its reference, and it on its matrix."""
+    from slideviz.data.registration import read_sidecar
 
-    reference = f"mouse_apap_{block}_he"
-    slide = f"mouse_apap_{block}_cyp2e1"
-    he = slides / f"{reference}.ome.tiff"
-    cyp = slides / f"{slide}.ome.tiff"
+    registration = read_sidecar(slides, slide)["registration"]
+    reference = registration["reference"]
+    fixed_path = slides / read_sidecar(slides, reference)["file"]
+    moving_path = slides / read_sidecar(slides, slide)["file"]
+    matrix = np.array(registration["matrix"], float)
 
-    downsample = shared_downsample([he, cyp], edge)
-    grid_um = um_per_px(he) * downsample
-    matrix = sidecar_matrix(slides, slide)
+    downsample = max(1.0, grid_um_target / um_per_px(fixed_path))
+    grid_um = um_per_px(fixed_path) * downsample
 
-    fixed_grey = read_level(he, downsample)
+    fixed_grey = read_level(fixed_path, downsample)
     fixed_mask = tissue_mask(fixed_grey)
     if source == "density":
-        moving_grey = read_level(cyp, downsample)
+        moving_grey = read_level(moving_path, downsample)
         fixed = density(fixed_grey, fixed_mask)
         moving = _warp(density(moving_grey, tissue_mask(moving_grey)).astype(float),
                        scaled(matrix, downsample), fixed.shape).astype(np.uint8)
     else:
-        fixed = haematoxylin(read_rgb(he, downsample), fixed_mask)
-        moving_rgb = read_rgb(cyp, downsample)
+        fixed = haematoxylin(read_rgb(fixed_path, downsample), fixed_mask)
+        moving_rgb = read_rgb(moving_path, downsample)
         moving = _warp(haematoxylin(moving_rgb, tissue_mask(moving_rgb.mean(axis=-1)))
                        .astype(float), scaled(matrix, downsample), fixed.shape).astype(np.uint8)
     mask = fixed_mask | (moving > 0)  # union, so a misaligned edge can still move
+
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / f"{slide}_input.npz"
+    np.savez_compressed(path, fixed=fixed, moving=moving, mask=mask, matrix=matrix,
+                        grid_um_per_px=grid_um, reference=reference, source=source)
+    return path
+
+
+def flow(slide: str, out: Path) -> dict:
+    """Run DeepFlow on one slide's inputs and write its field and summary."""
+    import valis
+    from valis.non_rigid_registrars import OpticalFlowWarper
+
+    path = out / f"{slide}_input.npz"
+    with np.load(path) as stored:
+        fixed, moving, mask = stored["fixed"], stored["moving"], stored["mask"]
+        matrix, grid_um = stored["matrix"], float(stored["grid_um_per_px"])
+        reference, source = str(stored["reference"]), str(stored["source"])
 
     start = time.time()
     warped, _grid, dxdy = OpticalFlowWarper().register(
@@ -136,13 +131,12 @@ def register_block(block: str, slides: Path, out: Path, edge: int,
 
     agree = agreement(moving, warped, dxdy, mask)
     if agree < MIN_AGREEMENT:
-        raise RuntimeError(f"{block}: sampling at p + d agrees with VALIS at only "
+        raise RuntimeError(f"{slide}: sampling at p + d agrees with VALIS at only "
                            f"{agree:.3f}, so the stored convention would be wrong")
 
     shift_um = np.hypot(*dxdy)[mask] * grid_um
-    inputs = {"density": "tissue density", "haematoxylin": "haematoxylin channel"}
-    method = (f"valis-{valis.__version__} OpticalFlowWarper (DeepFlow), {inputs[source]} "
-              f"input at {edge} px, after the sidecar matrix")
+    method = (f"valis-{valis.__version__} OpticalFlowWarper (DeepFlow), {INPUTS[source]} "
+              f"input at {grid_um:.2f} um/px, after the sidecar matrix")
     summary = {
         "slide": slide,
         "reference": reference,
@@ -158,7 +152,6 @@ def register_block(block: str, slides: Path, out: Path, edge: int,
         "code": code_version(),
     }
 
-    out.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         out / summary["field"],
         dx_um=(dxdy[0] * grid_um).astype(np.float32),
@@ -167,32 +160,40 @@ def register_block(block: str, slides: Path, out: Path, edge: int,
         matrix=matrix,  # the field is only valid on top of this matrix
     )
     (out / f"{slide}_nonrigid.json").write_text(json.dumps(summary, indent=2) + "\n")
+    path.unlink()
     return summary
 
 
 def main() -> None:
-    """Register every block named on the command line."""
+    """Run one step for every slide named on the command line."""
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("block", nargs="+", help="dose and animal, e.g. 281mg_m2")
-    parser.add_argument("--slides", type=Path, required=True,
-                        help="OME-TIFFs with their sidecars")
+    parser.add_argument("step", choices=("inputs", "flow"))
+    parser.add_argument("slide", nargs="+",
+                        help="registered slide stems, e.g. mouse_apap_281mg_m2_cyp2e1")
+    parser.add_argument("--slides", type=Path,
+                        help="inputs: slides and sidecars, the registered ones with a matrix")
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--edge", type=int, default=EDGE_PX, help="longest edge in px")
-    parser.add_argument("--input", choices=("density", "haematoxylin"), default="haematoxylin",
+    parser.add_argument("--grid-um", type=float, default=GRID_UM, help="DeepFlow grid pixel size in um")
+    parser.add_argument("--input", choices=tuple(INPUTS), default="haematoxylin",
                         help="haematoxylin: the counterstain both slides carry, DAB split off; "
                              "density: inverted grey inside the tissue")
     args = parser.parse_args()
+    if args.step == "inputs" and args.slides is None:
+        parser.error("inputs needs --slides")
 
     refused = []
-    for block in args.block:
-        try:
-            s = register_block(block, args.slides, args.out, args.edge, args.input)
-        except RuntimeError as exc:
-            print(f"{block:10s} REFUSED: {exc}")
-            refused.append(block)
+    for slide in args.slide:
+        if args.step == "inputs":
+            print(f"{slide}: {inputs(slide, args.slides, args.out, args.grid_um, args.input)}")
             continue
-        print(f"{block:10s} {s['grid_um_per_px']:.2f} µm/px  median {s['median_um']:5.1f} µm"
+        try:
+            s = flow(slide, args.out)
+        except RuntimeError as exc:
+            print(f"{slide} REFUSED: {exc}")
+            refused.append(slide)
+            continue
+        print(f"{slide} {s['grid_um_per_px']:.2f} µm/px  median {s['median_um']:5.1f} µm"
               f"  p95 {s['p95_um']:5.1f} µm  agreement {s['agreement']:.4f}  {s['seconds']} s")
     if refused:
         raise SystemExit(f"refused, no field written: {', '.join(refused)}")
