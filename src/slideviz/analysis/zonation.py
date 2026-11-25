@@ -31,6 +31,8 @@ VESSEL_REACH_UM = 15.0  # a lumen this close to a peak or valley is its vessel, 
 VESSEL_MAX_UM2 = 30000.0  # larger glass-like areas inside the outline are tears or glass, never a vessel wall
 WALL_UM = 12.0  # tissue this close to a lumen is vessel wall, its connective tissue and pixels half on glass, left out
 
+NO_LUMEN, PORTAL_LUMEN, CENTRAL_LUMEN, OTHER_LUMEN = 0, 1, 2, 3  # Portality.lumen_class values
+
 POSITIONS = np.linspace(0, 1, 40)  # the positions of the SPT model's pattern scan
 EDGES = np.concatenate([[0.0], (POSITIONS[:-1] + POSITIONS[1:]) / 2, [1.0]])  # bins centred on POSITIONS
 
@@ -107,6 +109,7 @@ class Portality:
     border: np.ndarray  # float32, between the nearest watershed line or portal lumen (0) and peak (1)
     lobule: np.ndarray  # int32, watershed basin of a peak, 0 where no basin reaches
     keep: np.ndarray  # working tissue pixels inside the usable landscape and off lumen walls, the pixels profiles use
+    lumen_class: np.ndarray  # uint8: 0 no lumen, 1 portal, 2 central, 3 any other lumen (beside both or neither)
 
 
 def nearby_lumina(centres: np.ndarray, holes: np.ndarray, sizes: np.ndarray, reach: int, max_px: int) -> set[int]:
@@ -157,7 +160,10 @@ def portality(land: Landscape, tissue: np.ndarray, inside: np.ndarray) -> Portal
     border = db / np.maximum(db + dc, 1e-6)
     off_wall = distance_transform_edt(tissue | ~inside) * um_per_px > WALL_UM
     keep = tissue & off_wall & on_working(land.usable, b, shape)
-    return Portality(points, border, on_working(basins, b, shape).astype(np.int32), keep)
+    lumen_class = np.where(holes > 0, OTHER_LUMEN, NO_LUMEN).astype(np.uint8)
+    lumen_class[np.isin(holes, sorted(portal))] = PORTAL_LUMEN
+    lumen_class[np.isin(holes, sorted(central))] = CENTRAL_LUMEN
+    return Portality(points, border, on_working(basins, b, shape).astype(np.int32), keep, lumen_class)
 
 
 @dataclass(frozen=True)

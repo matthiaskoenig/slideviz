@@ -45,3 +45,9 @@ Repository = "https://github.com/matthiaskoenig/slideviz"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "jsonschema>=4.26.0",
+    "pytest>=9.2.0",
+]

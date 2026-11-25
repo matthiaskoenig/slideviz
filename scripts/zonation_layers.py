@@ -55,6 +55,21 @@ def borders(lobules: np.ndarray) -> np.ndarray:
     return out
 
 
+def save_layers(path: Path, land: zonation.Landscape, port: zonation.Portality, inside: np.ndarray, um: float,
+                offset: float, extra: dict) -> None:
+    """The map file: the landscape on its own grid, and the position and lumen classes on the working grid.
+
+    The working grid is the H&E level the slide was measured on, so its pixel (0, 0) is centred at the origin of
+    the H&E frame, as in mesh_inputs.frame(). Position is NaN outside the section outline.
+    """
+    np.savez_compressed(
+        path, landscape=np.where(land.solid, land.field, np.nan).astype(np.float32),
+        peaks=land.peaks.astype(np.int32), valleys=land.valleys.astype(np.int32),
+        um_per_px=land.um_per_px, offset_um=offset,
+        position=np.where(inside, port.points, np.nan).astype(np.float32), lumen_class=port.lumen_class,
+        working_um_per_px=um, working_origin_um=np.zeros(2), **extra)
+
+
 def measure(job: tuple) -> dict:
     """One CYP2E1 slide: landscape, lobule borders, peaks and valleys on its H&E partner's grid."""
     stem, slides, out, provenance = job
@@ -85,6 +100,8 @@ def measure(job: tuple) -> dict:
     lobules = np.where(within, expand_labels(basins, round(HOLE_UM / land.um_per_px)), 0)
     border = borders(lobules)
 
+    port = zonation.portality(land, cells, inside)
+
     low, high = (float(v) for v in np.percentile(land.field[land.usable], (LOW_PCT, HIGH_PCT)))
     offset = (land.block - 1) / 2 * um
     meta = {
@@ -94,16 +111,18 @@ def measure(job: tuple) -> dict:
         "frame": "H&E level 0 um; pixel (r, c) is centred at offset_um + (r, c) * um_per_px",
         "landscape": "DAB optical density blurred over tissue (zonation.landscape), NaN outside solid tissue",
         "border": "1 where the lobule below or to the right is another one",
+        "position": "zonation.portality points on the working grid (H&E level of um_per_px), 0 periportal, 1 "
+                    "pericentral, NaN outside the section outline; working pixel (r, c) is centred at "
+                    "working_origin_um + (r, c) * working_um_per_px",
+        "lumen_class": "uint8 on the working grid: 0 no lumen, 1 portal, 2 central, 3 other lumen",
         "low_high": f"p{LOW_PCT} and p{HIGH_PCT} of the landscape over profile tissue",
         "written": datetime.now(UTC).isoformat(timespec="seconds"),
         **provenance,
     }
     name = f"{stem}{SUFFIX}"
-    np.savez_compressed(
-        out / name, landscape=np.where(land.solid, land.field, np.nan).astype(np.float32),
-        border=border.astype(np.uint8), peaks=land.peaks.astype(np.int32), valleys=land.valleys.astype(np.int32),
-        um_per_px=land.um_per_px, offset_um=offset, low=low, high=high, reference=registration.reference,
-        nonrigid_sha256=registration.nonrigid.sha256, meta=json.dumps(meta))
+    save_layers(out / name, land, port, inside, um, offset,
+                {"border": border.astype(np.uint8), "low": low, "high": high, "reference": registration.reference,
+                 "nonrigid_sha256": registration.nonrigid.sha256, "meta": json.dumps(meta)})
     print(f"{stem}: {len(land.peaks)} lobules, {len(land.valleys)} valleys, grid {land.field.shape}", flush=True)
 
     shade = np.clip((land.field - low) / (high - low), 0, 1)[..., None]
@@ -174,7 +193,8 @@ def main() -> None:
         "slides": str(args.slides),
         "method": "CYP2E1 landscape and watershed lobule borders on the H&E grid, rigid plus non-rigid registration",
         "map": "landscape float32 (DAB OD, NaN outside solid tissue), border uint8, peaks and valleys as landscape "
-               "(row, col); pixel (r, c) is centred at offset_um + (r, c) * um_per_px in H&E level 0 um",
+               "(row, col); pixel (r, c) is centred at offset_um + (r, c) * um_per_px in H&E level 0 um; position "
+               "float32 and lumen_class uint8 on the working grid (working_um_per_px, working_origin_um)",
         "settings": settings,
         "slides_measured": {r["stem"]: r["row"] for r in results},
     }
