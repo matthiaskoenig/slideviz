@@ -209,6 +209,11 @@ def read_back(path: Path) -> dict:
             "areas": tag_counts(areas.values), "edges": tag_counts(edges.values)}
 
 
+def named(base: Path, suffix: str) -> Path:
+    """The file base + suffix. Not base.with_suffix: a base name with dots (mouse.v2_plain_h2.5-10um) is no suffix."""
+    return base.with_name(base.name + suffix)
+
+
 def build(variant: str, polygons: list, lumen: np.ndarray, lumen_class: np.ndarray, meta: dict, small: float, large: float,
           base: Path) -> dict:
     """One mesh: geometry, names, size field, triangles, DOLFINx import, written files; its checks."""
@@ -237,18 +242,18 @@ def build(variant: str, polygons: list, lumen: np.ndarray, lumen_class: np.ndarr
     p, t = arrays["points_um"], arrays["triangles"]
     u, v = p[t[:, 1]] - p[t[:, 0]], p[t[:, 2]] - p[t[:, 0]]
     tri_area = 0.5 * np.abs(u[:, 0] * v[:, 1] - u[:, 1] * v[:, 0])
-    gmsh.write(str(base.with_suffix(".msh")))
+    gmsh.write(str(named(base, ".msh")))
 
     data = gmshio.model_to_mesh(gmsh.model, MPI.COMM_WORLD, 0, gdim=2)
     gmsh.finalize()
     mesh = data.mesh
     mesh.topology.create_connectivity(1, 2)
     data.cell_tags.name, data.facet_tags.name = "areas", "edges"
-    with XDMFFile(MPI.COMM_WORLD, base.with_suffix(".xdmf"), "w") as xdmf:
+    with XDMFFile(MPI.COMM_WORLD, named(base, ".xdmf"), "w") as xdmf:
         xdmf.write_mesh(mesh)
         xdmf.write_meshtags(data.cell_tags, mesh.geometry)
         xdmf.write_meshtags(data.facet_tags, mesh.geometry)
-    np.savez_compressed(base.parent / f"{base.name}_view.npz", **arrays)
+    np.savez_compressed(named(base, "_view.npz"), **arrays)
     written = {"cells": int(mesh.topology.index_map(2).size_local),
                "areas": tag_counts(data.cell_tags.values), "edges": tag_counts(data.facet_tags.values)}
 
@@ -266,7 +271,7 @@ def build(variant: str, polygons: list, lumen: np.ndarray, lumen_class: np.ndarr
         "dolfinx_cell_tags": sorted(int(v) for v in set(data.cell_tags.values)),
         "dolfinx_facet_tags": sorted(int(v) for v in set(data.facet_tags.values)),
         "dolfinx_names": sorted(data.physical_groups),
-        "xdmf_read_back_matches": read_back(base.with_suffix(".xdmf")) == written,
+        "xdmf_read_back_matches": read_back(named(base, ".xdmf")) == written,
     }
 
 
@@ -311,7 +316,7 @@ def main() -> None:
                 "code": code_version(),
                 "written": datetime.now(UTC).isoformat(timespec="seconds"),
             }
-            base.with_suffix(".json").write_text(json.dumps(record, indent=1))
+            named(base, ".json").write_text(json.dumps(record, indent=1))
             print(f"{base.name}: {json.dumps(checks)}", flush=True)
 
 

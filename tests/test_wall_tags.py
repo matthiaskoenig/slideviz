@@ -38,9 +38,12 @@ def test_wall_tags(tmp_path: Path) -> None:
     lumen_class[20:40, 60:80] = 2
     lumen_class[60:80, 20:40] = 3  # classified neither portal nor central
     meta = {"um_per_px": 1.0, "origin_um": [0.0, 0.0], "animal": "t", "slide": "t"}
-    base = tmp_path / "t"
-    checks = build_mesh.build("plain", [("tissue", domain)], lumen, lumen_class, meta, 4.0, 10.0, base)
-    with np.load(tmp_path / "t_view.npz") as view:
+    # a name with dots, as a dotted slide stem or a decimal size gives: the files keep it whole
+    base = tmp_path / "t.v2_plain_h4-10.5um"
+    checks = build_mesh.build("plain", [("tissue", domain)], lumen, lumen_class, meta, 4.0, 10.5, base)
+    for suffix in (".msh", ".xdmf", ".h5", "_view.npz"):
+        assert (tmp_path / f"t.v2_plain_h4-10.5um{suffix}").exists(), suffix
+    with np.load(tmp_path / "t.v2_plain_h4-10.5um_view.npz") as view:
         view = dict(view)
     assert edges_in(view, BOXES["portal"]) >= {15}
     assert 16 not in edges_in(view, BOXES["portal"]) and 11 not in edges_in(view, BOXES["portal"])

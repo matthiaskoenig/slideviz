@@ -29,8 +29,9 @@ def square(points: list, x0: float, y0: float, x1: float, y1: float, tag: int, e
         tags.append(tag)
 
 
-def make_mesh(tmp_path: Path) -> Path:
-    """A 100 um square with a portal hole at x 10-20 and a central hole at x 80-90, and its record."""
+def make_mesh(tmp_path: Path, stem: str = "m", listed: bool = True) -> Path:
+    """A 100 um square with a portal hole at x 10-20 and a central hole at x 80-90, and its record <stem>.json, which
+    lists its files (or not: listed False)."""
     points: list = [(0, 0), (SIZE, 0), (SIZE, SIZE), (0, SIZE)]
     edges: list = []
     tags: list = []
@@ -38,13 +39,14 @@ def make_mesh(tmp_path: Path) -> Path:
     square(points, 80, 40, 90, 60, 16, edges, tags)
     mesh = tmp_path / "mesh"
     mesh.mkdir()
-    np.savez_compressed(mesh / "m_view.npz", points_um=np.array(points, float), triangles=np.array([[0, 1, 2]]),
+    np.savez_compressed(mesh / f"{stem}_view.npz", points_um=np.array(points, float), triangles=np.array([[0, 1, 2]]),
                         edges=np.array(edges), edge_tag=np.array(tags))
-    (mesh / "m.msh").write_text("$MeshFormat\n")
-    record = {"tags": {"areas": {"tissue": 1}, "edges": {"vessel_wall": 11, "portal_wall": 15, "central_wall": 16}},
-              "files": ["m.xdmf", "m.h5", "m.msh", "m_view.npz"]}
-    (mesh / "m.json").write_text(json.dumps(record))
-    return mesh / "m.json"
+    (mesh / f"{stem}.msh").write_text("$MeshFormat\n")
+    record = {"tags": {"areas": {"tissue": 1}, "edges": {"vessel_wall": 11, "portal_wall": 15, "central_wall": 16}}}
+    if listed:
+        record["files"] = [f"{stem}{s}" for s in (".xdmf", ".h5", ".msh", "_view.npz")]
+    (mesh / f"{stem}.json").write_text(json.dumps(record))
+    return mesh / f"{stem}.json"
 
 
 def make_lobules(tmp_path: Path) -> Path:
@@ -128,3 +130,19 @@ def test_window_without_section_fails(tmp_path: Path) -> None:
 def test_missing_input_named(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="lobules file is missing.*zonation_layers.py"):
         write_scene.write(make_mesh(tmp_path), tmp_path / "none_lobules.npz", tmp_path / "out")
+
+
+@pytest.mark.parametrize("listed", [True, False])
+def test_dotted_stem(tmp_path: Path, listed: bool) -> None:
+    """A mesh name with dots (a dotted slide stem, a decimal size): the .msh and _view.npz beside its record."""
+    stem = "mouse.v2_plain_h2.5-10um"
+    doc = write_scene.write(make_mesh(tmp_path, stem, listed), make_lobules(tmp_path), tmp_path / "out")
+    assert doc["mesh"]["path"] == f"../mesh/{stem}.msh"
+    assert doc["maps"][0]["origin_um"] == [-4.0, -4.0]  # the view of this mesh was read
+
+
+def test_missing_view_named(tmp_path: Path) -> None:
+    record = make_mesh(tmp_path, "mouse.v2_plain_h5-20um")
+    (record.parent / "mouse.v2_plain_h5-20um_view.npz").unlink()
+    with pytest.raises(FileNotFoundError, match=r"_view.npz is missing: .*mouse\.v2_plain_h5-20um_view\.npz"):
+        write_scene.write(record, make_lobules(tmp_path), tmp_path / "out")

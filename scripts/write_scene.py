@@ -48,16 +48,32 @@ def window(points_um: np.ndarray, um: float, origin_xy: np.ndarray, shape: tuple
     return slice(int(y0), int(y1)), slice(int(x0), int(x1))
 
 
+def mesh_file(record_path: Path, record: dict, suffix: str) -> Path:
+    """The file of a mesh record ending in suffix (".msh", "_view.npz"), beside the record.
+
+    The record's "files" list names it; a record without the list gives its own name without ".json" plus the suffix.
+    Never Path.with_suffix: mesh names have dots (mouse.v2_plain_h2.5-10um), and it would cut them at the first one.
+    """
+    named = [f for f in record.get("files", []) if f.endswith(suffix)]
+    if len(named) > 1:
+        raise ValueError(f"{record_path} lists several {suffix} files: {named}")
+    name = named[0] if named else record_path.name.removesuffix(".json") + suffix
+    return record_path.with_name(name)
+
+
 def write(record_path: Path, lobules: Path, out: Path) -> dict:
     """Write out/scene.json and out/maps/zonation.zarr; the scene document, validated against scene/1."""
-    mesh_path = record_path.with_suffix(".msh")
-    view_path = record_path.with_name(f"{record_path.stem}_view.npz")
-    inputs = ((record_path, "mesh record", "mesh/build_mesh.py"), (mesh_path, "mesh .msh", "mesh/build_mesh.py"),
-              (view_path, "mesh _view.npz", "mesh/build_mesh.py"), (lobules, "lobules file", "scripts/zonation_layers.py"))
+    if not record_path.exists():
+        raise FileNotFoundError(f"the mesh record is missing: {record_path}; (re)build it with mesh/build_mesh.py")
+    record = json.loads(record_path.read_text())
+    mesh_path = mesh_file(record_path, record, ".msh")
+    view_path = mesh_file(record_path, record, "_view.npz")
+    inputs = ((mesh_path, "mesh .msh", "mesh/build_mesh.py"), (view_path, "mesh _view.npz", "mesh/build_mesh.py"),
+              (lobules, "lobules file", "scripts/zonation_layers.py"))
     for path, what, builder in inputs:
         if not path.exists():
             raise FileNotFoundError(f"the {what} is missing: {path}; (re)build it with {builder}")
-    edge_tags = json.loads(record_path.read_text())["tags"]["edges"]
+    edge_tags = record["tags"]["edges"]
     if not {"portal_wall", "central_wall"} <= edge_tags.keys():
         raise ValueError(f"{record_path} has no portal and central walls; rebuild the mesh with build_mesh.py")
     with np.load(view_path) as view:
