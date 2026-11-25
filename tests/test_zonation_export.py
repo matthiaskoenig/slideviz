@@ -9,10 +9,11 @@ import numpy as np
 import pytest
 from scipy.ndimage import gaussian_filter
 
-from slideviz.analysis import zonation
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+pytest.importorskip("slideviz")
 import zonation_layers
+
+from slideviz.analysis import zonation
 
 SIZE = 100
 PEAKS = np.array([[20, 20], [70, 40]])
