@@ -52,9 +52,11 @@ def write(record_path: Path, lobules: Path, out: Path) -> dict:
     """Write out/scene.json and out/maps/zonation.zarr; the scene document, validated against scene/1."""
     mesh_path = record_path.with_suffix(".msh")
     view_path = record_path.with_name(f"{record_path.stem}_view.npz")
-    for path in (record_path, mesh_path, view_path):
+    inputs = ((record_path, "mesh record", "mesh/build_mesh.py"), (mesh_path, "mesh .msh", "mesh/build_mesh.py"),
+              (view_path, "mesh _view.npz", "mesh/build_mesh.py"), (lobules, "lobules file", "scripts/zonation_layers.py"))
+    for path, what, builder in inputs:
         if not path.exists():
-            raise FileNotFoundError(path)
+            raise FileNotFoundError(f"the {what} is missing: {path}; (re)build it with {builder}")
     edge_tags = json.loads(record_path.read_text())["tags"]["edges"]
     if not {"portal_wall", "central_wall"} <= edge_tags.keys():
         raise ValueError(f"{record_path} has no portal and central walls; rebuild the mesh with build_mesh.py")

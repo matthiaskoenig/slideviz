@@ -1640,6 +1640,7 @@ dependencies = [
     { name = "certifi" },
     { name = "dask" },
     { name = "imagecodecs" },
+    { name = "jsonschema" },
     { name = "napari", extra = ["pyqt6"] },
     { name = "numpy" },
     { name = "pillow" },
@@ -1655,7 +1656,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "jsonschema" },
     { name = "pytest" },
 ]
 
@@ -1664,6 +1664,7 @@ requires-dist = [
     { name = "certifi", specifier = ">=2026.10.19" },
     { name = "dask", specifier = ">=2026.7.1" },
     { name = "imagecodecs", specifier = ">=2026.8.16" },
+    { name = "jsonschema", specifier = ">=4.26.0" },
     { name = "napari", extras = ["pyqt6"], specifier = ">=0.8.0" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "pillow", specifier = ">=12.3.0" },
@@ -1678,10 +1679,7 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-dev = [
-    { name = "jsonschema", specifier = ">=4.26.0" },
-    { name = "pytest", specifier = ">=9.2.0" },
-]
+dev = [{ name = "pytest", specifier = ">=9.2.0" }]
 
 [[package]]
 name = "stack-data"

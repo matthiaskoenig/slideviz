@@ -35,12 +35,13 @@ def slide_stem(path: Path) -> str:
 
 
 def find_slide(directory: Path, stem: str) -> Path:
-    """The slide `<stem><suffix>` in `directory`, whichever supported format it has; the first of BACKENDS wins."""
-    for suffix in sorted(BACKENDS, key=len, reverse=True):
-        path = directory / f"{stem}{suffix}"
-        if path.exists():
-            return path
-    raise FileNotFoundError(f"no slide {stem} in {directory}; known formats: {', '.join(sorted(BACKENDS))}")
+    """The slide `<stem><suffix>` in `directory`, whichever supported format it has; more than one match is an error."""
+    found = [directory / f"{stem}{suffix}" for suffix in BACKENDS if (directory / f"{stem}{suffix}").exists()]
+    if not found:
+        raise FileNotFoundError(f"no slide {stem} in {directory}; known formats: {', '.join(sorted(BACKENDS))}")
+    if len(found) > 1:
+        raise ValueError(f"slide {stem} is ambiguous in {directory}: {', '.join(p.name for p in found)}")
+    return found[0]
 
 
 def slide_paths(directory: Path, pattern: str = "*") -> list[Path]:

@@ -123,3 +123,8 @@ def test_window_without_section_fails(tmp_path: Path) -> None:
     np.savez_compressed(lobules, **data)
     with pytest.raises(ValueError, match="no position"):
         write_scene.write(make_mesh(tmp_path), lobules, tmp_path / "out")
+
+
+def test_missing_input_named(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="lobules file is missing.*zonation_layers.py"):
+        write_scene.write(make_mesh(tmp_path), tmp_path / "none_lobules.npz", tmp_path / "out")

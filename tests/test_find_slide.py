@@ -38,3 +38,10 @@ def test_slide_paths_one_per_stem(tmp_path: Path) -> None:
     (tmp_path / "a_he.zarr").mkdir()
     found = slide_paths(tmp_path, "*_cyp2e1")
     assert [p.name for p in found] == ["a_cyp2e1.zarr", "b_cyp2e1.ome.tiff"]
+
+
+def test_find_slide_ambiguous(tmp_path: Path) -> None:
+    (tmp_path / "a_he.zarr").mkdir()
+    (tmp_path / "a_he.ome.tiff").touch()
+    with pytest.raises(ValueError, match="ambiguous.*a_he"):
+        find_slide(tmp_path, "a_he")
