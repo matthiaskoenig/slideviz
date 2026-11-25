@@ -22,7 +22,7 @@ from slideviz.analysis.tiling import pick_level_um
 from slideviz.analysis.tissue import lumen_mask, mask_from_level, pick_level
 from slideviz.data.provenance import code_version
 from slideviz.data.registration import sha256
-from slideviz.io.reader import find_slide, open_slide, slide_paths, slide_stem
+from slideviz.io.reader import find_slide, open_slide
 
 LUMEN_UM = dab.WORK_UM
 

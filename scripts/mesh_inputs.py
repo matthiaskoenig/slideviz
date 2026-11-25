@@ -25,7 +25,7 @@ from slideviz.analysis.tissue import (
 )
 from slideviz.data.provenance import code_version
 from slideviz.data.registration import sha256
-from slideviz.io.reader import find_slide, open_slide, slide_paths, slide_stem
+from slideviz.io.reader import open_slide, slide_stem
 
 OUT_NAME = "{animal}_mesh_inputs.npz"
 

@@ -37,7 +37,7 @@ from slideviz.analysis.annotation import (
 from slideviz.analysis.tiling import resampled
 from slideviz.analysis.tissue import mask_from_level, pick_level
 from slideviz.data.provenance import code_version
-from slideviz.io.reader import find_slide, open_slide, slide_paths, slide_stem
+from slideviz.io.reader import find_slide, open_slide
 
 GRID = 28  # the encoder's patch grid, as in embed_tiles.py's patches.npy
 BAND_UM = 30.0  # a guess at how far the polygons stop short of the necrosis edge

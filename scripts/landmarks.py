@@ -20,7 +20,7 @@ import numpy as np
 from slideviz.analysis.tiling import pick_level_um
 from slideviz.data.registration import napari_affine, read_sidecar
 from slideviz.data.schema import Registration
-from slideviz.io.reader import find_slide, open_slide, slide_paths, slide_stem
+from slideviz.io.reader import find_slide, open_slide
 
 VIEW_UM_PER_PX = 1.8
 CACHE = Path.home() / ".cache" / "slideviz" / "landmarks"
