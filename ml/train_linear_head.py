@@ -17,10 +17,14 @@ import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
+    average_precision_score,
     balanced_accuracy_score,
     classification_report,
     confusion_matrix,
     f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
 )
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
@@ -84,7 +88,8 @@ def main() -> None:
     head = LogisticRegression(max_iter=MAX_ITER, class_weight=weight)
     head.fit(scaler.transform(train_x), train_y)
 
-    predicted = head.predict(scaler.transform(test_x))
+    scores = head.predict_proba(scaler.transform(test_x))
+    predicted = head.classes_[scores.argmax(axis=1)]
     accuracy = accuracy_score(test_y, predicted)
     balanced = balanced_accuracy_score(test_y, predicted)  # rare classes count equally
     macro_f1 = f1_score(test_y, predicted, average="macro")
@@ -117,6 +122,12 @@ def main() -> None:
         for i in wrong_rows
     ]
     (out / "misclassified.json").write_text(json.dumps(errors, indent=2) + "\n")
+    np.savez_compressed(out / "test_scores.npz", scores=scores, labels=test_y,
+                        names=np.array(test_names))
+
+    onehot = np.eye(len(classes))[test_y]
+    per_class_auc = roc_auc_score(onehot, scores, average=None)
+    per_class_ap = average_precision_score(onehot, scores, average=None)
 
     results = {
         "written": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -132,6 +143,13 @@ def main() -> None:
         "accuracy": round(float(accuracy), 4),
         "balanced_accuracy": round(float(balanced), 4),
         "macro_f1": round(float(macro_f1), 4),
+        # the six metrics of the HepatoBench paper's Fig. 2, macro over classes
+        "macro_precision": round(float(precision_score(test_y, predicted, average="macro")), 4),
+        "macro_recall": round(float(recall_score(test_y, predicted, average="macro")), 4),
+        "macro_auc": round(float(per_class_auc.mean()), 4),
+        "macro_aupr": round(float(per_class_ap.mean()), 4),
+        "per_class_auc": {c: round(float(v), 4) for c, v in zip(classes, per_class_auc, strict=True)},
+        "per_class_ap": {c: round(float(v), 4) for c, v in zip(classes, per_class_ap, strict=True)},
         "per_class_f1": {
             c: round(float(v), 4)
             for c, v in zip(classes, f1_score(test_y, predicted, average=None, zero_division=0),

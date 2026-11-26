@@ -18,16 +18,18 @@ import pylibCZIrw.czi as pyczi
 
 log = logging.getLogger(__name__)
 
-# Tile edge in level-0 pixels. ~12 MB per tile as RGB.
+# Tile edge in the level's own pixels, ~12 MB per tile as RGB.
 TILE = 2048
 
 
 @dataclass(frozen=True)
 class SlideInfo:
+    """One scene's path, size, stage origin and pixel size, returned by every reader backend."""
+
     path: Path
     scene: int
     n_scenes: int
-    # stage-relative origin, usually negative; provenance only, registration places layers
+    # stage-relative scene origin, usually negative; czi tile reads are offset by it
     x0: int
     y0: int
     width: int
@@ -41,7 +43,7 @@ def _pixel_size_um(czi) -> float:
     sizes = {d["@Id"]: float(d["Value"]) for d in distances if d["@Id"] in ("X", "Y")}
 
     x, y = sizes["X"], sizes.get("Y", sizes["X"])
-    if not math.isclose(x, y, rel_tol=1e-6):  # anisotropic, one number cannot describe both
+    if not math.isclose(x, y, rel_tol=1e-6):  # anisotropic: X and Y pixel sizes differ
         log.warning("anisotropic pixels, X=%.4f um Y=%.4f um; using X", x * 1e6, y * 1e6)
     return x * 1e6  # Zeiss stores it in metres
 
@@ -49,7 +51,7 @@ def _pixel_size_um(czi) -> float:
 def read_info(path: Path, scene: int = 0) -> SlideInfo:
     """Read one scene's geometry and scale without decoding any image data."""
     with pyczi.open_czi(str(path)) as czi:
-        # per scene, not the union across them, which is mostly empty stage
+        # bounding rectangle per scene; total_bounding_box is the union of all scenes, mostly empty stage
         scenes = czi.scenes_bounding_rectangle
         if scene not in scenes:
             raise ValueError(f"{path.name} has no scene {scene}, only {sorted(scenes)}")
@@ -70,17 +72,13 @@ def read_info(path: Path, scene: int = 0) -> SlideInfo:
 def _read_tile(
     path: str, x: int, y: int, w: int, h: int, downsample: int, out_h: int, out_w: int
 ) -> np.ndarray:
-    """Read one tile as RGB, shaped exactly (out_h, out_w, 3).
-
-    The requested read is clipped to the slide edge, so it can come back
-    smaller than the tile it has to fill; the remainder is padded white.
-    """
-    # reopened per tile: 0.5 ms against a 15 ms read, and CacheOptions measured no faster
+    """One tile as RGB of exactly (out_h, out_w, 3), padded white where the slide edge clips the read."""
+    # reopened per tile: opening costs 0.5 ms against a 15 ms read
     with pyczi.open_czi(path) as czi:
         tile = czi.read(
             plane={"T": 0, "Z": 0, "C": 0},
-            roi=(x, y, w, h),  # stage coordinates, not pixel offsets into the slide
-            zoom=1 / downsample,  # the reader downsamples, full-res pixels never arrive
+            roi=(x, y, w, h),  # stage coordinates, offset by the scene origin
+            zoom=1 / downsample,  # the reader returns pixels at this zoom directly
             background_pixel=(255, 255, 255),  # fills roi parts outside the scan grid
         )
 
@@ -133,7 +131,7 @@ def read_level(info: SlideInfo, downsample: int) -> da.Array:
 def count_levels(width: int, height: int) -> int:
     """Levels needed for the top one to fit in a single tile."""
     levels = 1
-    while max(width, height) / 2 ** (levels - 1) > TILE:  # halve until the overview is one tile
+    while max(width, height) / 2 ** (levels - 1) > TILE:
         levels += 1
     return levels
 
@@ -141,6 +139,5 @@ def count_levels(width: int, height: int) -> int:
 def read_pyramid(path: Path, scene: int = 0) -> tuple[SlideInfo, list[da.Array]]:
     """Return (info, zoom levels) for one scene, with level 0 at full resolution."""
     info = read_info(path, scene)
-    # derived, not a constant: a bigger slide gets the extra levels it needs
     n_levels = count_levels(info.width, info.height)
     return info, [read_level(info, 2**i) for i in range(n_levels)]

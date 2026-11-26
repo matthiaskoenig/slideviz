@@ -18,6 +18,7 @@ import tifffile
 import zarr
 
 from slideviz.io.czi import SlideInfo
+from slideviz.io.ome_tiff import pixel_size_um
 
 log = logging.getLogger(__name__)
 
@@ -31,28 +32,6 @@ TILE = 1024
 def image_series(slide: tifffile.TiffFile) -> list[tifffile.TiffPageSeries]:
     """Series holding slide images, with the scanner's thumbnails dropped."""
     return [s for s in slide.series if s.name not in THUMBNAILS]
-
-
-def _pixel_size_um(page: tifffile.TiffPage) -> float:
-    """Pixel size in micrometres, warning if the two axes disagree."""
-
-    def resolution(code: int) -> float | None:
-        value = page.tags[code].value if code in page.tags else None
-        # TIFF stores resolution as a rational, in ResolutionUnit per pixel
-        return value[0] / value[1] if value and value[0] and value[1] else None
-
-    x_res, y_res = resolution(282), resolution(283)
-    if not x_res:
-        raise ValueError(f"{page.parent.filename} has no XResolution")
-
-    # NDPI records pixels per centimetre, so 10000 um over that is the pixel size
-    x = 10000 / x_res
-    y = 10000 / y_res if y_res else x
-    # NDPI rounds the two resolutions independently (43990 against 43991 on this
-    # scanner), so the tolerance is loose enough not to call that anisotropy
-    if abs(x - y) > 1e-3 * max(x, y):
-        log.warning("anisotropic pixels, X=%.4f um Y=%.4f um; using X", x, y)
-    return x
 
 
 def read_info(path: Path, scene: int = 0) -> SlideInfo:
@@ -72,7 +51,7 @@ def read_info(path: Path, scene: int = 0) -> SlideInfo:
             y0=0,
             width=width,
             height=height,
-            pixel_size_um=_pixel_size_um(level0.keyframe),
+            pixel_size_um=pixel_size_um(level0.keyframe, tolerance=1e-3),  # NDPI rounds X and Y apart: 43990 against 43991
         )
 
 
@@ -80,6 +59,7 @@ def _chunks(shape: tuple[int, ...]) -> tuple[tuple[int, ...], ...]:
     """Square tiles across one level, with the remainder as a smaller edge tile."""
 
     def along(length: int) -> tuple[int, ...]:
+        """Chunk sizes along one axis: full tiles, then the remainder."""
         full, rest = divmod(length, TILE)
         return (TILE,) * full + ((rest,) if rest else ())
 
@@ -87,7 +67,7 @@ def _chunks(shape: tuple[int, ...]) -> tuple[tuple[int, ...], ...]:
 
 
 def _tile(level: zarr.Array, block_info: dict | None = None) -> np.ndarray:
-    """One tile, read from the level dask asks for it from."""
+    """The block of `level` at the array location dask passes in block_info."""
     (y0, y1), (x0, x1), (c0, c1) = block_info[None]["array-location"]
     return np.asarray(level[y0:y1, x0:x1, c0:c1])
 
@@ -97,6 +77,7 @@ def _decoded_once(level: da.Array) -> Callable[[], np.ndarray]:
     held: list[np.ndarray] = []
 
     def decode() -> np.ndarray:
+        """The decoded level, computed on the first call and held after."""
         if not held:
             held.append(level.compute())
         return held[0]
@@ -109,6 +90,22 @@ def _decimated(decode: Callable[[], np.ndarray], step: int) -> np.ndarray:
     return decode()[::step, ::step]
 
 
+def _halved(level: da.Array) -> da.Array:
+    """The level at half size, each pixel the rounded mean of a 2 x 2 block."""
+    height, width = level.shape[0] // 2 * 2, level.shape[1] // 2 * 2
+    return da.coarsen(np.mean, level[:height, :width], {0: 2, 1: 2}).round().astype(np.uint8)
+
+
+def _fill_halvings(levels: list[da.Array]) -> list[da.Array]:
+    """Levels with the halvings the scanner skipped put in, so each level is half the one above."""
+    filled = [levels[0]]
+    for level in levels[1:]:
+        while filled[-1].shape[1] / level.shape[1] > 2.5:
+            filled.append(_halved(filled[-1]))
+        filled.append(level)
+    return filled
+
+
 def read_pyramid(path: Path, scene: int = 0) -> tuple[SlideInfo, list[da.Array]]:
     """Return (info, zoom levels) for one scene, with level 0 at full resolution."""
     info = read_info(path, scene)
@@ -119,13 +116,16 @@ def read_pyramid(path: Path, scene: int = 0) -> tuple[SlideInfo, list[da.Array]]
         # the store decodes strips on demand and outlives the handle it was made from
         store = zarr.open(series.aszarr(), mode="r")
 
-    # One task per tile, avoiding 716k tasks that would exhaust memory.
+    # one dask task per TILE x TILE block, each spanning many native NDPI JPEG tiles
+    arrays = [store[str(i)] for i in range(len(shapes))] if len(shapes) > 1 else [store]
     levels = [
-        da.map_blocks(_tile, level=store[str(i)], dtype=np.uint8, chunks=_chunks(shape))
-        for i, shape in enumerate(shapes)
+        da.map_blocks(_tile, level=array, dtype=np.uint8, chunks=_chunks(shape))
+        for array, shape in zip(arrays, shapes, strict=True)
     ]
+    # some scans store levels in steps of 4 (0.23, 0.91, 3.64 um/px)
+    levels = _fill_halvings(levels)
 
-    # Derive levels below scanner's coarsest, cached and decoded once to save decode time
+    # levels below the scanner's coarsest, decimated from one cached decode of it
     coarsest = _decoded_once(levels[-1])
     step, shape = 1, levels[-1].shape
     while max(shape[:2]) > TILE:

@@ -1,11 +1,9 @@
-"""Hide the scanner background, so a layer shows only tissue and nothing else."""
+"""Transparent scanner background for an RGB slide pyramid."""
 
 from __future__ import annotations
 
 import dask.array as da
 import numpy as np
-
-from slideviz.analysis.tissue import mask_from_level, pick_level
 
 OPAQUE = 255
 
@@ -26,20 +24,12 @@ def _alpha_block(block, block_info, mask, shape_rc) -> np.ndarray:
         return np.zeros(block.shape, np.uint8)
 
     (row0, row1), (col0, col1) = block_info[0]["array-location"][:2]
-    # map this chunk's own pixel range onto the small mask, so nothing global is built
+    # this chunk's pixel range on the small mask
     rows = (np.arange(row0, row1) * mask.shape[0] // shape_rc[0]).clip(0, mask.shape[0] - 1)
     cols = (np.arange(col0, col1) * mask.shape[1] // shape_rc[1]).clip(0, mask.shape[1] - 1)
     return (mask[np.ix_(rows, cols)] * OPAQUE).astype(np.uint8)[..., None]
 
 
-def to_rgba(levels: list[da.Array], mask: np.ndarray | None = None) -> list[da.Array]:
-    """An RGB pyramid with the background made transparent.
-
-    The mask is derived from the level closest to `tissue.TARGET_EDGE_PX` unless one
-    is supplied, so a caller that already has a mask does not recompute it.
-    """
-    if mask is None:
-        index = pick_level(levels)
-        mask = mask_from_level(np.asarray(levels[index]))
-
+def to_rgba(levels: list[da.Array], mask: np.ndarray) -> list[da.Array]:
+    """An RGB pyramid with the background outside `mask` made transparent."""
     return [da.concatenate([level, alpha_for(level, mask)], axis=-1) for level in levels]

@@ -13,14 +13,14 @@ from pathlib import Path
 import numpy as np
 from scipy.ndimage import binary_fill_holes
 from skimage.measure import approximate_polygon, find_contours, label
-from skimage.morphology import closing, disk, remove_small_holes
+from skimage.morphology import remove_small_holes
 
 log = logging.getLogger(__name__)
 
-# below this many tiles a region is noise, not a lesion worth drawing
+# fewest tiles in a region worth drawing
 MIN_TILES = 4
 
-# how far a traced outline may sit from the mask, in tile widths; keeps point counts sane
+# approximate_polygon tolerance: how far a simplified outline may sit from the traced one, in tile widths
 TOLERANCE_TILES = 0.4
 
 
@@ -34,11 +34,9 @@ def flagged_mask(rows: list[dict], scores: np.ndarray, threshold: float) -> np.n
     return mask
 
 
-def clean_mask(
-    mask: np.ndarray, min_tiles: int = MIN_TILES, bridge: bool = False
-) -> np.ndarray:
-    """Fill small holes, optionally closing gaps between lesions."""
-    cleaned = closing(mask, disk(1)) if bridge else mask
+def clean_mask(mask: np.ndarray, min_tiles: int = MIN_TILES) -> np.ndarray:
+    """Fill holes smaller than `min_tiles` tiles."""
+    cleaned = mask
     # max_size removes holes of that size or smaller, so one less keeps min_tiles intact
     return remove_small_holes(cleaned, max_size=min_tiles - 1)
 
@@ -59,7 +57,7 @@ def mask_to_polygons(
         for contour in contours:
             simplified = approximate_polygon(contour, tolerance=tolerance)
             if len(simplified) < 4:
-                continue  # fewer than four points is not a region
+                continue  # a closed triangle takes four points
             # shoelace area in tile units, so the threshold means "this many tiles"
             y, x = simplified[:, 0], simplified[:, 1]
             area = abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1))) / 2
@@ -104,7 +102,6 @@ def suggest_polygons(
     return {
         "slide": record.get("slide"),
         "animal": record["animal"],
-        "frame": overview.get("frame"),
         "width": overview["width"],
         "height": overview["height"],
         "model_generated": True,  # review and correct before these count as annotation

@@ -1,11 +1,14 @@
-"""Predict one held-out slide's tiles and write the scores next to their positions.
+"""Predict one held-out animal's tiles and write the scores next to their grid positions.
 
-The model that predicts a slide is never trained on it, so this runs one fold of the
-leave-one-animal-out split and writes only that animal. The output carries each tile's
-grid position, so the viewer can paint the scores back onto the slide.
+One fold of the leave-one-animal-out split: the head is fitted on every other animal, and
+the viewer paints the scores back onto the slide from the grid positions.
 
     uv run python predict_slide.py --cache /data/michelle/mouse/embeddings \
-        --animal 281mg_m1 --out /data/michelle/mouse/predictions
+        --tiles /data/michelle/mouse/tiles --animal 281mg_m1 \
+        --out /data/michelle/mouse/predictions
+
+With --nested, the area uses the cutoff the nested run chose for this animal, and the
+file is written only when it reproduces that run's area.
 """
 
 from __future__ import annotations
@@ -16,12 +19,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler
+from train_necrosis import POSITIVE, fit_head
 
-POSITIVE = 0.5
-MAX_ITER = 2000
-CLASS_WEIGHT = "balanced"
+CUTOFF = 0.5  # score cutoff without --nested
 
 
 def main() -> None:
@@ -32,7 +32,14 @@ def main() -> None:
     parser.add_argument("--animal", required=True, help="the animal to hold out and predict")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--positive", type=float, default=POSITIVE)
+    parser.add_argument("--nested", type=Path, default=None,
+                        help="train_necrosis.py --nested results, for this animal's cutoff")
     args = parser.parse_args()
+
+    cutoff, expected = CUTOFF, None
+    if args.nested:
+        folds = {f["held_out"]: f for f in json.loads(args.nested.read_text())["folds"]}
+        cutoff, expected = folds[args.animal]["cutoff"], folds[args.animal]["area_predicted"]
 
     args.out.mkdir(parents=True, exist_ok=True)
     meta = json.loads((args.cache / "embeddings_meta.json").read_text())
@@ -49,9 +56,7 @@ def main() -> None:
     test, train = animals == args.animal, animals != args.animal
     print(f"=== fit on {train.sum():,} tiles, predict {test.sum():,} of {args.animal} ===")
 
-    scaler = StandardScaler().fit(embeddings[train])  # train alone, so test statistics stay out
-    head = LogisticRegression(max_iter=MAX_ITER, class_weight=CLASS_WEIGHT)
-    head.fit(scaler.transform(embeddings[train]), target[train])
+    scaler, head = fit_head(embeddings[train], target[train])
     scores = head.predict_proba(scaler.transform(embeddings[test]))[:, 1]
 
     rows = [r for r in manifest["tiles"] if r["animal"] == args.animal]
@@ -65,11 +70,13 @@ def main() -> None:
         "encoder": meta["model"],
         "trained_on": sorted(set(animals[train])),
         "positive_threshold": args.positive,
+        "cutoff": cutoff,
+        "cutoff_source": str(args.nested) if args.nested else "fixed",
         "n_tiles": len(rows),
         "size_px": rows[0]["size_px"],
         "level": rows[0]["level"],
         "area_annotated": round(float(target[test].mean()), 4),
-        "area_predicted": round(float((scores >= 0.5).mean()), 4),
+        "area_predicted": round(float((scores >= cutoff).mean()), 4),
         "tiles": [
             {
                 "row": r["row"],
@@ -82,6 +89,9 @@ def main() -> None:
             for r, s in zip(rows, scores, strict=True)
         ],
     }
+    if expected is not None and record["area_predicted"] != expected:
+        raise SystemExit(f"{args.animal}: area {record['area_predicted']} does not reproduce "
+                         f"the nested run's {expected}, nothing written")
     path = args.out / f"{args.animal}_predictions.json"
     path.write_text(json.dumps(record, indent=2) + "\n")
 

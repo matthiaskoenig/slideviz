@@ -4,9 +4,12 @@ version = "0.1.0"
 description = "Frozen pathology encoders and linear heads, run in their own environment"
 requires-python = ">=3.12"
 dependencies = [
+    "certifi>=2026.10.19",  # GHSA-6q48-6c7w-9gw2: emSign roots with compromised intermediates
     "numpy>=2.0",
     "pillow>=11.0",
+    "scikit-image>=0.25",  # rgb2lab/lab2rgb for stain matching, see stain_norm.py
     "scikit-learn>=1.6",
+    "threadpoolctl>=3.5",  # threadpool_limits in train_patch_head.py
     "timm>=1.0.20",
     "torch>=2.6",
     "torchvision>=0.21",

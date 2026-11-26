@@ -1,12 +1,11 @@
 # SlideViz
 
-Visualization for whole-slide liver histology.
+Whole-slide liver histology in napari: slides, their registration, and the readouts computed from them as layers.
 
-Reads whole-slide images and displays them in napari as multiscale layers.
+## Install
 
-## Setup
-
-Requires [uv](https://docs.astral.sh/uv/getting-started/installation/).
+Requires [uv](https://docs.astral.sh/uv/getting-started/installation/) and Python 3.12 or 3.13
+(3.14 has no `pylibCZIrw` wheel).
 
 ```bash
 git clone https://github.com/matthiaskoenig/slideviz.git
@@ -14,72 +13,45 @@ cd slideviz
 uv sync
 ```
 
-Point it at a directory holding the slides **and their JSON sidecars**:
+## Data
+
+Point it at a directory of slides (`.czi`, `.ndpi`, OME-TIFF or OME-Zarr) with one JSON sidecar
+per slide, named `<stem>.json` or `<stem>.ome.json`:
 
 ```bash
-echo 'SLIDEVIZ_DATA=/path/to/slides' > .env   # persistent, any terminal
-export SLIDEVIZ_DATA=/path/to/slides          # or per-session
+echo 'SLIDEVIZ_DATA=/path/to/slides' > .env   # persistent
+export SLIDEVIZ_DATA=/path/to/slides          # or per session
 ```
+
+Readouts are found beside the slides: `predictions/` (necrosis maps, CYP2E1 readouts),
+`flatten/` (stain flattening fields) and `stain_reference.json`.
 
 ## Use
 
 ```bash
-uv run slideviz-view                                 # browse slides in napari
-uv run slideviz-view --data /path/to/slides          # override the configured path
+uv run slideviz-view                          # browse slides in napari
+uv run slideviz-view --data /path/to/slides   # another directory
+uv run slideviz-view --no-reindex             # open the existing index
 
-uv run slideviz-view --no-reindex                    # skip the rebuild
-
-uv run slideviz-index /path/to/slides                # rebuild the index alone
-uv run slideviz-index --sql "SELECT file FROM slides WHERE dose_mg_per_kg > 200"
-uv run slideviz-index --schema                       # the sidecar JSON Schema
+uv run slideviz-index /path/to/slides         # rebuild the index
+uv run slideviz-index --schema                # the sidecar JSON Schema
 ```
 
-## Registration
-
-    cd registration && uv sync                       
-    uv run python registration/register.py 375mg_m1
-
-Converts the block's slides to OME-TIFF, runs VALIS, checks the error against a
-500 µm limit, writes the transform into the sidecars, and reports where the TIFFs
-can be archived. Above the limit nothing is written.
-
-Registration is a separate uv project with its own venv: `valis-wsi` needs
-`numpy<2`, this project needs `numpy>=2`. They meet through `transforms.json` on
-disk: `valis_register.py` writes it to the run's output directory
-(`valis_runs/out_<block>/transforms.json`), `slideviz.data.registration` reads it and
-copies the matrix into the sidecars. See
-[`registration/README.md`](registration/README.md).
-
-| Script | Env | Role |
-|---|---|---|
-| `registration/register.py` | slideviz | entry point |
-| `registration/valis_register.py` | registration | the VALIS call |
-
-## Browser viewer
-
-    cd web && uv run python build_config.py
-
-Builds a static [Vitessce](https://vitessce.io) page for the converted OME-Zarr
-slides, served as plain static files behind Caddy. Setup, deployment and the
-current limits are in [`web/README.md`](web/README.md).
-
-Also a separate uv project: `vitessce[all]` pins `ome-zarr==0.15.0`, which caps
-`dask<=2026.1.1`, and this project needs `dask>=2026.7.1`. `build_config.py`
-never imports slideviz; it reads the sidecars by path.
-
-## Configuration
+The index is derived from the sidecars and rebuilt on every start unless `--no-reindex`.
 
 | Variable | Meaning | Default |
 |---|---|---|
-| `SLIDEVIZ_DATA` | Directory of slides and their sidecars | none, must be set |
-| `SLIDEVIZ_DB` | Where the index is written | `~/.cache/slideviz/slides.db` |
-| `SLIDEVIZ_ZARR_DIR` | Sidecars the `web/` build reads | the mouse `APAP_zarr` path |
+| `SLIDEVIZ_DATA` | slides and their sidecars | none, must be set |
+| `SLIDEVIZ_DB` | where the index is written | `~/.cache/slideviz/slides.db` |
+| `SLIDEVIZ_PREDICTIONS` | readouts | `<data>/predictions` |
+| `SLIDEVIZ_STAIN_REFERENCE` | stain statistics the viewer matches slides to | `<data>/stain_reference.json` |
 
-The index is derived from the sidecars and rebuilt on every start.
+## Layout
 
-## Python version
-
-The project runs on **3.13**. 3.14 is blocked by
-[pylibCZIrw](https://pypi.org/project/pylibczirw/#files), the `.czi` reader,
-which ships no cp314 wheel (its metadata claims 3.14 support, so resolution
-succeeds and only the install fails, on a source build needing CMake).
+| Folder | What | Environment |
+|---|---|---|
+| `src/slideviz/` | readers, sidecar schema and index, analysis, viewer | this project |
+| [`registration/`](registration/README.md) | serial-section registration, one command | own venv |
+| [`ml/`](ml/README.md) | frozen encoder, tile and patch heads, necrosis maps | own venv, GPU |
+| [`scripts/`](scripts/README.md) | the pipeline steps a reported result depends on | this project |
+| [`web/`](web/README.md) | static browser viewer, parked | own venv |

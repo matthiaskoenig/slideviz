@@ -1,4 +1,4 @@
-"""Registration transforms: from a VALIS run into the sidecars, and out to a viewer."""
+"""Registration transforms: from a run's transforms.json into the sidecars, and out to a viewer."""
 
 from __future__ import annotations
 
@@ -8,9 +8,10 @@ from pathlib import Path
 
 import numpy as np
 
-from slideviz.data.schema import Registration
+from slideviz.analysis.outline import SWAP_XY
+from slideviz.data.schema import NonRigid, Registration
 
-SWAP_XY = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+FIELD_DIR = "transforms"  # beside the sidecars; NonRigid.path points into it
 
 
 def napari_affine(registration: Registration, pixel_size_um: float = 1.0) -> np.ndarray:
@@ -20,16 +21,8 @@ def napari_affine(registration: Registration, pixel_size_um: float = 1.0) -> np.
     return matrix
 
 
-VALIS_METHOD = "valis-1.2.0 rigid, GradientOD"
-
-
-def from_valis_run(
-    run_dir: Path, error_um: float | None = None, method: str = VALIS_METHOD
-) -> dict[str, Registration]:
-    """Read a run's transforms.json, keyed by slide stem.
-
-    `method` records what produced it, since outline_register.py writes this file too.
-    """
+def from_valis_run(run_dir: Path, method: str, code: str | None = None) -> dict[str, Registration]:
+    """A run's transforms.json as Registrations by slide stem, reference excluded; `method` and `code` record what produced it."""
     data = json.loads((run_dir / "transforms.json").read_text())
     reference = Path(data["reference"]).name.split(".")[0]
 
@@ -42,32 +35,88 @@ def from_valis_run(
             matrix=entry["matrix"],
             slide_shape_rc=entry["slide_shape_rc"],
             method=method,
-            error_um=error_um,
             # how exactly the affine fit the full warp
             residual_px=entry.get("residual_px"),
             outline_dice=entry.get("outline_dice"),
             registered=datetime.now(UTC).date().isoformat(),  # UTC, for provenance
+            code=code,
         )
     return found
 
 
-def write_to_sidecars(
-    registrations: dict[str, Registration], slide_dir: Path, write: bool = False
-) -> int:
+def find_sidecar(directory: Path, stem: str) -> Path | None:
+    """A slide's sidecar in `directory`, named <stem>.json or <stem>.ome.json."""
+    for name in (f"{stem}.json", f"{stem}.ome.json"):
+        if (directory / name).exists():
+            return directory / name
+    return None
+
+
+def read_sidecar(directory: Path, stem: str) -> dict:
+    """A slide's sidecar JSON from `directory`."""
+    path = find_sidecar(directory, stem)
+    if path is None:
+        raise FileNotFoundError(f"no sidecar for {stem} in {directory}")
+    return json.loads(path.read_text())
+
+
+def write_to_sidecars(registrations: dict[str, Registration], slide_dir: Path) -> None:
     """Merge registrations into the sidecars of `slide_dir`, matching on file stem."""
-    changed = 0
     for name, registration in registrations.items():
-        # <name>.ome.json keeps the .ome in its stem, so cut at the first dot
-        matches = [p for p in slide_dir.glob("*.json") if p.name.split(".")[0] == name]
-        if not matches:
+        sidecar = find_sidecar(slide_dir, name)
+        if sidecar is None:
             print(f"  ! no sidecar for {name}")
             continue
 
-        sidecar = matches[0]
         data = json.loads(sidecar.read_text())
         data["registration"] = registration.model_dump(exclude_none=True)
-        changed += 1
         print(f"  {name}: registered to {registration.reference}")
-        if write:
-            sidecar.write_text(json.dumps(data, indent=2) + "\n")
-    return changed
+        sidecar.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def sha256(path: Path) -> str:
+    """Hex digest of a file, read in chunks."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def attach_nonrigid(summary_path: Path, slide_dir: Path) -> NonRigid:
+    """Point a sidecar at its non-rigid field, refusing one computed on another matrix."""
+    import shutil
+
+    summary = json.loads(summary_path.read_text())
+    field = summary_path.parent / summary["field"]
+    sidecar = find_sidecar(slide_dir, summary["slide"])
+    if sidecar is None:
+        raise FileNotFoundError(f"no sidecar for {summary['slide']} in {slide_dir}")
+
+    data = json.loads(sidecar.read_text())
+    registration = Registration(**data["registration"])
+    with np.load(field) as stored:
+        if not np.allclose(stored["matrix"], registration.matrix):
+            raise ValueError(f"{summary['slide']}: the field was computed on a different matrix "
+                             "than the sidecar carries")
+
+    nonrigid = NonRigid(
+        path=f"{FIELD_DIR}/{field.name}",
+        sha256=sha256(field),
+        grid_um_per_px=summary["grid_um_per_px"],
+        grid_shape_rc=summary["grid_shape_rc"],
+        method=summary["method"],
+        median_um=summary["median_um"],
+        p95_um=summary["p95_um"],
+        registered=summary["registered"],
+        code=summary.get("code"),
+    )
+    print(f"  {summary['slide']}: {nonrigid.path}, median {nonrigid.median_um} µm")
+    (slide_dir / FIELD_DIR).mkdir(exist_ok=True)
+    shutil.copy2(field, slide_dir / nonrigid.path)
+    data["registration"]["nonrigid"] = nonrigid.model_dump(exclude_none=True)
+    sidecar.write_text(json.dumps(data, indent=2) + "\n")
+    return nonrigid
+

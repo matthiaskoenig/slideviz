@@ -1,12 +1,4 @@
-"""Tissue masks for whole-slide images.
-
-The background of a scanned slide has two parts: synthetic white outside the
-scan grid, and real empty glass inside it. Both are background, but only the
-step between them is an artifact of where the scanner started, so feature
-detectors treat it as the strongest edge on the slide. Masking to tissue keeps
-that edge out of registration, and gives area measurements an honest
-denominator.
-"""
+"""Tissue masks for whole-slide images."""
 
 from __future__ import annotations
 
@@ -15,9 +7,11 @@ from pathlib import Path
 
 import dask.array as da
 import numpy as np
+from scipy.ndimage import binary_opening, distance_transform_edt
 from skimage.filters import threshold_otsu
 from skimage.measure import label
 from skimage.morphology import closing, disk, remove_small_holes, remove_small_objects
+from skimage.transform import resize
 
 from slideviz.io.reader import open_slide
 
@@ -31,6 +25,11 @@ CLOSING_RADIUS = 3  # bridges the gaps torn sections leave along their edge
 SPECKLE_PX = 2000  # dust and pen marks, at the working level
 HOLE_PX = 2000  # vessel lumina and tears, filled so the mask is solid
 KEEP_FRACTION = 0.05  # a piece this much of the largest is a real fragment
+
+# Working-resolution mask, sizes in um so they hold at any level
+LUMEN_OPEN_UM = 4  # nucleus-sized gaps in pale tissue open away, lumina survive
+LUMEN_MIN_UM2 = 500  # smaller glass-like patches stay tissue
+RIM_UM = 50  # the section edge carries a staining artefact
 
 
 def pick_level(levels: list[da.Array], target_edge_px: int = TARGET_EDGE_PX) -> int:
@@ -61,12 +60,28 @@ def keep_large_components(mask: np.ndarray) -> np.ndarray:
     """Drop components far smaller than the largest, keeping genuinely torn pieces."""
     labelled = label(mask)
     sizes = np.bincount(labelled.ravel())
-    sizes[0] = 0  # background is not a component
+    sizes[0] = 0  # label 0 is background
     if not sizes.any():
         return mask
 
     keep = np.flatnonzero(sizes >= sizes.max() * KEEP_FRACTION)
     return np.isin(labelled, keep)
+
+
+def lumen_mask(glass_like: np.ndarray, um_per_px: float) -> np.ndarray:
+    """Glass-like regions inside the tissue smooth and large enough to be lumina or tears."""
+    radius = max(1, round(LUMEN_OPEN_UM / um_per_px))
+    opened = binary_opening(glass_like, structure=disk(radius))
+    return remove_small_objects(opened, max_size=int(LUMEN_MIN_UM2 / um_per_px**2))
+
+
+def working_mask(
+    outline: np.ndarray, glass_like: np.ndarray, um_per_px: float, rim_um: float = RIM_UM
+) -> np.ndarray:
+    """Tissue at a working level: the coarse outline minus lumina and an edge band."""
+    outline = resize(outline, glass_like.shape, order=0).astype(bool)
+    inside = distance_transform_edt(outline) * um_per_px >= rim_um
+    return inside & ~lumen_mask(glass_like, um_per_px)
 
 
 def tissue_mask(
@@ -85,6 +100,14 @@ def tissue_mask(
     return mask, index, um_per_px
 
 
-def tissue_area_mm2(mask: np.ndarray, um_per_px: float) -> float:
-    """Tissue area in square millimetres."""
-    return float(mask.sum()) * (um_per_px / 1000.0) ** 2
+def pyramid_factor(fine_width: int, coarse_width: int) -> int:
+    """The power of two between two pyramid levels: each level halves the one above."""
+    return 2 ** round(np.log2(fine_width / coarse_width))
+
+
+# a coarser level's pixel q is centred on fine pixel factor * q, as pyrDown halving places it
+def on_level(mask: np.ndarray, factor: int, top: int, left: int, shape_rc: tuple[int, int]) -> np.ndarray:
+    """A level's pixels from (top, left) over shape_rc on a coarser level's mask, coarse pixel q centred on factor * q."""
+    rows = ((np.arange(top, top + shape_rc[0]) + factor // 2) // factor).clip(0, mask.shape[0] - 1)
+    cols = ((np.arange(left, left + shape_rc[1]) + factor // 2) // factor).clip(0, mask.shape[1] - 1)
+    return mask[np.ix_(rows, cols)]

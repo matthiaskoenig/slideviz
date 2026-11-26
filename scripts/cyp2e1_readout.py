@@ -1,0 +1,309 @@
+"""DAB-positive area of each stained slide and its gradient on the H&E grid, split by the necrosis map."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+from datetime import UTC, datetime
+from multiprocessing import Pool
+from pathlib import Path
+
+import numpy as np
+from PIL import Image, ImageDraw
+
+from slideviz.analysis import dab, flatten, tissue
+from slideviz.analysis.dab import (
+    NO_TISSUE,
+    POSITION_SCALE,
+    STEPS,
+    WORK_UM,
+    glass_colour,
+    gradient_steps,
+    relative_position,
+    relative_readout,
+)
+from slideviz.analysis.flatten import FLATTEN_DIR
+from slideviz.analysis.prediction import NECROSIS_RECORD, calls_on_level
+from slideviz.analysis.tiling import pick_level_um
+from slideviz.analysis.tissue import mask_from_level, pick_level
+from slideviz.analysis.warp import load_field, nonrigid_levels
+from slideviz.data.provenance import code_version
+from slideviz.data.registration import read_sidecar, sha256
+from slideviz.data.schema import Registration
+from slideviz.io.reader import open_slide
+
+NECROTIC_MIN_SHARE = 0.01  # below 1 % of the covered tissue necrotic (specks on the controls), no necrotic readout
+DAB_SETTINGS = ("GLASS_OD", "SMOOTH_UM", "WINDOW_UM", "STEP_UM", "CELL_UM", "LOW_Q", "HIGH_Q",
+                "MIDPOINT", "CONTRAST_MIN", "WINDOW_TISSUE_MIN", "STEPS", "POSITION_SCALE", "NO_TISSUE")
+TISSUE_SETTINGS = ("LUMEN_OPEN_UM", "LUMEN_MIN_UM2", "RIM_UM")
+
+COLUMNS = 4
+PANEL_PX = 300
+CAPTION_PX = 22
+SHEET_STRIDE = 4  # the sheet reads every 4th map pixel
+NEGATIVE, POSITIVE, OUTSIDE = (236, 236, 244), (139, 69, 19), (154, 154, 154)
+# one colour per step from negative to positive, then outside, indexed by gradient_steps
+STEP_COLOURS = np.array([*np.linspace(NEGATIVE, POSITIVE, STEPS), OUTSIDE]).round().astype(np.uint8)
+
+
+def percent(part: np.ndarray, whole: np.ndarray) -> float | None:
+    """Share of `whole` that is also `part`, in percent."""
+    return round(100 * float((part & whole).sum() / whole.sum()), 1) if whole.any() else None
+
+
+def counts(steps: np.ndarray, where: np.ndarray) -> list[int]:
+    """Pixels in each gradient step within `where`."""
+    return np.bincount(steps[where], minlength=STEPS + 1)[:STEPS].tolist()
+
+
+def shares(counted: list[int]) -> list[float] | None:
+    """Step counts as percent of their sum."""
+    total = sum(counted)
+    return [round(100 * c / total, 1) for c in counted] if total else None
+
+
+def dice(a: np.ndarray, b: np.ndarray) -> float | None:
+    """Overlap of two masks, twice their intersection over their summed sizes."""
+    size = int(a.sum() + b.sum())
+    return round(2 * float((a & b).sum()) / size, 3) if size else None
+
+
+def readout(rgb: np.ndarray, glass: np.ndarray, outline: np.ndarray, um_per_px: float,
+            necrosis: tuple[np.ndarray, np.ndarray] | None) -> tuple[dict, np.ndarray, np.ndarray]:
+    """Numbers, positive map and stored position for one RGB level, split by necrosis when given."""
+    positive, smoothed, levels = relative_readout(rgb, glass, outline, um_per_px)
+    in_tissue = positive != 2
+    position = relative_position(smoothed, in_tissue, levels)
+    del smoothed
+    steps = gradient_steps(position)
+    hit = positive == 1
+    pixels = {"tissue": int(in_tissue.sum()), "positive": int(hit.sum()), "steps": counts(steps, in_tissue)}
+    numbers = {
+        "tissue_mm2": round(pixels["tissue"] * (um_per_px / 1000) ** 2, 2),
+        "positive_pct": percent(hit, in_tissue),
+        "steps_pct": shares(pixels["steps"]),
+        "flat_windows": levels.flat_fraction,
+    }
+    if necrosis is not None:
+        necrotic, covered = necrosis
+        surviving = in_tissue & covered & ~necrotic
+        dead = in_tissue & covered & necrotic
+        enough = dead.sum() >= NECROTIC_MIN_SHARE * (in_tissue & covered).sum()
+        pixels |= {
+            "covered": int((in_tissue & covered).sum()),
+            "surviving": int(surviving.sum()),
+            "necrotic": int(dead.sum()),
+            "positive_surviving": int((hit & surviving).sum()),
+            "positive_necrotic": int((hit & dead).sum()),
+            "steps_surviving": counts(steps, surviving),
+            "steps_necrotic": counts(steps, dead),
+        }
+        numbers |= {
+            "necrotic_pct": percent(necrotic, in_tissue & covered),
+            "positive_surviving_pct": percent(hit, surviving),
+            "positive_necrotic_pct": percent(hit, dead) if enough else None,
+            "steps_surviving_pct": shares(pixels["steps_surviving"]),
+            "steps_necrotic_pct": shares(pixels["steps_necrotic"]) if enough else None,
+            "dice_positive_necrotic": dice(hit & covered, dead) if enough else None,
+        }
+    return numbers | {"pixels": pixels}, positive, position
+
+
+def measure(job: tuple) -> dict:
+    """One DAB slide: readout and gradient on its H&E partner's grid, raw and optionally flattened."""
+    cyp_stem, slides, calls, out, flattened, provenance = job
+    side = read_sidecar(slides, cyp_stem)
+    registration = Registration.model_validate(side["registration"])
+    field = load_field(slides, registration)
+    if field is None:
+        raise RuntimeError(f"{cyp_stem}: no valid non-rigid field")
+
+    he_info, he = open_slide(slides / read_sidecar(slides, registration.reference)["file"])
+    cyp_info, cyp = open_slide(slides / side["file"])
+    he_shapes = [level.shape[:2] for level in he]
+    warped = nonrigid_levels(cyp, he_shapes, registration, field, he_info.pixel_size_um)
+    index = pick_level_um([level.shape for level in he], he_info.pixel_size_um, WORK_UM)
+    um_per_px = he_info.pixel_size_um * he[0].shape[1] / he[index].shape[1]
+
+    coarse = np.asarray(warped[pick_level(warped)])
+    outline = mask_from_level(coarse)
+    glass = glass_colour(coarse, outline)
+    necrosis, calls_meta = None, None
+    if calls is not None:
+        # the necrosis map on the readout's level; measured there is tissue the map covers, without lumina
+        necrotic, measured, calls_meta = calls_on_level(calls, he_shapes, index)
+        necrosis = (necrotic, measured)
+
+    numbers, positive, position = readout(np.asarray(warped[index]), glass, outline, um_per_px, necrosis)
+    row = {
+        "he": registration.reference,
+        "dose_mg_per_kg": side.get("dose_mg_per_kg"),
+        "serial_block": side.get("serial_block"),
+        "registration": [registration.method, registration.nonrigid.method],
+        "necrosis_map": calls.name if calls is not None else None,
+        "necrosis_cutoff": calls_meta["cutoff"] if calls_meta is not None else None,
+        **numbers,
+    }
+
+    if flattened:
+        path = slides / FLATTEN_DIR / f"{cyp_stem}_flatten.npz"
+        # flattened in the slide's own frame, then warped, as the viewer draws it
+        evened = nonrigid_levels(flatten.flatten_levels(cyp, flatten.load(path), cyp_info.pixel_size_um),
+                                 he_shapes, registration, field, he_info.pixel_size_um)
+        flat_numbers, flat_positive, flat_position = readout(
+            np.asarray(evened[index]), glass, outline, um_per_px, necrosis)
+        both = (positive != 2) & (flat_positive != 2)
+        row["flattened"] = {
+            "fields": path.name,
+            "fields_sha256": sha256(path),
+            "changed_call_pct": percent(positive != flat_positive, both),
+            "changed_step_pct": percent(gradient_steps(position) != gradient_steps(flat_position), both),
+            **flat_numbers,
+        }
+
+    row["map"] = f"{cyp_stem}_readout.npz"
+    meta = {
+        "slide": cyp_stem,
+        "reference": registration.reference,
+        "registration": row["registration"],
+        "necrosis_map": row["necrosis_map"],
+        "map": f"position between the window's low (0) and high ({POSITION_SCALE}) DAB, {NO_TISSUE} outside the tissue",
+        "written": datetime.now(UTC).isoformat(timespec="seconds"),
+        **provenance,
+    }
+    np.savez_compressed(out / row["map"], position=position, um_per_px=um_per_px,
+                        reference=registration.reference, meta=json.dumps(meta))
+    flat_row = row.get("flattened")
+    print(f"{cyp_stem}: {row['positive_pct']}% positive, surviving {row.get('positive_surviving_pct')}%, "
+          f"necrotic {row.get('necrotic_pct')}%"
+          + (f", flattened {flat_row['positive_pct']}%" if flat_row else ""), flush=True)
+    return {"stem": cyp_stem, "row": row, "um_per_px": um_per_px,
+            "raw": np.asarray(warped[min(index + 2, len(warped) - 1)]),
+            "steps": gradient_steps(position[::SHEET_STRIDE, ::SHEET_STRIDE])}
+
+
+def panel(image: np.ndarray) -> Image.Image:
+    """An image scaled to fit one sheet panel."""
+    picture = Image.fromarray(image)
+    picture.thumbnail((PANEL_PX, PANEL_PX))
+    return picture
+
+
+def write_sheet(results: list[dict], path: Path) -> None:
+    """One PNG: the raw DAB slide on the H&E grid beside its gradient map, for every slide."""
+    rows = math.ceil(len(results) / COLUMNS)
+    sheet = Image.new("RGB", (COLUMNS * 2 * PANEL_PX, rows * (PANEL_PX + CAPTION_PX)), "white")
+    draw = ImageDraw.Draw(sheet)
+    for i, result in enumerate(results):
+        x = (i % COLUMNS) * 2 * PANEL_PX
+        y = (i // COLUMNS) * (PANEL_PX + CAPTION_PX)
+        row = result["row"]
+        surviving = row.get("positive_surviving_pct")
+        draw.text((x + 4, y + 4), f"{result['stem']}: {row['positive_pct']}% positive"
+                  + (f", {surviving}% of surviving" if surviving is not None else ""), fill="black")
+        sheet.paste(panel(result["raw"]), (x, y + CAPTION_PX))
+        sheet.paste(panel(STEP_COLOURS[result["steps"]]), (x + PANEL_PX, y + CAPTION_PX))
+    sheet.save(path)
+
+
+def necrosis_map(directory: Path, row: dict) -> Path:
+    """A necrosis run's call map for one record row: named by its slide, or by its animal in the older mouse runs."""
+    path = directory / f"{row['slide']}_necrosis.npz"
+    if path.exists() or not row.get("animal"):
+        return path
+    return directory / f"{row['animal']}_necrosis.npz"
+
+
+def chosen_slides(slides: Path, stains: list[str], blocks: list[str] | None) -> dict[str, dict]:
+    """Sidecars by stem of the included slides in `slides` with one of the stains and a stem containing a block."""
+    found = {}
+    for path in slides.glob("*.json"):
+        stem = path.name.removesuffix(".json").removesuffix(".ome")
+        sidecar = json.loads(path.read_text())
+        # run records and the stain reference sit beside the slides; slide sidecars name their file
+        if not isinstance(sidecar, dict) or "file" not in sidecar:
+            continue
+        if (sidecar.get("stain") in stains and not sidecar.get("excluded")
+                and (not blocks or any(block in stem for block in blocks))):
+            found[stem] = sidecar
+    return dict(sorted(found.items()))
+
+
+def main() -> None:
+    """Measure every slide of the given DAB stains in --slides and write maps, numbers and settings."""
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--slides", type=Path, required=True)
+    parser.add_argument("--stain", nargs="+", default=["cyp2e1"], dest="stains",
+                        help="the sidecars' stains, e.g. cyp1a2 hmgb1; all go into one run record")
+    parser.add_argument("--necrosis", type=Path, help="necrosis_slides.py output: the necrosis map per H&E slide")
+    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--blocks", nargs="*", help="only stems containing one of these")
+    parser.add_argument("--workers", type=int, default=10)
+    parser.add_argument("--sheet", type=Path, help="contact sheet PNG")
+    parser.add_argument("--flattened", action="store_true",
+                        help=f"also measure on flattened pixels, fields from <slides>/{FLATTEN_DIR}/")
+    args = parser.parse_args()
+    args.out.mkdir(parents=True, exist_ok=True)
+
+    calls, necrosis_run = {}, None
+    if args.necrosis:
+        necrosis_run = json.loads((args.necrosis / NECROSIS_RECORD).read_text())
+        calls = {row["slide"]: necrosis_map(args.necrosis, row) for row in necrosis_run["slides"]}
+        if missing := [str(path) for path in calls.values() if not path.exists()]:
+            raise SystemExit("necrosis maps listed but missing:\n  " + "\n  ".join(missing))
+
+    code = code_version(Path(__file__))
+    settings = ({name: getattr(dab, name) for name in DAB_SETTINGS}
+                | {name: getattr(tissue, name) for name in TISSUE_SETTINGS})
+    chosen = chosen_slides(args.slides, args.stains, args.blocks)
+    if not chosen:
+        raise SystemExit(f"no {', '.join(args.stains)} slides in {args.slides}")
+    jobs, problems = [], []
+    for stem, side in chosen.items():
+        if not side.get("registration"):
+            problems.append(f"{stem}: not registered")
+            continue
+        # the H&E partner is the registration's reference, an H&E of the same block
+        reference = side["registration"]["reference"]
+        partner = read_sidecar(args.slides, reference)
+        if partner.get("stain") != "he" or partner.get("serial_block") != side.get("serial_block"):
+            problems.append(f"{stem}: registered to {reference}, not an H&E of block {side.get('serial_block')}")
+            continue
+        jobs.append((stem, args.slides, calls.get(reference), args.out, args.flattened,
+                     {"code": code, "settings": settings}))
+    if problems:
+        raise SystemExit("cannot measure:\n  " + "\n  ".join(problems))
+    if args.flattened:
+        missing = [job[0] for job in jobs if not (args.slides / FLATTEN_DIR / f"{job[0]}_flatten.npz").exists()]
+        if missing:
+            raise SystemExit(f"no flattening fields in {args.slides / FLATTEN_DIR} for {', '.join(missing)}")
+
+    with Pool(min(args.workers, len(jobs))) as pool:
+        results = pool.map(measure, jobs)
+
+    record = {
+        "written": datetime.now(UTC).isoformat(timespec="seconds"),
+        "code": code,
+        "slides": str(args.slides),
+        "stains": args.stains,
+        "necrosis": {"maps": str(args.necrosis), "written": necrosis_run["written"], "code": necrosis_run["code"],
+                     "split": "necrotic where most of the map's measured pixels in a working pixel are necrotic"}
+        if necrosis_run is not None else None,
+        "flattened": str(args.slides / FLATTEN_DIR) if args.flattened else None,
+        "method": "relative DAB readout and its gradient on the H&E grid, rigid plus non-rigid registration",
+        "stain_vectors": "Ruifrok and Johnston 2001, skimage.color.hed_from_rgb",
+        "work_um_per_px": round(results[0]["um_per_px"], 4),
+        "map": f"position between the window's low (0) and high ({POSITION_SCALE}) DAB per working pixel, "
+               f"uint8, {NO_TISSUE} outside the tissue; steps from dab.gradient_steps",
+        "settings": settings,
+        "slides_measured": {r["stem"]: r["row"] for r in results},
+    }
+    (args.out / "cyp2e1_readout.json").write_text(json.dumps(record, indent=1))
+    if args.sheet:
+        write_sheet(results, args.sheet)
+    print(f"{len(results)} slides, written to {args.out}")
+
+
+if __name__ == "__main__":
+    main()

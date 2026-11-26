@@ -1,28 +1,20 @@
-"""Per-slide stain normalisation, so a slide's staining cannot stand in for its dose.
+"""Per-slide LAB stain normalisation using statistics from healthy tiles.
 
-Staining varies between batches, and if it happens to correlate with dose the encoder
-can read colour instead of morphology. Reinhard matching in LAB moves each slide's
-colour distribution onto a shared target: shift by the mean, scale by the standard
-deviation, one channel at a time.
-
-The statistics come from HEALTHY tiles only. Necrotic tissue is genuinely paler, so a
-slide with more necrosis would otherwise pull its own reference and the correction
-would partly erase the signal it is meant to preserve.
+Reinhard matching shifts and scales each slide's colour distribution to a shared
+target without letting necrotic tissue influence the reference. Keep `normalise()`
+in sync with the copy in `ml/stain_norm.py`.
 """
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 
 import numpy as np
 from skimage.color import lab2rgb, rgb2lab
 
-log = logging.getLogger(__name__)
-
 
 def _triple(values: np.ndarray) -> tuple[float, float, float]:
-    """Three numpy scalars as plain floats, which JSON can write and numpy cannot."""
+    """Three numpy scalars as a tuple of plain Python floats, for JSON."""
     a, b, c = (float(v) for v in values)
     return a, b, c
 
@@ -42,7 +34,6 @@ class LabStats:
 def lab_stats(tiles: list[np.ndarray]) -> LabStats:
     """Mean and standard deviation per LAB channel over a sample of one slide's tiles."""
     lab = np.concatenate([rgb2lab(t.astype(np.float32) / 255).reshape(-1, 3) for t in tiles])
-    # plain floats, so the statistics survive json.dumps into a manifest
     return LabStats(_triple(lab.mean(axis=0)), _triple(lab.std(axis=0)))
 
 
@@ -53,6 +44,19 @@ def common_target(stats: dict[str, LabStats]) -> LabStats:
     return LabStats(_triple(means.mean(axis=0)), _triple(sds.mean(axis=0)))
 
 
+def normalise_levels(levels: list, source: LabStats, target: LabStats) -> list:
+    """A pyramid with every level matched onto the target, corrected chunk by chunk."""
+    import dask.array as da
+
+    # stays lazy: only the chunks napari draws are converted
+    return [
+        da.map_blocks(
+            lambda a: normalise(a, source, target) if a.size else a, level, dtype=np.uint8
+        )
+        for level in levels
+    ]
+
+
 def normalise(tile: np.ndarray, source: LabStats, target: LabStats) -> np.ndarray:
     """One tile moved from its slide's colour distribution onto the shared target."""
     lab = rgb2lab(tile.astype(np.float32) / 255)
@@ -61,4 +65,6 @@ def normalise(tile: np.ndarray, source: LabStats, target: LabStats) -> np.ndarra
     # a flat channel would divide by zero, and has nothing to rescale anyway
     scale = np.where(src_sd > 1e-6, tgt_sd / np.maximum(src_sd, 1e-6), 1.0)
     out = (lab - src_mean) * scale + tgt_mean
-    return (np.clip(lab2rgb(out), 0, 1) * 255).astype(np.uint8)
+    matched = (np.clip(lab2rgb(out), 0, 1) * 255).astype(np.uint8)
+    # pure white is the scanner's fill outside the scan grid: no stain, and the background mask finds it by that value
+    return np.where((tile == 255).all(axis=-1, keepdims=True), tile, matched)

@@ -1,13 +1,9 @@
-"""A tile grid over a slide, sized in micrometres and filtered to tissue.
-
-The grid is coordinates, not images: tiles are read lazily when they are needed, so
-a slide costs nothing until its pixels are.
-"""
+"""A tile grid over a slide, sized in micrometres and filtered to tissue; tiles hold coordinates and are read lazily."""
 
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 import dask.array as da
@@ -35,7 +31,7 @@ class Tile:
     slide: str
     scene: int
     level: int
-    row: int  # index on the tile grid, not a pixel
+    row: int  # tile-grid index
     col: int
     y: int  # top-left pixel on `level`
     x: int
@@ -55,34 +51,27 @@ class Grid:
     um_per_px: float
     tiles: list[Tile]
 
-    def to_dict(self) -> dict:
-        """The grid as JSON-serialisable provenance."""
-        return {
-            **{k: v for k, v in asdict(self).items() if k != "tiles"},
-            "n_tiles": len(self.tiles),
-            "tiles": [asdict(t) for t in self.tiles],
-        }
-
 
 def pick_level_um(
-    levels: list[da.Array], px_um: float, target: float = TARGET_UM_PER_PX
+    shapes: list[tuple[int, ...]], px_um: float, target: float = TARGET_UM_PER_PX
 ) -> int:
-    """Index of the level whose pixel size is closest to `target`, in micrometres."""
-    scales = [px_um * (levels[0].shape[1] / level.shape[1]) for level in levels]
+    """Index of the level shape whose pixel size is closest to `target`, in micrometres."""
+    scales = [px_um * (shapes[0][1] / shape[1]) for shape in shapes]
     return min(range(len(scales)), key=lambda i: abs(scales[i] - target))
+
+
+def resampled(mask: np.ndarray, shape_rc: tuple[int, int], y: int, x: int, size: int) -> np.ndarray:
+    """A tile's footprint on a mask held at another scale, one value per tile pixel."""
+    rows = (np.arange(y, y + size) * mask.shape[0] // shape_rc[0]).clip(0, mask.shape[0] - 1)
+    cols = (np.arange(x, x + size) * mask.shape[1] // shape_rc[1]).clip(0, mask.shape[1] - 1)
+    return mask[np.ix_(rows, cols)]
 
 
 def coverage(
     mask: np.ndarray, shape_rc: tuple[int, int], y: int, x: int, size: int
 ) -> float:
     """Fraction of one tile's footprint covered by a mask held at a coarser scale."""
-    rows = (np.arange(y, y + size) * mask.shape[0] // shape_rc[0]).clip(
-        0, mask.shape[0] - 1
-    )
-    cols = (np.arange(x, x + size) * mask.shape[1] // shape_rc[1]).clip(
-        0, mask.shape[1] - 1
-    )
-    return float(mask[np.ix_(rows, cols)].mean())
+    return float(resampled(mask, shape_rc, y, x, size).mean())
 
 
 def build_grid(
@@ -94,7 +83,7 @@ def build_grid(
 ) -> Grid:
     """Tile one slide, keeping the tiles that hold enough tissue."""
     info, levels = open_slide(path, scene)
-    level = pick_level_um(levels, info.pixel_size_um, target_um_per_px)
+    level = pick_level_um([level.shape for level in levels], info.pixel_size_um, target_um_per_px)
 
     height, width = levels[level].shape[:2]
     um_per_px = info.pixel_size_um * (levels[0].shape[1] / width)
@@ -126,7 +115,7 @@ def build_grid(
 
 
 def read_tile(levels: list[da.Array], tile: Tile) -> np.ndarray:
-    """One tile's pixels, the only point at which a slide is decoded."""
+    """One tile's pixels, read from its level."""
     level = levels[tile.level]
     return np.asarray(
         level[tile.y : tile.y + tile.size_px, tile.x : tile.x + tile.size_px]

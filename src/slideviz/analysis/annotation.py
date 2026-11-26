@@ -1,19 +1,10 @@
-"""Annotation polygons drawn on an overview, converted to per-tile coverage.
-
-CVAT holds the overview PNG, so its polygons are in overview pixels. Each slide
-records its own scale back to level 0, and a tile grid sits at its own level, so
-a polygon reaches a tile through the two recorded scales and never a hardcoded
-factor.
-
-Coverage is a fraction rather than a yes or no: the readout is percent necrotic
-area, so a tile straddling the necrosis front carries how much of it is inside.
-"""
+"""Annotation polygons drawn on an overview, converted to per-tile coverage fractions through the recorded pixel sizes."""
 
 from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -49,16 +40,8 @@ class Labels:
     um_per_px: float
     label: str
     n_polygons: int
-    polygon_area_um2: float  # grid-independent, so label quantisation can be measured
+    polygon_area_um2: float  # sum of the drawn polygons' areas, independent of the grid
     tiles: list[Coverage]
-
-    def to_dict(self) -> dict:
-        """The labels as JSON-serialisable provenance."""
-        return {
-            **{k: v for k, v in asdict(self).items() if k != "tiles"},
-            "n_tiles": len(self.tiles),
-            "tiles": [asdict(t) for t in self.tiles],
-        }
 
 
 def read_overview(sidecar: Path) -> dict:

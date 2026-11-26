@@ -1,9 +1,4 @@
-"""A downscaled slide image for annotation, with the scale needed to map drawings back.
-
-CVAT holds an ordinary image, so a whole slide is exported at a coarse pyramid level.
-The sidecar records what that level was, so a polygon drawn on the export converts to
-full-resolution slide coordinates.
-"""
+"""A downscaled slide PNG for CVAT annotation, with a JSON sidecar of the level and pixel size that map drawings back to the slide."""
 
 from __future__ import annotations
 
@@ -44,7 +39,7 @@ def pick_export_level(levels: list, max_edge_px: int = MAX_EDGE_PX) -> int:
     for i, level in enumerate(levels):
         if max(level.shape[0], level.shape[1]) <= max_edge_px:
             return i
-    return len(levels) - 1  # every level is larger, so the coarsest is the only option
+    return len(levels) - 1  # coarsest level when none fits
 
 
 def export_overview(
@@ -86,3 +81,23 @@ def export_overview(
         overview.um_per_px,
     )
     return overview
+
+
+def main() -> None:
+    """Export overviews for annotation from the command line."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("slides", type=Path, nargs="+", help="slide files")
+    parser.add_argument("--out", type=Path, required=True, help="folder for the PNGs and their JSON")
+    parser.add_argument("--scene", type=int, default=0)
+    parser.add_argument("--max-edge-px", type=int, default=MAX_EDGE_PX)
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    for path in args.slides:
+        export_overview(path, args.out, args.scene, args.max_edge_px)
+
+
+if __name__ == "__main__":
+    main()

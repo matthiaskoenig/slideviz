@@ -1,16 +1,13 @@
-"""Train a linear head on cached tile embeddings, held out one animal at a time.
+"""Train a linear head on cached tile embeddings, holding out one animal (one slide) per fold.
 
-Every tile of one animal comes from one slide, so a random split would put tiles from
-a training slide into the test set and the score would measure memorisation. With three
-animals the honest report is three folds, each holding out one animal completely.
-
-    uv run python train_necrosis.py --cache /data/michelle/mouse/embeddings
+    uv run python train_necrosis.py --cache /data/michelle/mouse/embeddings --nested --tag nested_area
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -25,11 +22,18 @@ from sklearn.metrics import (
 )
 from sklearn.preprocessing import StandardScaler
 
-# a tile is called necrotic above this much coverage; tiles between the two are ambiguous
+# a tile is called necrotic at this much coverage or more
 POSITIVE = 0.5
 
 MAX_ITER = 2000
 CLASS_WEIGHT = "balanced"
+
+# a tile between these two is partly covered, so it sits on a region edge
+BOUNDARY_LOW = 0.1
+BOUNDARY_HIGH = 0.9
+
+# thresholds the inner folds choose between; the readout is area, so the grid is fine
+CUTOFFS = np.round(np.arange(0.30, 0.91, 0.025), 3)
 
 
 def load_cache(cache: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str], dict]:
@@ -47,35 +51,120 @@ def load_cache(cache: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[st
     return embeddings, necrosis, animals, tiles, meta
 
 
+def shown(value: float | None) -> str:
+    """A score as text, or n/a where it is undefined."""
+    return "n/a" if value is None else f"{value:.4f}"
+
+
+def overlap(truth: np.ndarray, predicted: np.ndarray) -> float | None:
+    """IoU of two boolean masks, None when neither calls a single positive."""
+    union = (truth | predicted).sum()
+    return None if union == 0 else round(float((truth & predicted).sum() / union), 4)
+
+
+def area_error(scores: np.ndarray, truth: np.ndarray, cutoff: float, weight: np.ndarray | None = None) -> float:
+    """How far this cutoff puts predicted necrotic area from the annotated area, each element weighted by `weight` when given."""
+    return abs(float(np.average(scores >= cutoff, weights=weight) - np.average(truth, weights=weight)))
+
+
+def fit_head(x: np.ndarray, y: np.ndarray) -> tuple[StandardScaler, LogisticRegression]:
+    """A scaler fitted on x and the logistic head fitted on the standardised x against y."""
+    scaler = StandardScaler().fit(x)
+    head = LogisticRegression(max_iter=MAX_ITER, class_weight=CLASS_WEIGHT)
+    head.fit(scaler.transform(x), y)
+    return scaler, head
+
+
+def code_version(*files: str) -> str:
+    """The git commit the caller ran from, marked dirty for a changed tree and untracked unless git tracks every one of `files`."""
+    here = Path(__file__).parent
+    found = subprocess.run(["git", "describe", "--always", "--dirty"], capture_output=True,
+                           text=True, check=False, cwd=here)
+    tracked = subprocess.run(["git", "ls-files", "--error-unmatch", *files],
+                             capture_output=True, check=False, cwd=here).returncode == 0
+    version = found.stdout.strip()
+    return "unknown" if not version else version if tracked else f"{version}-untracked"
+
+
+def choose_cutoff(
+    embeddings: np.ndarray,
+    target: np.ndarray,
+    animals: np.ndarray,
+    inner: list[str],
+    keep: np.ndarray,
+) -> tuple[float, list[dict]]:
+    """The cutoff with the lowest mean absolute area error across the inner animals."""
+    errors = np.zeros((len(inner), len(CUTOFFS)))
+    for row, validation in enumerate(inner):
+        fit = np.isin(animals, [a for a in inner if a != validation]) & keep
+        check = (animals == validation) & keep
+        scaler, head = fit_head(embeddings[fit], target[fit])
+        scores = head.predict_proba(scaler.transform(embeddings[check]))[:, 1]
+        for column, cutoff in enumerate(CUTOFFS):
+            errors[row, column] = area_error(scores, target[check], cutoff)
+
+    # averaged over animals first, so each animal weighs equally in the cutoff
+    mean = errors.mean(axis=0)
+    best = int(np.argmin(mean))
+    trace = [
+        {"cutoff": float(c), "mean_absolute_area_error": round(float(m), 4)}
+        for c, m in zip(CUTOFFS, mean, strict=True)
+    ]
+    return float(CUTOFFS[best]), trace
+
+
 def fold(
     embeddings: np.ndarray,
     target: np.ndarray,
     animals: np.ndarray,
     held_out: str,
     keep: np.ndarray,
+    coverage: np.ndarray,
+    nested: bool = False,
 ) -> dict:
     """Fit on every other animal and score on this one."""
     test = (animals == held_out) & keep
     train = (animals != held_out) & keep
 
-    scaler = StandardScaler().fit(embeddings[train])  # train alone, so test statistics stay out
-    head = LogisticRegression(max_iter=MAX_ITER, class_weight=CLASS_WEIGHT)
-    head.fit(scaler.transform(embeddings[train]), target[train])
+    cutoff, trace = 0.5, None
+    if nested:
+        # chosen on the training animals alone
+        inner = list(np.unique(animals[train]))
+        cutoff, trace = choose_cutoff(embeddings, target, animals, inner, keep)
+
+    scaler, head = fit_head(embeddings[train], target[train])
 
     scores = head.predict_proba(scaler.transform(embeddings[test]))[:, 1]
-    predicted = scores >= 0.5
+    predicted = scores >= cutoff
     truth = target[test]
+    tested = coverage[test]
+    boundary = (tested > BOUNDARY_LOW) & (tested < BOUNDARY_HIGH)
 
     matrix = confusion_matrix(truth, predicted, labels=[False, True])
     single_class = len(np.unique(truth)) < 2  # AUROC is undefined on one class
+    true_positive, false_positive, false_negative = (
+        int(matrix[1, 1]), int(matrix[0, 1]), int(matrix[1, 0])
+    )
+    union = true_positive + false_positive + false_negative
     return {
         "held_out": held_out,
+        "cutoff": cutoff,
+        "cutoff_chosen_on": None if trace is None else len(inner),
+        "cutoff_trace": trace,
         "n_train": int(train.sum()),
         "n_test": int(test.sum()),
         "test_positive": int(truth.sum()),
         "test_positive_rate": round(float(truth.mean()), 4),
         "balanced_accuracy": round(float(balanced_accuracy_score(truth, predicted)), 4),
+        # DSC equals F1 on boolean calls; the thesis reports DSC
         "f1": round(float(f1_score(truth, predicted, zero_division=0)), 4),
+        "dsc": round(float(f1_score(truth, predicted, zero_division=0)), 4),
+        "iou": None if union == 0 else round(true_positive / union, 4),
+        # partial coverage marks a region edge, where the polygons are least reliable
+        "iou_boundary": overlap(
+            truth[boundary], predicted[boundary]
+        ) if boundary.any() else None,
+        "iou_core": overlap(truth[~boundary], predicted[~boundary]) if (~boundary).any() else None,
         "auroc": None if single_class else round(float(roc_auc_score(truth, scores)), 4),
         "average_precision": None
         if single_class
@@ -101,6 +190,8 @@ def main() -> None:
                         help="coverage above which a tile counts as necrotic")
     parser.add_argument("--drop-boundary", action="store_true",
                         help="train and test only on tiles below 0.1 or above 0.9")
+    parser.add_argument("--nested", action="store_true",
+                        help="choose the score cutoff inside each fold's training animals")
     parser.add_argument("--tag", default="", help="names this run in the output file")
     args = parser.parse_args()
 
@@ -110,7 +201,7 @@ def main() -> None:
     embeddings, necrosis, animals, _, meta = load_cache(args.cache)
     target = necrosis >= args.positive
     keep = (
-        (necrosis <= 0.1) | (necrosis >= 0.9) if args.drop_boundary
+        (necrosis <= BOUNDARY_LOW) | (necrosis >= BOUNDARY_HIGH) if args.drop_boundary
         else np.ones(len(necrosis), dtype=bool)
     )
 
@@ -122,24 +213,30 @@ def main() -> None:
         print(f"  boundary filter: {(~keep).sum():,} of {len(keep):,} tiles dropped")
 
     print(f"\n=== leave one animal out, positive at coverage >= {args.positive} ===")
-    folds = [fold(embeddings, target, animals, a, keep) for a in meta["animals"]]
+    if args.nested:
+        print("  cutoff chosen per fold on the training animals, by absolute area error")
+    folds = [
+        fold(embeddings, target, animals, a, keep, necrosis, nested=args.nested)
+        for a in meta["animals"]
+    ]
 
-    header = f"{'held out':<12}{'train':>8}{'test':>7}{'bal acc':>9}{'F1':>8}{'AUROC':>8}{'AP':>8}"
+    header = (
+        f"{'held out':<12}{'train':>8}{'test':>7}{'bal acc':>9}"
+        f"{'DSC/F1':>8}{'IoU':>8}{'AUROC':>8}{'AP':>8}"
+    )
     print(header)
     for f in folds:
-        auroc = "n/a" if f["auroc"] is None else f"{f['auroc']:.4f}"
-        ap = "n/a" if f["average_precision"] is None else f"{f['average_precision']:.4f}"
+        auroc, ap, iou = shown(f["auroc"]), shown(f["average_precision"]), shown(f["iou"])
         print(
             f"{f['held_out']:<12}{f['n_train']:>8,}{f['n_test']:>7,}"
-            f"{f['balanced_accuracy']:>9.4f}{f['f1']:>8.4f}{auroc:>8}{ap:>8}"
+            f"{f['balanced_accuracy']:>9.4f}{f['f1']:>8.4f}{iou:>8}{auroc:>8}{ap:>8}"
         )
 
     mean_balanced = float(np.mean([f["balanced_accuracy"] for f in folds]))
     mean_f1 = float(np.mean([f["f1"] for f in folds]))
     print(f"{'mean':<12}{'':>8}{'':>7}{mean_balanced:>9.4f}{mean_f1:>8.4f}")
 
-    # a control slide has no positive tiles, so its F1 is 0 by definition and its
-    # balanced accuracy is a near-1 for predicting nothing; both distort an average
+    # Exclude control slides from the average; they have no positive tiles.
     scored = [f for f in folds if f["test_positive"]]
     if len(scored) != len(folds):
         mean_balanced_scored = float(np.mean([f["balanced_accuracy"] for f in scored]))
@@ -150,14 +247,32 @@ def main() -> None:
             f"   ({len(scored)} of {len(folds)})"
         )
 
+    print("\n=== IoU at region edges against the interior ===")
+    print(f"{'animal':<12}{'IoU':>9}{'boundary':>10}{'core':>9}")
+    for f in folds:
+        if not f["test_positive"]:
+            continue
+        print(
+            f"{f['held_out']:<12}{shown(f['iou']):>9}"
+            f"{shown(f['iou_boundary']):>10}{shown(f['iou_core']):>9}"
+        )
+
     print("\n=== necrotic area per slide, the project's actual readout ===")
-    print(f"{'animal':<12}{'annotated':>11}{'predicted':>11}{'error':>9}")
+    print(f"{'animal':<12}{'annotated':>11}{'predicted':>11}{'error':>9}{'cutoff':>8}")
     for f in folds:
         error = f["area_predicted"] - f["area_true"]
         print(
             f"{f['held_out']:<12}{f['area_true']:>10.1%}{f['area_predicted']:>11.1%}"
-            f"{error:>+9.1%}"
+            f"{error:>+9.1%}{f['cutoff']:>8.3f}"
         )
+
+    absolute = [abs(f["area_predicted"] - f["area_true"]) for f in scored]
+    signed = [f["area_predicted"] - f["area_true"] for f in scored]
+    print(
+        f"{'mean |error|':<12}{'':>11}{'':>11}{np.mean(absolute):>9.1%}"
+        f"   over {len(scored)} necrotic slides"
+    )
+    print(f"{'mean error':<12}{'':>11}{'':>11}{np.mean(signed):>+9.1%}")
 
     results = {
         "written": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -169,6 +284,19 @@ def main() -> None:
         "class_weight": CLASS_WEIGHT,
         "positive_threshold": args.positive,
         "boundary_dropped": bool(args.drop_boundary),
+        "cutoff_nested": bool(args.nested),
+        "cutoff_objective": "mean absolute area error" if args.nested else None,
+        "cutoff_grid": [float(c) for c in CUTOFFS] if args.nested else None,
+        "mean_absolute_area_error": round(
+            float(np.mean([
+                abs(f["area_predicted"] - f["area_true"]) for f in folds if f["test_positive"]
+            ])), 4,
+        ),
+        "mean_signed_area_error": round(
+            float(np.mean([
+                f["area_predicted"] - f["area_true"] for f in folds if f["test_positive"]
+            ])), 4,
+        ),
         "split": "leave one animal out",
         "folds": folds,
         "mean_balanced_accuracy": round(mean_balanced, 4),
@@ -180,10 +308,47 @@ def main() -> None:
         "mean_f1_positive_folds": round(
             float(np.mean([f["f1"] for f in folds if f["test_positive"]])), 4
         ),
+        # DSC equals F1; IoU is the same overlap on a stricter denominator
+        "mean_dsc_positive_folds": round(
+            float(np.mean([f["dsc"] for f in folds if f["test_positive"]])), 4
+        ),
+        "mean_iou_positive_folds": round(
+            float(np.mean([f["iou"] for f in folds if f["test_positive"] and f["iou"] is not None])),
+            4,
+        ),
+        # the gap between these two reflects label quality at region edges
+        "mean_iou_boundary": round(
+            float(np.mean([
+                f["iou_boundary"] for f in folds
+                if f["test_positive"] and f["iou_boundary"] is not None
+            ])), 4,
+        ),
+        "mean_iou_core": round(
+            float(np.mean([
+                f["iou_core"] for f in folds
+                if f["test_positive"] and f["iou_core"] is not None
+            ])), 4,
+        ),
         "n_animals": len(meta["animals"]),
-        "caveat": "three animals, so each fold trains on two; a fold is one slide, not a cohort",
+        "caveat": (
+            f"{len(meta['animals'])} animals, so each fold trains on "
+            f"{len(meta['animals']) - 1}; a fold is one slide"
+        ),
+        # the manuscript reports necrotic area, so the cutoff is chosen against that
+        "area_note": (
+            "percent necrotic area is the reported readout; the cutoff is selected on "
+            "training animals only, so the held-out area is not fitted"
+        ),
+        # the polygons stop short of the necrosis edge, so overlap scores are floors
+        "metric_caveat": (
+            "DSC and IoU are scored against hand polygons that under-call necrosis at "
+            "region edges, so both are lower bounds on agreement"
+        ),
+        # identify matched embeddings
+        "stain_matched": meta.get("stain_matched", False),
+        "stain_reference": meta.get("stain_reference"),
     }
-    # the tag keeps one run from overwriting another, so results accumulate
+    # keep tagged runs from overwriting each other
     suffix = "_no_boundary" if args.drop_boundary else ""
     tag = f"_{args.tag}" if args.tag else ""
     name = f"necrosis_results{tag}{suffix}.json"

@@ -14,20 +14,22 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 
 from pydantic import ValidationError
 
+from slideviz.data.schema import COLUMNS, DERIVED, REQUIRED, Slide, create_table_sql
 from slideviz.log import setup
-from slideviz.data.schema import COLUMNS, Slide, create_table_sql
 from slideviz.settings import settings
 
 log = logging.getLogger(__name__)
 
 
 def default_db() -> Path:
-    """Location of the index, from settings so SLIDEVIZ_DB can move it."""
+    """Location of the index, settings.db (SLIDEVIZ_DB)."""
     return settings.db
 
 
@@ -43,32 +45,56 @@ def split_scenes(data: dict) -> list[dict]:
     scenes = data.pop("scenes", None)
     if not scenes:
         return [{**data, "scene": 0}]
-    # entries override the shared fields, so what is common is written once
-    return [{**data, "scene": i, **scene} for i, scene in enumerate(scenes)]
+    # a scene's own fields override the shared ones
+    return [{**data, **scene, "scene": i if scene.get("scene") is None else scene["scene"]}
+            for i, scene in enumerate(scenes)]
 
 
-def read_sidecars(directory: Path) -> list[dict]:
-    """Load every sidecar under a directory, including nested ones."""
+def sidecar_paths(root: Path) -> list[Path]:
+    """Every .json under root, outside image stores."""
+    found = []
+    for folder, dirs, files in os.walk(root):
+        # a .zarr store holds thousands of chunk files and no sidecars
+        dirs[:] = [d for d in dirs if not d.endswith(".zarr")]
+        found += [Path(folder) / name for name in files if name.endswith(".json")]
+    return sorted(found)
+
+
+def read_sidecars(directory: Path,
+                  progress: Callable[[int, int], None] | None = None) -> list[dict]:
+    """Load every sidecar under a directory, calling progress(done, total) per file."""
     root = directory.resolve()
+    paths = sidecar_paths(root)
     records = []
-    for path in sorted(root.rglob("*.json")):
+    seen: dict[str, Path] = {}
+    for done, path in enumerate(paths, 1):
+        if progress:
+            progress(done, len(paths))
         data = json.loads(path.read_text())
-        # a slide the lab marked as a control or a failure is kept on disk for its
-        # provenance but must never reach an analysis as if it were a readout
+        # predictions, annotations and the stain reference sit beside the slides;
+        # a slide sidecar names its image in `file`
+        if not isinstance(data, dict) or "file" not in data:
+            log.debug("skipping %s, not a slide sidecar", path.name)
+            continue
+        # excluded slides (controls, failures) stay on disk for provenance and out of the index
         if data.get("excluded"):
             log.info("skipping %s (%s)", path.name, data["excluded"])
             continue
-        data["directory"] = str(root)  # the indexed root, so rows stay comparable
-        # relative to the root, so a nested layout keeps its subdirectories
+        data["directory"] = str(root)  # the indexed root
+        # path relative to the indexed root, subdirectories kept
         data["file"] = str(path.relative_to(root).with_name(data["file"]))
+        if data["file"] in seen:
+            raise ValueError(f"{data['file']} is named by both {seen[data['file']]} and {path}")
+        seen[data["file"]] = path
         records += split_scenes(data)  # a multi-scene sidecar becomes several rows
     return records
 
 
 def _drop_if_stale(conn: sqlite3.Connection) -> None:
-    """Drop the table when its columns no longer match COLUMNS."""
-    existing = [r[1] for r in conn.execute("PRAGMA table_info(slides)")]
-    if existing and existing != COLUMNS:
+    """Drop the table when its columns or their NOT NULL marks differ from the model."""
+    existing = [(r[1], bool(r[3])) for r in conn.execute("PRAGMA table_info(slides)")]
+    expected = [(name, name in REQUIRED or name in DERIVED) for name in COLUMNS]
+    if existing and existing != expected:
         conn.execute("DROP TABLE slides")
 
 
@@ -78,7 +104,6 @@ def check(records: list[dict]) -> None:
         name = record.get("file", "<sidecar with no file field>")
         try:
             Slide(**record)
-        # without this the insert fails as a bare IntegrityError, naming neither
         except ValidationError as exc:
             problems = "; ".join(
                 f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()
@@ -86,15 +111,16 @@ def check(records: list[dict]) -> None:
             raise ValueError(f"{name}: {problems}") from exc
 
 
-def build(directory: Path, db_path: Path | None = None) -> int:
+def build(directory: Path, db_path: Path | None = None,
+          progress: Callable[[int, int], None] | None = None) -> int:
     """Rebuild the index from the sidecars in a directory. Returns row count."""
     db_path = db_path or default_db()
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    records = read_sidecars(directory)
-    check(records)  # fail before touching the database, so the index is not half-baked
+    records = read_sidecars(directory, progress)
+    check(records)  # raises before the database is opened, leaving the old index intact
 
     with sqlite3.connect(db_path) as conn:
-        _drop_if_stale(conn)  # the index is derived, so an old schema is rebuilt
+        _drop_if_stale(conn)
         conn.executescript(SCHEMA)
         # Clear this directory's rows, then reinsert from the sidecars
         conn.execute("DELETE FROM slides WHERE directory = ?", (str(directory.resolve()),))
@@ -121,7 +147,7 @@ def slide_path(row: sqlite3.Row) -> Path:
 
 SUMMARY_SQL = """
 SELECT species, substance, dose_mg_per_kg, stain,
-       COUNT(DISTINCT directory || file) AS n,  -- slides, not rows, so scenes do not inflate it
+       COUNT(DISTINCT directory || file) AS n,  -- distinct slides; n_scenes counts rows
        COUNT(*) AS n_scenes
 FROM slides GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4
 """
@@ -147,7 +173,7 @@ def main() -> None:
     args = parser.parse_args()
     setup(args.verbose)
 
-    if args.schema:  # generated, so it cannot drift from the model
+    if args.schema:
         print(json.dumps(Slide.model_json_schema(), indent=2))
         return
 
@@ -161,7 +187,7 @@ def main() -> None:
     if not args.directory.is_dir():
         parser.error(f"not a directory: {args.directory}")
 
-    if args.check:  # the day a new batch arrives, before it goes near the index
+    if args.check:  # validation only, for a new batch of sidecars
         records = read_sidecars(args.directory)
         check(records)
         log.info("%d records valid", len(records))
@@ -169,17 +195,19 @@ def main() -> None:
 
     db = args.db or default_db()
     count = build(args.directory, db)
-    files = query("SELECT COUNT(DISTINCT directory || file) FROM slides", db_path=db)[0][0]
+    files = query("SELECT COUNT(DISTINCT file) FROM slides WHERE directory = ?",
+                  (str(args.directory.resolve()),), db_path=db)[0][0]
     scenes = "" if count == files else f" ({count} scenes)"  # they differ only on multi-scene data
     log.info("indexed %d slides%s into %s", files, scenes, db)
 
     for row in query(SUMMARY_SQL, db_path=db):
-        # scene count only where it differs, so single-scene groups read as before
+        # scene count shown only where it differs from the slide count
         scenes = "" if row["n_scenes"] == row["n"] else f"  ({row['n_scenes']} scenes)"
-        # xxx where the dose is not known yet, matching the placeholder in the filename
+        # substance and dose are left out for slides that carry none
         dose = row["dose_mg_per_kg"]
-        log.info("  %s %s %3s mg/kg %-7s %d%s", row["species"], row["substance"],
-                 dose if dose is not None else "xxx", row["stain"], row["n"], scenes)
+        dose_text = f"{dose:>3} mg/kg" if dose is not None else ""
+        log.info("  %s %s %s %-7s %d%s", row["species"], row["substance"] or "", dose_text,
+                 row["stain"], row["n"], scenes)
 
 
 if __name__ == "__main__":

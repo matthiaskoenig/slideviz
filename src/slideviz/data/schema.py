@@ -9,10 +9,10 @@ from typing import Annotated
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, field_validator
 
-# fail on unknown fields instead of dropping them
+# unknown fields are a validation error; enum fields hold the plain string value
 STRICT = ConfigDict(extra="forbid", use_enum_values=True)
 
-# a name the pipeline reads back, so an empty string is a missing value, not a value
+# a name the pipeline reads back; empty strings are rejected
 Name = Annotated[str, Field(min_length=1)]
 
 # parsed on input, serialized as ISO text
@@ -21,7 +21,7 @@ Timestamp = Annotated[datetime, PlainSerializer(lambda d: d.isoformat(), return_
 
 
 class Species(StrEnum):
-    """Common name, matching the filename prefix rather than the binomial."""
+    """Common name, matching the filename prefix."""
 
     MOUSE = "mouse"
     RAT = "rat"
@@ -30,10 +30,15 @@ class Species(StrEnum):
 
 
 class Stain(StrEnum):
+    """The stain on the section."""
+
     HE = "he"
     CYP2E1 = "cyp2e1"  # mouse pericentral zonation marker
     CYP1A2 = "cyp1a2"  # the rat analogue of CYP2E1
     HMGB1 = "hmgb1"  # nuclear-integrity loss, reads out necrosis
+    GS = "gs"  # glutamine synthetase, the ring of cells around central veins
+    CYP2D6 = "cyp2d6"
+    CYP3A4 = "cyp3a4"
 
 
 class Modality(StrEnum):
@@ -51,6 +56,24 @@ class Scene(BaseModel):
     scene: int | None = None  # None means take the position in the list
 
 
+class NonRigid(BaseModel):
+    """A displacement field applied after the matrix, stored as its own file."""
+
+    model_config = STRICT
+
+    path: Name  # relative to the sidecar's directory
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")  # detects a swapped or damaged field file
+    # grid on the reference slide from its origin; dx, dy in um, sampled at reference
+    # point p, give where the matrix-transformed moving slide is read: p + (dx, dy)
+    grid_um_per_px: float = Field(gt=0.0)
+    grid_shape_rc: list[int] = Field(min_length=2, max_length=2)
+    method: Name  # software, settings and input image, an evaluation criterion
+    median_um: float | None = Field(default=None, ge=0.0)
+    p95_um: float | None = Field(default=None, ge=0.0)
+    registered: Date | None = None
+    code: Name | None = None  # git commit of the code that computed the field
+
+
 class Registration(BaseModel):
     """How this slide maps onto another one. The reference slide carries none."""
 
@@ -65,6 +88,8 @@ class Registration(BaseModel):
     # tissue-outline overlap after the transform, 0 to 1, for methods reporting no um
     outline_dice: float | None = Field(default=None, ge=0.0, le=1.0)
     registered: Date | None = None
+    code: Name | None = None  # git commit of the code that computed the matrix
+    nonrigid: NonRigid | None = None  # absent means the matrix is the whole transform
 
     @field_validator("matrix")
     @classmethod
@@ -74,7 +99,6 @@ class Registration(BaseModel):
             raise ValueError(f"must be 3x3, got {len(matrix)}x{[len(r) for r in matrix]}")
         if matrix[2] != [0.0, 0.0, 1.0]:
             raise ValueError(f"bottom row must be [0, 0, 1], got {matrix[2]}")
-        # a singular matrix collapses the slide onto a line, so it is not a transform
         if abs(float(np.linalg.det(np.array(matrix, float)))) < 1e-12:
             raise ValueError("singular, so it maps the slide onto a line")
         return matrix
@@ -82,6 +106,7 @@ class Registration(BaseModel):
     @field_validator("slide_shape_rc")
     @classmethod
     def _positive(cls, shape: list[int]) -> list[int]:
+        """The shape, checked for positive pixel dimensions."""
         if any(v <= 0 for v in shape):
             raise ValueError(f"pixel dimensions must be positive, got {shape}")
         return shape
@@ -94,14 +119,14 @@ class Slide(BaseModel):
 
     file: Name
     species: Species
-    substance: Name
-    dose_mg_per_kg: int | None = Field(default=None, ge=0)  # the rat filenames carry no dose
+    substance: Name | None = None  # the treatment, e.g. apap; rat slides carry none
+    dose_mg_per_kg: int | None = Field(default=None, ge=0)  # rat slides carry none
     animal_id: Name
     stain: Stain
     modality: Modality
     serial_block: Name
     original_name: str | None = None
-    excluded: str | None = None # why this slide excluded, e.g. an antibody negative control
+    excluded: str | None = None  # why the slide is excluded, e.g. an antibody negative control
     scenes: list[Scene] | None = None
     registration: Registration | None = None
 
@@ -112,8 +137,15 @@ class Slide(BaseModel):
     lobes: str | None = None
     antibody_dilution: str | None = None
     staining_run: str | None = None
+    section_index: int | None = Field(default=None, ge=1)  # position in the block's cut order, 1 is cut first
 
-    # acquisition provenance, read from the vendor file (the OME conversion does not carry these, so they would otherwise be lost)
+    # study condition, as the lab's sheets give it
+    condition: str | None = None  # e.g. normal, steatosis
+    diet: str | None = None  # e.g. MCD+HF; None is standard feed or not an animal study
+    diet_weeks: int | None = Field(default=None, ge=0)
+    grade_lab: str | None = None  # the lab's histology grade as written, e.g. 50%macro pp+50%micro pc
+
+    # acquisition provenance, read from the vendor file
     acquired: Timestamp | None = None
     scanner_software: str | None = None
     scanner_version: str | None = None
@@ -125,15 +157,15 @@ class Slide(BaseModel):
     source_compression: str | None = None
     source_path: str | None = None
 
-    # filled in while indexing, not written by hand
+    # filled in while indexing
     directory: str | None = None
     scene: int = Field(default=0, ge=0)
 
 
-# SQLite type per python type, so the DDL follows the model
+# SQLite type per python type
 SQL_TYPES = {int: "INTEGER", float: "REAL", str: "TEXT"}
 
-# Nested models are their own shape and do not flatten into a table column
+# Slide fields with no table column: the nested models and excluded
 NESTED = ["scenes", "registration", "excluded"]
 
 # Columns the index holds: the model's fields, minus the nested ones
@@ -146,12 +178,12 @@ REQUIRED = [
     if field.is_required() and name not in NESTED
 ]
 
-# Filled in by the indexer rather than the sidecar, but never null in the table
+# Filled in by the indexer, NOT NULL in the table
 DERIVED = ["directory", "scene"]
 
 
 def _sql_type(name: str) -> str:
-    """INTEGER or TEXT for one field, from the model's annotation."""
+    """INTEGER, REAL or TEXT for one field, from the model's annotation."""
     annotation = Slide.model_fields[name].annotation
     for python_type, sql in SQL_TYPES.items():
         if annotation is python_type or python_type in getattr(annotation, "__args__", ()):
@@ -160,7 +192,7 @@ def _sql_type(name: str) -> str:
 
 
 def create_table_sql() -> str:
-    """The CREATE TABLE for the current model, so the DDL cannot drift from it."""
+    """The CREATE TABLE statement for the current Slide model."""
     lines = []
     for name in COLUMNS:
         not_null = " NOT NULL" if name in REQUIRED or name in DERIVED else ""
