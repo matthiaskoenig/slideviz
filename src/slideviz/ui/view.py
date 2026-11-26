@@ -2,6 +2,10 @@
 
     uv run slideviz-view
     uv run slideviz-view --data /path/to/slides
+    uv run slideviz-view --data /path/to/mouse /path/to/rat /path/to/species
+
+Several data folders share one slide list; each slide's predictions, meshes and stain reference are found beside its
+own folder.
 """
 
 from __future__ import annotations
@@ -39,19 +43,21 @@ def main() -> None:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,  # keeps docstring layout
     )
-    parser.add_argument("--data", type=Path, default=settings.data,  # SLIDEVIZ_DATA when --data is absent
-                        help="directory of slides and their sidecars")
+    parser.add_argument("--data", type=Path, nargs="+",  # SLIDEVIZ_DATA when --data is absent
+                        default=[settings.data] if settings.data else None,
+                        help="one or more directories of slides and their sidecars")
     # for a large set, or a slow or unreachable data directory
     parser.add_argument("--no-reindex", action="store_true",
                         help="skip the rebuild and open the existing index")
     parser.add_argument("--stain-reference", type=Path, default=None,
-                        help="stain reference JSON; defaults to stain_reference.json beside --data")
+                        help="stain reference JSON; defaults to stain_reference.json beside each --data folder")
     parser.add_argument("-v", "--verbose", action="store_true", help="log at debug level")
     args = parser.parse_args()
     setup(args.verbose)
     console = Console(stderr=True)
 
-    settings.data = args.data  # predictions and references are found beside --data
+    if args.data:
+        settings.data = args.data[0]  # the default for tools that take one folder
     if args.stain_reference:
         settings.stain_reference = args.stain_reference
 
@@ -59,19 +65,21 @@ def main() -> None:
         parser.error(f"no index at {default_db()}: run without --no-reindex first")
 
     if not args.no_reindex:
-        if args.data is None:
+        if not args.data:
             parser.error("no data directory: pass --data or set SLIDEVIZ_DATA")
-        if not args.data.is_dir():
-            parser.error(f"not a directory: {args.data}")
+        for folder in args.data:
+            if not folder.is_dir():
+                parser.error(f"not a directory: {folder}")
 
         columns = (TextColumn("{task.description}"), BarColumn(), MofNCompleteColumn(),
                    TimeElapsedColumn())
         with Progress(*columns, console=console) as bar:
-            # no total until the folder listing is done, so the bar pulses until then
-            task = bar.add_task(f"indexing {args.data}", total=None)
-            count = build(args.data, progress=lambda done, total: bar.update(
-                task, completed=done, total=total))  # rebuild first, so the list matches disk
-        log.info("indexed %d records from %s", count, args.data)
+            for folder in args.data:
+                # no total until the folder listing is done, so the bar pulses until then
+                task = bar.add_task(f"indexing {folder}", total=None)
+                count = build(folder, progress=lambda done, total, task=task: bar.update(
+                    task, completed=done, total=total))  # rebuild first, so the list matches disk
+                log.info("indexed %d records from %s", count, folder)
 
     # tiles are fetched off the UI thread, for this session only
     os.environ.setdefault("NAPARI_ASYNC", "1")

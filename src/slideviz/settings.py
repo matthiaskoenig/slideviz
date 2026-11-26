@@ -25,26 +25,28 @@ class Settings(BaseSettings):
     # stain reference from stain_stats.py; slides are matched onto its target when found
     stain_reference: Path | None = None
 
-    def predictions_dir(self) -> Path | None:
-        """The prediction directory, falling back to one beside the data."""
+    def predictions_dir(self, data: Path | None = None) -> Path | None:
+        """The prediction directory, falling back to the one beside `data` (default the data directory)."""
         if self.predictions is not None:
             return self.predictions
-        return self.data / "predictions" if self.data else None
+        data = data or self.data
+        return data / "predictions" if data else None
 
-    def meshes_dir(self) -> Path | None:
-        """The mesh directory, falling back to one beside the data."""
+    def meshes_dir(self, data: Path | None = None) -> Path | None:
+        """The mesh directory, falling back to the one beside `data` (default the data directory)."""
         if self.meshes is not None:
             return self.meshes
-        return self.data / "meshes" if self.data else None
+        data = data or self.data
+        return data / "meshes" if data else None
 
-    def stain_reference_file(self) -> Path | None:
-        """The stain reference, falling back to the conventional name beside the data."""
+    def stain_reference_file(self, data: Path | None = None) -> Path | None:
+        """The stain reference, falling back to the conventional name beside `data` (default the data directory)."""
         if self.stain_reference is not None:
             return self.stain_reference
-        if self.data is None:
+        data = data or self.data
+        if data is None:
             return None
-        beside = self.data / "stain_reference.json"
+        beside = data / "stain_reference.json"
         return beside if beside.exists() else None
-
 
 settings = Settings()

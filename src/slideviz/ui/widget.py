@@ -283,20 +283,30 @@ def placed_maps(maps: list[tuple[Path, list[tuple[int, int]], float, str]]):
 class SlideList(QWidget):
     """Slide picker docked into the napari window."""
 
-    def __init__(self, viewer, directory: Path | None = None) -> None:
-        """Build the slide picker for the slides indexed under `directory`, or every indexed slide when it is None."""
+    def __init__(self, viewer, directories: list[Path] | None = None) -> None:
+        """Build the slide picker for the slides indexed under `directories`, or every indexed slide when None."""
         super().__init__()
         self.viewer = viewer
-        self.directory = str(directory.resolve()) if directory else None
-        self._stain = None  # read on first use, then kept
-        self._readout = None  # the readout run's numbers, read on first use, then kept
-        self._necrosis_areas = None  # the necrosis runs' areas per slide and animal, read on first use, then kept
+        self.directories = [str(d.resolve()) for d in directories] if directories else None
+        # per data folder, read on first use, then kept: stain reference, readout run, necrosis runs' areas
+        self._stain: dict[str, tuple] = {}
+        self._readout: dict[str, dict] = {}
+        self._necrosis_areas: dict[str, dict] = {}
         self._map_worker = None  # the necrosis map being placed on the H&E pyramid
         # level shapes of the block's reference slide, the grid a non-rigid layer is drawn on
         self._reference_shapes: list[tuple[int, int]] = []
 
         self.boxes = {}
         filters = QFormLayout()
+        # with several data folders, a box picks one; it lists each folder by its name
+        self.folder = None
+        if self.directories and len(self.directories) > 1:
+            self.folder = QComboBox()
+            self.folder.addItem(ANY, None)
+            for directory in self.directories:
+                self.folder.addItem(Path(directory).name, directory)
+            self.folder.currentIndexChanged.connect(self._folder_changed)
+            filters.addRow("Folder", self.folder)
         for label, column in FILTERS.items():
             box = QComboBox()
             box.currentTextChanged.connect(self.refresh)  # re-query on every change
@@ -415,10 +425,18 @@ class SlideList(QWidget):
             box.blockSignals(False)
 
     def _scope(self) -> tuple[list[str], list]:
-        """The collection clause, empty when the widget lists every directory."""
-        if self.directory is None:
+        """The collection clause: the folder picked, else the listed folders; empty when the widget lists everything."""
+        picked = self.folder.currentData() if self.folder is not None else None
+        if picked is not None:
+            return ["directory = ?"], [picked]
+        if self.directories is None:
             return [], []
-        return ["directory = ?"], [self.directory]
+        return [f"directory IN ({', '.join('?' * len(self.directories))})"], list(self.directories)
+
+    def _folder_changed(self) -> None:
+        """Offer the picked folder's values in the filter boxes and list its blocks."""
+        self._fill_boxes()
+        self.refresh()
 
     def _where(self) -> tuple[str, tuple]:
         """Build the WHERE clause from the collection and the active filters."""
@@ -499,13 +517,13 @@ class SlideList(QWidget):
                 lines.append(f"<br><b>{stain_name(row['stain'])}</b>")
                 lines.extend(details)
 
-        lines.extend(self._necrosis_lines(animal_name(block, slides[0]["substance"]), slides))
-        lines.extend(self._readout_lines(slides))
+        lines.extend(self._necrosis_lines(directory, animal_name(block, slides[0]["substance"]), slides))
+        lines.extend(self._readout_lines(directory, slides))
         self.info.setText("<br>".join(lines))
 
-    def _necrosis_lines(self, animal: str, slides: list) -> list[str]:
-        """Info lines with each H&E slide's necrotic share from the necrosis run's record."""
-        record = self._necrosis_record()
+    def _necrosis_lines(self, directory: str, animal: str, slides: list) -> list[str]:
+        """Info lines with each H&E slide's necrotic share from the necrosis run's record of its data folder."""
+        record = self._necrosis_record(directory)
         he = [row for row in slides if row["stain"] == REFERENCE_STAIN]
         found = [(row, record.get(slide_stem(row))) for row in he]
         if len(he) == 1 and found[0][1] is None:  # the mouse runs keyed their rows by animal
@@ -520,11 +538,11 @@ class SlideList(QWidget):
             lines.append(f"{mapped['area_E']:.1%} of tissue without lumina{drawn}")
         return lines
 
-    def _readout_record(self) -> dict:
-        """The newest CYP2E1 readout run's record from the prediction directory, read once and kept."""
-        if self._readout is None:
-            self._readout = {}
-            directory = settings.predictions_dir()
+    def _readout_record(self, data: str) -> dict:
+        """The newest CYP2E1 readout run's record beside a data folder, read once and kept."""
+        if data not in self._readout:
+            newest: dict = {}
+            directory = settings.predictions_dir(Path(data))
             paths = sorted(directory.glob(READOUT_RECORDS)) if directory is not None and directory.is_dir() else []
             for path in paths:
                 try:
@@ -532,15 +550,17 @@ class SlideList(QWidget):
                 except (OSError, ValueError) as exc:
                     log.warning("unreadable readout record %s: %s", path, exc)
                     continue
-                if record.get("written", "") > self._readout.get("written", ""):
-                    self._readout = record
-        return self._readout
+                if record.get("written", "") > newest.get("written", ""):
+                    newest = record
+            self._readout[data] = newest
+        return self._readout[data]
 
-    def _necrosis_record(self) -> dict:
-        """Areas per slide and per animal from the newest necrosis run record holding each, with its date, read once."""
-        if self._necrosis_areas is None:
-            self._necrosis_areas = {}
-            directory = settings.predictions_dir()
+    def _necrosis_record(self, data: str) -> dict:
+        """Areas per slide and per animal from the newest necrosis run record beside a data folder, read once."""
+        if data not in self._necrosis_areas:
+            areas: dict = {}
+            self._necrosis_areas[data] = areas
+            directory = settings.predictions_dir(Path(data))
             paths = sorted(directory.glob(NECROSIS_RECORDS)) if directory is not None and directory.is_dir() else []
             records = []
             for path in paths:
@@ -557,12 +577,12 @@ class SlideList(QWidget):
                     # rows name their slide; the mouse runs' rows name their animal, None outside training
                     for key in (row.get("slide"), row.get("animal")):
                         if key:
-                            self._necrosis_areas.setdefault(key, row | {"written": written})
-        return self._necrosis_areas
+                            areas.setdefault(key, row | {"written": written})
+        return self._necrosis_areas[data]
 
-    def _readout_lines(self, slides: list) -> list[str]:
+    def _readout_lines(self, directory: str, slides: list) -> list[str]:
         """Info lines with the CYP2E1-positive share of each DAB slide in the block."""
-        record = self._readout_record()
+        record = self._readout_record(directory)
         measured = record.get("slides_measured", {})
         lines = []
         for row in slides:
@@ -598,7 +618,7 @@ class SlideList(QWidget):
         if flat is not None:
             pyramids[EVENED_LEVELS] = flatten_levels(levels, flat, info.pixel_size_um)
         # applied always, so one slide has one appearance for everyone who opens it
-        pyramids = {key: self._matched(p, slide_key) for key, p in pyramids.items()}
+        pyramids = {key: self._matched(p, slide_key, row["directory"]) for key, p in pyramids.items()}
         stain = stain_name(row["stain"])
         # a scene number only means something on the files that hold more than one
         what = f"{stain} stain s{scene}" if info.n_scenes > 1 else f"{stain} stain"
@@ -664,24 +684,22 @@ class SlideList(QWidget):
             metadata=dict(pyramids),
         )
 
-    def _stain_reference(self) -> tuple[object, dict] | None:
-        """The stain target and per-slide statistics, read once and kept."""
-        if self._stain is None:
-            path = settings.stain_reference_file()
-            if path is None:
-                self._stain = ()
-            else:
+    def _stain_reference(self, data: str) -> tuple[object, dict] | None:
+        """The stain target and per-slide statistics beside a data folder, read once and kept."""
+        if data not in self._stain:
+            path = settings.stain_reference_file(Path(data))
+            self._stain[data] = ()
+            if path is not None:
                 try:
-                    self._stain = read_stain_reference(path)
-                    log.debug("stain reference: %d slides from %s", len(self._stain[1]), path)
+                    self._stain[data] = read_stain_reference(path)
+                    log.debug("stain reference: %d slides from %s", len(self._stain[data][1]), path)
                 except (OSError, ValueError, KeyError) as exc:
                     log.warning("unreadable stain reference %s: %s", path, exc)
-                    self._stain = ()
-        return self._stain or None
+        return self._stain[data] or None
 
-    def _matched(self, levels: list, slide_key: str) -> list:
-        """The pyramid matched onto the shared stain target, when the slide has statistics."""
-        reference = self._stain_reference()
+    def _matched(self, levels: list, slide_key: str, data: str) -> list:
+        """The pyramid matched onto its data folder's stain target, when the slide has statistics."""
+        reference = self._stain_reference(data)
         if reference is None:
             return levels
         target, per_slide = reference
@@ -714,9 +732,9 @@ class SlideList(QWidget):
             layer.data = self._levels_for(layer.metadata)
 
     @staticmethod
-    def _necrosis_map(name: str) -> Path | None:
-        """The necrosis map for one slide or animal, when the prediction directory holds one."""
-        directory = settings.predictions_dir()
+    def _necrosis_map(data: str, name: str) -> Path | None:
+        """The necrosis map for one slide or animal, when the prediction directory beside `data` holds one."""
+        directory = settings.predictions_dir(Path(data))
         path = directory / f"{name}{NECROSIS_SUFFIX}" if directory is not None else None
         return path if path is not None and path.exists() else None
 
@@ -725,9 +743,9 @@ class SlideList(QWidget):
         maps = []
         for opened in shown:
             row = opened["row"]
-            path = self._necrosis_map(slide_stem(row))
+            path = self._necrosis_map(row["directory"], slide_stem(row))
             if path is None and len(shown) == 1:  # the mouse runs named their maps by animal
-                path = self._necrosis_map(animal)
+                path = self._necrosis_map(row["directory"], animal)
             if path is not None:
                 scan = scan_label(row)
                 maps.append((path, opened["level_shapes"], opened["pixel_size_um"],
@@ -752,7 +770,7 @@ class SlideList(QWidget):
         """Add the stored gradient map of each DAB slide, on its H&E partner's grid."""
         import numpy as np
 
-        directory = settings.predictions_dir()
+        directory = settings.predictions_dir(Path(slides[0]["directory"]))
         if directory is None or not directory.is_dir():
             return
         references = {slide_stem(row)
@@ -792,7 +810,7 @@ class SlideList(QWidget):
 
     def _load_lobules(self, slides: list) -> None:
         """Add the stored lobule borders of each DAB slide, hidden, on its H&E partner's grid."""
-        directory = settings.predictions_dir()
+        directory = settings.predictions_dir(Path(slides[0]["directory"]))
         if directory is None or not directory.is_dir():
             return
         for row in slides:
@@ -810,9 +828,9 @@ class SlideList(QWidget):
             self.viewer.add_layer(layer)
             layer.visible = False
 
-    def _load_meshes(self, animal: str) -> None:
-        """Add each mesh stored for the animal, in the H&E frame, with its named edges at a fixed screen width."""
-        directory = settings.meshes_dir()
+    def _load_meshes(self, animal: str, data: str) -> None:
+        """Add each mesh stored for the animal beside its data folder, in the H&E frame, edges at a fixed width."""
+        directory = settings.meshes_dir(Path(data))
         if directory is None or not directory.is_dir():
             return
         for path in sorted(directory.glob(f"{animal}_*{MESH_FIELDS}")):
@@ -890,7 +908,7 @@ class SlideList(QWidget):
             # CYP2E1 first, so the see-through necrosis lies on top and their overlap mixes
             self._load_readouts(slides)
             self._load_lobules(slides)
-            self._load_meshes(animal)
+            self._load_meshes(animal, directory)
             self._load_necrosis(animal, state["he"])
             log.info("opened %s", block_title(slides[0]))
             if state["unaligned"]:
