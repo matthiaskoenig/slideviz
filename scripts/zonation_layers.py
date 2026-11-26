@@ -29,7 +29,7 @@ from slideviz.analysis.warp import load_field, nonrigid_levels
 from slideviz.data.provenance import code_version
 from slideviz.data.registration import read_sidecar
 from slideviz.data.schema import Registration
-from slideviz.io.reader import open_slide
+from slideviz.io.reader import find_slide, open_slide, slide_paths, slide_stem
 
 HOLE_UM = 350.0  # basins grow this far over lumina and gaps, so borders run on between lobules
 LOW_PCT, HIGH_PCT = 1, 99  # percentiles of the landscape over profile tissue: the display range
@@ -55,6 +55,21 @@ def borders(lobules: np.ndarray) -> np.ndarray:
     return out
 
 
+def save_layers(path: Path, land: zonation.Landscape, port: zonation.Portality, inside: np.ndarray, um: float,
+                offset: float, extra: dict) -> None:
+    """The map file: the landscape on its own grid, and the position and lumen classes on the working grid.
+
+    The working grid is the H&E level the slide was measured on, so its pixel (0, 0) is centred at the origin of
+    the H&E frame, as in mesh_inputs.frame(). Position is NaN outside the section outline.
+    """
+    np.savez_compressed(
+        path, landscape=np.where(land.solid, land.field, np.nan).astype(np.float32),
+        peaks=land.peaks.astype(np.int32), valleys=land.valleys.astype(np.int32),
+        um_per_px=land.um_per_px, offset_um=offset,
+        position=np.where(inside, port.points, np.nan).astype(np.float32), lumen_class=port.lumen_class,
+        working_um_per_px=um, working_origin_um=np.zeros(2), **extra)
+
+
 def measure(job: tuple) -> dict:
     """One CYP2E1 slide: landscape, lobule borders, peaks and valleys on its H&E partner's grid."""
     stem, slides, out, provenance = job
@@ -63,8 +78,8 @@ def measure(job: tuple) -> dict:
     if field is None:
         raise RuntimeError(f"{stem}: no valid non-rigid field")
 
-    he_info, he = open_slide(slides / f"{registration.reference}.ome.tiff")
-    _, cyp = open_slide(slides / f"{stem}.ome.tiff")
+    he_info, he = open_slide(find_slide(slides, registration.reference))
+    _, cyp = open_slide(find_slide(slides, stem))
     he_shapes = [level.shape[:2] for level in he]
     warped = nonrigid_levels(cyp, he_shapes, registration, field, he_info.pixel_size_um)
     index = pick_level_um([level.shape for level in he], he_info.pixel_size_um, dab.WORK_UM)
@@ -85,6 +100,8 @@ def measure(job: tuple) -> dict:
     lobules = np.where(within, expand_labels(basins, round(HOLE_UM / land.um_per_px)), 0)
     border = borders(lobules)
 
+    port = zonation.portality(land, cells, inside)
+
     low, high = (float(v) for v in np.percentile(land.field[land.usable], (LOW_PCT, HIGH_PCT)))
     offset = (land.block - 1) / 2 * um
     meta = {
@@ -94,16 +111,18 @@ def measure(job: tuple) -> dict:
         "frame": "H&E level 0 um; pixel (r, c) is centred at offset_um + (r, c) * um_per_px",
         "landscape": "DAB optical density blurred over tissue (zonation.landscape), NaN outside solid tissue",
         "border": "1 where the lobule below or to the right is another one",
+        "position": "zonation.portality points on the working grid (H&E level of um_per_px), 0 periportal, 1 "
+                    "pericentral, NaN outside the section outline; working pixel (r, c) is centred at "
+                    "working_origin_um + (r, c) * working_um_per_px",
+        "lumen_class": "uint8 on the working grid: 0 no lumen, 1 portal, 2 central, 3 other lumen",
         "low_high": f"p{LOW_PCT} and p{HIGH_PCT} of the landscape over profile tissue",
         "written": datetime.now(UTC).isoformat(timespec="seconds"),
         **provenance,
     }
     name = f"{stem}{SUFFIX}"
-    np.savez_compressed(
-        out / name, landscape=np.where(land.solid, land.field, np.nan).astype(np.float32),
-        border=border.astype(np.uint8), peaks=land.peaks.astype(np.int32), valleys=land.valleys.astype(np.int32),
-        um_per_px=land.um_per_px, offset_um=offset, low=low, high=high, reference=registration.reference,
-        nonrigid_sha256=registration.nonrigid.sha256, meta=json.dumps(meta))
+    save_layers(out / name, land, port, inside, um, offset,
+                {"border": border.astype(np.uint8), "low": low, "high": high, "reference": registration.reference,
+                 "nonrigid_sha256": registration.nonrigid.sha256, "meta": json.dumps(meta)})
     print(f"{stem}: {len(land.peaks)} lobules, {len(land.valleys)} valleys, grid {land.field.shape}", flush=True)
 
     shade = np.clip((land.field - low) / (high - low), 0, 1)[..., None]
@@ -157,8 +176,8 @@ def main() -> None:
                 | {name: getattr(tissue, name) for name in TISSUE_SETTINGS}
                 | {"HOLE_UM": HOLE_UM, "LOW_PCT": LOW_PCT, "HIGH_PCT": HIGH_PCT})
     jobs = []
-    for path in sorted(args.slides.glob("*_cyp2e1.ome.tiff")):
-        stem = path.name.removesuffix(".ome.tiff")
+    for path in slide_paths(args.slides, "*_cyp2e1"):
+        stem = slide_stem(path)
         if args.blocks and not any(block in stem for block in args.blocks):
             continue
         jobs.append((stem, args.slides, args.out, {"code": code, "settings": settings}))
@@ -174,7 +193,8 @@ def main() -> None:
         "slides": str(args.slides),
         "method": "CYP2E1 landscape and watershed lobule borders on the H&E grid, rigid plus non-rigid registration",
         "map": "landscape float32 (DAB OD, NaN outside solid tissue), border uint8, peaks and valleys as landscape "
-               "(row, col); pixel (r, c) is centred at offset_um + (r, c) * um_per_px in H&E level 0 um",
+               "(row, col); pixel (r, c) is centred at offset_um + (r, c) * um_per_px in H&E level 0 um; position "
+               "float32 and lumen_class uint8 on the working grid (working_um_per_px, working_origin_um)",
         "settings": settings,
         "slides_measured": {r["stem"]: r["row"] for r in results},
     }

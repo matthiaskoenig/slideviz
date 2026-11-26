@@ -17,3 +17,4 @@ shapely = ">=2.2.0,<3"
 scikit-image = ">=0.26.0,<0.27"
 h5py = { version = ">=3.16.0,<4", build = "mpi_mpich_*" }
 meshio = ">=5.3.5,<6"
+pytest = ">=8,<10"

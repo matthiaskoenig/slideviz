@@ -19,8 +19,11 @@ from polygons import code_version, sha256
 from shapely.geometry import shape
 
 AREA_TAGS = {"surviving": 1, "necrotic": 2, "tissue": 3}
-EDGE_TAGS = {"vessel_wall": 11, "section_edge": 12, "field_cut": 13, "necrosis_border": 14}
-REFINED = ("vessel_wall", "section_edge", "necrosis_border")  # the square's cut sides are artificial
+EDGE_TAGS = {"vessel_wall": 11, "section_edge": 12, "field_cut": 13, "necrosis_border": 14, "portal_wall": 15,
+             "central_wall": 16}
+REFINED = ("vessel_wall", "portal_wall", "central_wall", "section_edge", "necrosis_border")  # the square's cut sides are artificial
+WALL_CLASSES = {1: "portal_wall", 2: "central_wall"}  # lumen_class values that name a wall; 3 and 0 stay vessel_wall
+CLASS_REACH_UM = 10.0  # lumen class pixels this close to a wall's edge midpoints vote for its class
 DIST_MIN, DIST_MAX = 2, 10  # small size up to DIST_MIN x small from a refined edge, large size from DIST_MAX x large
 SAMPLING = 20  # points per edge piece in gmsh's distance field
 EPS_UM = 1e-6
@@ -50,6 +53,52 @@ def lumen_beside(a: tuple, b: tuple, lumen: np.ndarray, meta: dict) -> bool:
         if 0 <= r < lumen.shape[0] and 0 <= c < lumen.shape[1] and lumen[r, c]:
             return True
     return False
+
+
+def wall_class(chain: list[tuple], lumen_class: np.ndarray, meta: dict) -> str:
+    """The wall name of a vessel-wall chain, by majority of the portal and central lumen pixels near its edge midpoints.
+
+    Pixels are counted once, however many midpoints reach them. A tie or no classified pixel leaves vessel_wall.
+    """
+    um, (oy, ox) = meta["um_per_px"], meta["origin_um"]
+    reach = int(np.ceil(CLASS_REACH_UM / um))
+    near = set()
+    for a, b in chain:
+        r, c = round(((a[1] + b[1]) / 2 - oy) / um), round(((a[0] + b[0]) / 2 - ox) / um)
+        for i in range(max(r - reach, 0), min(r + reach + 1, lumen_class.shape[0])):
+            for j in range(max(c - reach, 0), min(c + reach + 1, lumen_class.shape[1])):
+                if np.hypot(i - r, j - c) * um <= CLASS_REACH_UM:
+                    near.add((i, j))
+    votes = {name: 0 for name in WALL_CLASSES.values()}
+    for i, j in near:
+        if lumen_class[i, j] in WALL_CLASSES:
+            votes[WALL_CLASSES[lumen_class[i, j]]] += 1
+    (first, n1), (_, n2) = sorted(votes.items(), key=lambda kv: -kv[1])
+    return first if n1 > n2 else "vessel_wall"
+
+
+def classify_walls(walls: list[tuple], xy: dict, lumen_class: np.ndarray, meta: dict) -> dict:
+    """Vessel-wall edge pieces (tag, corner a, corner b) by wall name, each connected chain of them named as one."""
+    parent = {}
+
+    def find(k: int) -> int:
+        """Chain representative of gmsh corner k."""
+        parent.setdefault(k, k)
+        while parent[k] != k:
+            parent[k] = parent[parent[k]]
+            k = parent[k]
+        return k
+
+    for _, a, b in walls:
+        parent[find(a)] = find(b)
+    chains: dict[int, list] = {}
+    for item in walls:
+        chains.setdefault(find(item[1]), []).append(item)
+    named = {name: [] for name in ("vessel_wall", *WALL_CLASSES.values())}
+    for items in chains.values():
+        name = wall_class([(xy[a], xy[b]) for _, a, b in items], lumen_class, meta)
+        named[name].extend(tag for tag, _, _ in items)
+    return named
 
 
 def geometry(items: list[tuple[str, object]]) -> tuple[dict, dict, set, dict]:
@@ -84,9 +133,14 @@ def geometry(items: list[tuple[str, object]]) -> tuple[dict, dict, set, dict]:
     return surfaces, lines, hole_lines, {tag: xy for xy, tag in points.items()}
 
 
-def edge_groups(lines: dict, hole_lines: set, xy: dict, box: tuple, lumen: np.ndarray, meta: dict) -> dict:
-    """Edge pieces by name: between two areas, on the square's sides, around a vessel, or the section's edge."""
+def edge_groups(lines: dict, hole_lines: set, xy: dict, box: tuple, lumen: np.ndarray, lumen_class: np.ndarray,
+                meta: dict) -> dict:
+    """Edge pieces by name: between two areas, on the square's sides, around a vessel, or the section's edge.
+
+    A vessel wall is portal_wall or central_wall when its chain of walls lies beside lumen pixels of that class.
+    """
     groups = {name: [] for name in EDGE_TAGS}
+    walls = []
     for (a, b), tag in lines.items():
         up, _ = gmsh.model.getAdjacencies(1, tag)
         if len(up) == 2:
@@ -94,9 +148,11 @@ def edge_groups(lines: dict, hole_lines: set, xy: dict, box: tuple, lumen: np.nd
         elif on_side(xy[a], xy[b], box):
             groups["field_cut"].append(tag)
         elif tag in hole_lines or lumen_beside(xy[a], xy[b], lumen, meta):
-            groups["vessel_wall"].append(tag)
+            walls.append((tag, a, b))
         else:
             groups["section_edge"].append(tag)
+    for name, tags in classify_walls(walls, xy, lumen_class, meta).items():
+        groups[name].extend(tags)
     return groups
 
 
@@ -153,7 +209,12 @@ def read_back(path: Path) -> dict:
             "areas": tag_counts(areas.values), "edges": tag_counts(edges.values)}
 
 
-def build(variant: str, polygons: list, lumen: np.ndarray, meta: dict, small: float, large: float,
+def named(base: Path, suffix: str) -> Path:
+    """The file base + suffix. Not base.with_suffix: a base name with dots (mouse.v2_plain_h2.5-10um) is no suffix."""
+    return base.with_name(base.name + suffix)
+
+
+def build(variant: str, polygons: list, lumen: np.ndarray, lumen_class: np.ndarray, meta: dict, small: float, large: float,
           base: Path) -> dict:
     """One mesh: geometry, names, size field, triangles, DOLFINx import, written files; its checks."""
     gmsh.initialize()
@@ -164,7 +225,7 @@ def build(variant: str, polygons: list, lumen: np.ndarray, meta: dict, small: fl
     else:
         items = [("tissue", p) for p in shapely.get_parts(shapely.union_all([p for _, p in polygons]))]
     surfaces, lines, hole_lines, xy = geometry(items)
-    groups = edge_groups(lines, hole_lines, xy, frame(meta, lumen.shape), lumen, meta)
+    groups = edge_groups(lines, hole_lines, xy, frame(meta, lumen.shape), lumen, lumen_class, meta)
     for name, tags in surfaces.items():
         gmsh.model.addPhysicalGroup(2, tags, AREA_TAGS[name], name)
     for name, tags in groups.items():
@@ -181,18 +242,18 @@ def build(variant: str, polygons: list, lumen: np.ndarray, meta: dict, small: fl
     p, t = arrays["points_um"], arrays["triangles"]
     u, v = p[t[:, 1]] - p[t[:, 0]], p[t[:, 2]] - p[t[:, 0]]
     tri_area = 0.5 * np.abs(u[:, 0] * v[:, 1] - u[:, 1] * v[:, 0])
-    gmsh.write(str(base.with_suffix(".msh")))
+    gmsh.write(str(named(base, ".msh")))
 
     data = gmshio.model_to_mesh(gmsh.model, MPI.COMM_WORLD, 0, gdim=2)
     gmsh.finalize()
     mesh = data.mesh
     mesh.topology.create_connectivity(1, 2)
     data.cell_tags.name, data.facet_tags.name = "areas", "edges"
-    with XDMFFile(MPI.COMM_WORLD, base.with_suffix(".xdmf"), "w") as xdmf:
+    with XDMFFile(MPI.COMM_WORLD, named(base, ".xdmf"), "w") as xdmf:
         xdmf.write_mesh(mesh)
         xdmf.write_meshtags(data.cell_tags, mesh.geometry)
         xdmf.write_meshtags(data.facet_tags, mesh.geometry)
-    np.savez_compressed(base.parent / f"{base.name}_view.npz", **arrays)
+    np.savez_compressed(named(base, "_view.npz"), **arrays)
     written = {"cells": int(mesh.topology.index_map(2).size_local),
                "areas": tag_counts(data.cell_tags.values), "edges": tag_counts(data.facet_tags.values)}
 
@@ -210,7 +271,7 @@ def build(variant: str, polygons: list, lumen: np.ndarray, meta: dict, small: fl
         "dolfinx_cell_tags": sorted(int(v) for v in set(data.cell_tags.values)),
         "dolfinx_facet_tags": sorted(int(v) for v in set(data.facet_tags.values)),
         "dolfinx_names": sorted(data.physical_groups),
-        "xdmf_read_back_matches": read_back(base.with_suffix(".xdmf")) == written,
+        "xdmf_read_back_matches": read_back(named(base, ".xdmf")) == written,
     }
 
 
@@ -229,7 +290,7 @@ def main() -> None:
     collection = json.loads(args.polygons.read_text())
     meta = collection["meta"]
     with np.load(meta["inputs"]["file"]) as stored:
-        lumen = stored["lumen"]
+        lumen, lumen_class = stored["lumen"], stored["lumen_class"]
     polygons = [(f["properties"]["class"], shape(f["geometry"])) for f in collection["features"]
                 if f["properties"]["class"] != "domain"]
     polygon_area = {name: round(sum(p.area for k, p in polygons if k == name), 1) for name in ("surviving", "necrotic")}
@@ -239,7 +300,7 @@ def main() -> None:
         for size in args.size_um:
             small, large = (float(v) for v in size.split(":"))
             base = args.out / f"{meta['animal']}_{variant}_h{small:g}-{large:g}um"
-            checks = build(variant, polygons, lumen, meta, small, large, base)
+            checks = build(variant, polygons, lumen, lumen_class, meta, small, large, base)
             record = {
                 "slide": meta["slide"],
                 "animal": meta["animal"],
@@ -255,7 +316,7 @@ def main() -> None:
                 "code": code_version(),
                 "written": datetime.now(UTC).isoformat(timespec="seconds"),
             }
-            base.with_suffix(".json").write_text(json.dumps(record, indent=1))
+            named(base, ".json").write_text(json.dumps(record, indent=1))
             print(f"{base.name}: {json.dumps(checks)}", flush=True)
 
 

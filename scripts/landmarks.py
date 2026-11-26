@@ -20,7 +20,7 @@ import numpy as np
 from slideviz.analysis.tiling import pick_level_um
 from slideviz.data.registration import napari_affine, read_sidecar
 from slideviz.data.schema import Registration
-from slideviz.io.reader import open_slide
+from slideviz.io.reader import find_slide, open_slide
 
 VIEW_UM_PER_PX = 1.8
 CACHE = Path.home() / ".cache" / "slideviz" / "landmarks"
@@ -29,7 +29,7 @@ POINT_UM = 40
 
 def view(slides: Path, slide: str) -> tuple[np.ndarray, float, float]:
     """The level nearest VIEW_UM_PER_PX in memory, cached: (image, level-0 um/px, factor)."""
-    info, levels = open_slide(slides / f"{slide}.ome.tiff")
+    info, levels = open_slide(find_slide(slides, slide))
     index = pick_level_um([level.shape for level in levels], info.pixel_size_um, VIEW_UM_PER_PX)
     factor = levels[0].shape[1] / levels[index].shape[1]
     path = CACHE / f"{slide}_level{index}.npy"
@@ -157,7 +157,7 @@ def score(slides: Path, out: Path, fields: dict[str, Path]) -> None:
 
 def level0_um(slides: Path, slide: str) -> float:
     """A slide's level-0 pixel size."""
-    info, _ = open_slide(slides / f"{slide}.ome.tiff")
+    info, _ = open_slide(find_slide(slides, slide))
     return info.pixel_size_um
 
 

@@ -37,7 +37,7 @@ from slideviz.analysis.annotation import (
 from slideviz.analysis.tiling import resampled
 from slideviz.analysis.tissue import mask_from_level, pick_level
 from slideviz.data.provenance import code_version
-from slideviz.io.reader import open_slide
+from slideviz.io.reader import find_slide, open_slide
 
 GRID = 28  # the encoder's patch grid, as in embed_tiles.py's patches.npy
 BAND_UM = 30.0  # a guess at how far the polygons stop short of the necrosis edge
@@ -62,7 +62,7 @@ def patch_weights(size_px: int, grid: int = GRID) -> np.ndarray:
 def one_slide(job: tuple) -> dict:
     """Patch fractions and centre distances for every manifest tile of one slide."""
     slide, rows, polygons, overview, slides, lumen_dir = job
-    info, levels = open_slide(slides / f"{slide}.ome.tiff")
+    info, levels = open_slide(find_slide(slides, slide))
     (level,) = {r["level"] for r in rows}
     (size,) = {r["size_px"] for r in rows}
     shape = levels[level].shape[:2]

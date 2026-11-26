@@ -24,7 +24,7 @@ from slideviz.analysis.tiling import pick_level_um
 from slideviz.analysis.tissue import mask_from_level, pick_level
 from slideviz.data.provenance import code_version
 from slideviz.data.registration import read_sidecar
-from slideviz.io.reader import open_slide
+from slideviz.io.reader import find_slide, open_slide, slide_paths, slide_stem
 
 METHOD = {
     "he": "per channel: 1 mm trend plus up to 4 feathered paler or darker regions",
@@ -77,8 +77,8 @@ def grid_for(job: tuple) -> tuple[str, str, flatten.Grid, dict]:
     stem, slides, predictions = job
     car = read_sidecar(slides, stem)
     kind = "dab" if car["stain"] in flatten.DAB_STAINS else "he"
-    v = view_of(slides / f"{stem}.ome.tiff")
-    inputs = {"slide": f"{stem}.ome.tiff", "view_um": round(v["view_um"], 4), "prediction": None}
+    v = view_of(find_slide(slides, stem))
+    inputs = {"slide": find_slide(slides, stem).name, "view_um": round(v["view_um"], 4), "prediction": None}
     reference = car["registration"]["reference"] if kind == "dab" else stem
     necrotic = np.zeros(v["tissue"].shape, bool)
     if reference in predictions:
@@ -87,7 +87,7 @@ def grid_for(job: tuple) -> tuple[str, str, flatten.Grid, dict]:
         if kind == "he":
             necrotic = necrosis_view(record, v["levels"], v["level0_um"], necrotic.shape, v["view_um"])
         else:
-            ref = view_of(slides / f"{reference}.ome.tiff")
+            ref = view_of(find_slide(slides, reference))
             ref_dead = necrosis_view(record, ref["levels"], ref["level0_um"], ref["tissue"].shape,
                                      ref["view_um"])
             necrotic = carry(ref_dead, ref["view_um"], ref["level0_um"], car["registration"]["matrix"],
@@ -144,7 +144,7 @@ def main() -> None:
         if "cutoff" not in record:
             raise SystemExit(f"{path} has no nested cutoff; use the nested prediction files")
         predictions[record["slide"]] = path
-    stems = sorted(p.name.removesuffix(".ome.tiff") for p in args.slides.glob("*.ome.tiff"))
+    stems = [slide_stem(p) for p in slide_paths(args.slides)]
     if not stems:
         raise SystemExit(f"no slides in {args.slides}")
     wanted = [s for s in stems if not args.blocks or any(b in s for b in args.blocks)]

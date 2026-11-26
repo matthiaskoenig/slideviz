@@ -1,4 +1,4 @@
-"""Cut one block's mesh inputs onto one H&E grid: tissue outline, lumina, necrosis map and CYP2E1 position.
+"""Cut one block's mesh inputs onto one H&E grid: tissue outline, lumina and their classes, necrosis map, CYP2E1 position.
 
 Writes <animal>_mesh_inputs.npz, which the mesh env reads with numpy alone. With --centre a square field,
 without it the whole section.
@@ -25,7 +25,7 @@ from slideviz.analysis.tissue import (
 )
 from slideviz.data.provenance import code_version
 from slideviz.data.registration import sha256
-from slideviz.io.reader import open_slide
+from slideviz.io.reader import open_slide, slide_stem
 
 OUT_NAME = "{animal}_mesh_inputs.npz"
 
@@ -45,6 +45,26 @@ def window(shape: tuple[int, int], factor: int, centre: list[int] | None, size_u
     r, c = centre[0] // factor, centre[1] // factor
     half = int(size_um / 2 / um)
     return max(r - half, 0), min(r + half, shape[0]), max(c - half, 0), min(c + half, shape[1])
+
+
+def lumen_classes(lobules: Path, stem: str, index: int, rows: slice, cols: slice, um: float) -> np.ndarray:
+    """The lumen classes of zonation_layers.py cut to a window of H&E level `index`, nearest neighbour.
+
+    Pixel (r, c) of a level is centred at (r, c) * um in the H&E frame, a working pixel at origin + (r, c) * working
+    um, so the grids are one when the working grid is that level; otherwise each pixel takes the working pixel
+    nearest to its centre, 0 (no lumen) outside the working grid.
+    """
+    with np.load(lobules) as stored:
+        slide, classes = str(stored["reference"]), stored["lumen_class"]
+        working_um, origin = float(stored["working_um_per_px"]), stored["working_origin_um"]
+    if slide != stem:
+        raise SystemExit(f"the lobules map belongs to {slide}, not {stem}")
+    out = np.zeros((rows.stop - rows.start, cols.stop - cols.start), np.uint8)
+    r = np.rint((np.arange(rows.start, rows.stop) * um - origin[0]) / working_um).astype(int)
+    c = np.rint((np.arange(cols.start, cols.stop) * um - origin[1]) / working_um).astype(int)
+    r_in, c_in = (r >= 0) & (r < classes.shape[0]), (c >= 0) & (c < classes.shape[1])
+    out[np.ix_(r_in, c_in)] = classes[np.ix_(r[r_in], c[c_in])]
+    return out
 
 
 def summary(layers: dict, um: float) -> dict:
@@ -69,6 +89,8 @@ def main() -> None:
     parser.add_argument("--lumen", type=Path, required=True, help="necrosis_lumen.py file of that H&E")
     parser.add_argument("--necrosis", type=Path, required=True, help="necrosis_slides.py call map of that H&E")
     parser.add_argument("--cyp2e1", type=Path, required=True, help="cyp2e1_readout.py map on that H&E")
+    parser.add_argument("--lobules", type=Path, required=True,
+                        help="zonation_layers.py <cyp2e1 stem>_lobules.npz of that H&E, for the lumen classes")
     parser.add_argument("--centre", type=int, nargs=2, metavar=("ROW", "COL"),
                         help="field centre in H&E level-0 px; without it the whole section")
     parser.add_argument("--size-um", type=float, default=1000.0, help="field edge with --centre")
@@ -77,7 +99,7 @@ def main() -> None:
     if args.out.exists() and any(args.out.iterdir()):
         raise SystemExit(f"{args.out} is not empty; give a new --out")
 
-    stem = args.he.name.removesuffix(".ome.tiff")
+    stem = slide_stem(args.he)
     info, levels = open_slide(args.he)
     shapes = [tuple(level.shape[:2]) for level in levels]
 
@@ -109,6 +131,7 @@ def main() -> None:
         "necrotic": necrotic[rows, cols],
         "measured": measured[rows, cols],
         "cyp2e1": position[rows, cols],
+        "lumen_class": lumen_classes(args.lobules, stem, index, rows, cols, um),
     }
 
     checked = summary(layers, um)
@@ -127,12 +150,14 @@ def main() -> None:
             "lumen": "vessel lumina and tears inside the outline (necrosis_lumen.py)",
             "necrotic": "necrosis map, majority of its calls per pixel",
             "measured": "tissue the necrosis map covers (no glass, no lumen)",
+            "lumen_class": "lumen classes (zonation_layers.py): 0 no lumen, 1 portal, 2 central, 3 other",
             "cyp2e1": f"position between the local low (0) and high ({POSITION_SCALE}) DAB, {NO_TISSUE} no value",
         },
         "sources": {
             "he": str(args.he),
             **{name: {"file": str(path), "sha256": sha256(path)}
-               for name, path in (("lumen", args.lumen), ("necrosis", args.necrosis), ("cyp2e1", args.cyp2e1))},
+               for name, path in (("lumen", args.lumen), ("necrosis", args.necrosis), ("cyp2e1", args.cyp2e1),
+                                ("lobules", args.lobules))},
         },
         "necrosis_cutoff": calls_meta.get("cutoff"),
         "summary": checked,
