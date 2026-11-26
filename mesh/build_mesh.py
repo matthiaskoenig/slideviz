@@ -17,6 +17,7 @@ from dolfinx.io import gmsh as gmshio
 from mpi4py import MPI
 from polygons import code_version, sha256
 from shapely.geometry import shape
+from shapely.geometry.polygon import orient
 
 AREA_TAGS = {"surviving": 1, "necrotic": 2, "tissue": 3}
 EDGE_TAGS = {"vessel_wall": 11, "section_edge": 12, "field_cut": 13, "necrosis_border": 14, "portal_wall": 15,
@@ -127,6 +128,9 @@ def geometry(items: list[tuple[str, object]]) -> tuple[dict, dict, set, dict]:
 
     for name, polygon in items:
         for part in shapely.get_parts(polygon):
+            # gmsh orients a surface's triangles as its outer loop; polygons.py gives rings either way, a solver wants
+            # them counterclockwise in [x, y] (positive Jacobian)
+            part = orient(part, sign=1.0)
             loops = [loop(part.exterior.coords, False)] + [loop(h.coords, True) for h in part.interiors]
             surfaces.setdefault(name, []).append(g.addPlaneSurface(loops))
     g.synchronize()
@@ -241,7 +245,11 @@ def build(variant: str, polygons: list, lumen: np.ndarray, lumen_class: np.ndarr
     arrays = view_arrays(surfaces, groups)
     p, t = arrays["points_um"], arrays["triangles"]
     u, v = p[t[:, 1]] - p[t[:, 0]], p[t[:, 2]] - p[t[:, 0]]
-    tri_area = 0.5 * np.abs(u[:, 0] * v[:, 1] - u[:, 1] * v[:, 0])
+    signed = 0.5 * (u[:, 0] * v[:, 1] - u[:, 1] * v[:, 0])
+    if (signed <= 0).any():
+        gmsh.finalize()
+        raise RuntimeError(f"{base.name}: {int((signed <= 0).sum())} of {len(signed)} triangles not counterclockwise")
+    tri_area = signed
     gmsh.write(str(named(base, ".msh")))
 
     data = gmshio.model_to_mesh(gmsh.model, MPI.COMM_WORLD, 0, gdim=2)
