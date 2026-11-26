@@ -18,6 +18,8 @@ SCHEMA = json.loads((Path(__file__).resolve().parents[1] / "schemas" / "scene-1.
 UM = 2.0
 ORIGIN_RC = (-30.0, -50.0)  # working_origin_um [row, col]: pixel (0, 0) centred at x = -50, y = -30
 SIZE = 100.0  # the mesh covers x, y in [0, 100] um
+SHAPE = (90, 110)  # the working grid of make_lobules
+HE = "mouse_x_he"
 
 
 def square(points: list, x0: float, y0: float, x1: float, y1: float, tag: int, edges: list, tags: list) -> None:
@@ -51,7 +53,7 @@ def make_mesh(tmp_path: Path, stem: str = "m", listed: bool = True) -> Path:
 
 def make_lobules(tmp_path: Path) -> Path:
     """Position p = x / 100 on a raster larger than the mesh, NaN in the holes and outside the section."""
-    rows, cols = 90, 110
+    rows, cols = SHAPE
     x = ORIGIN_RC[1] + np.arange(cols) * UM
     y = ORIGIN_RC[0] + np.arange(rows) * UM
     position = np.broadcast_to((x / SIZE)[None, :], (rows, cols)).astype(np.float32).copy()
@@ -61,7 +63,7 @@ def make_lobules(tmp_path: Path) -> Path:
     position[(X > 79) & (X < 91) & (Y > 39) & (Y < 61)] = np.nan
     path = tmp_path / "m_lobules.npz"
     np.savez_compressed(path, position=position, lumen_class=np.zeros((rows, cols), np.uint8),
-                        working_um_per_px=UM, working_origin_um=np.array(ORIGIN_RC))
+                        working_um_per_px=UM, working_origin_um=np.array(ORIGIN_RC), reference=HE)
     return path
 
 
@@ -146,3 +148,112 @@ def test_missing_view_named(tmp_path: Path) -> None:
     (record.parent / "mouse.v2_plain_h5-20um_view.npz").unlink()
     with pytest.raises(FileNotFoundError, match=r"_view.npz is missing: .*mouse\.v2_plain_h5-20um_view\.npz"):
         write_scene.write(record, make_lobules(tmp_path), tmp_path / "out")
+
+
+def working_xy() -> tuple[np.ndarray, np.ndarray]:
+    """x and y in um of the working pixel centres of make_lobules, each of shape SHAPE."""
+    x = ORIGIN_RC[1] + np.arange(SHAPE[1]) * UM
+    y = ORIGIN_RC[0] + np.arange(SHAPE[0]) * UM
+    return np.meshgrid(x, y)
+
+
+def make_readout(tmp_path: Path, position: np.ndarray) -> Path:
+    path = tmp_path / "x_cyp2e1_readout.npz"
+    np.savez_compressed(path, position=position.astype(np.uint8), um_per_px=UM, reference=HE)
+    return path
+
+
+def make_calls(tmp_path: Path, calls: np.ndarray, um: float) -> Path:
+    """A call map whose pixel (0, 0) is centred on working pixel (0, 0) of make_lobules: the calls' level grid has
+    pixel p centred at p * um in the H&E frame, so the map starts at ORIGIN_RC / um."""
+    origin_level_rc = [round(ORIGIN_RC[0] / um), round(ORIGIN_RC[1] / um)]
+    meta = {"animal": "x", "slide": HE, "level": 1, "um_per_px": um, "origin_level_rc": origin_level_rc}
+    path = tmp_path / "x_necrosis.npz"
+    np.savez_compressed(path, call_E=calls.astype(np.uint8), call_D=calls.astype(np.uint8), meta=json.dumps(meta))
+    return path
+
+
+def maps_of(out: Path, doc: dict) -> dict:
+    return {spec["id"]: (spec, zarr.open_array(out / spec["path"], mode="r")) for spec in doc["maps"]}
+
+
+def test_cell_maps_share_the_zonation_grid(tmp_path: Path) -> None:
+    X, Y = working_xy()
+    readout = np.where(X < 50, 125, 250)
+    readout[(Y > 39) & (Y < 61) & (X > 9) & (X < 21)] = 255  # the portal hole: not tissue
+    hole = (25, 60)  # a single pixel without readout among 250s; x = -50 + 2 * 60 = 70 um, y = -30 + 2 * 25 = 20 um
+    readout[hole] = 255
+    calls = ((X > 60) & (X < 90) & (Y > 10) & (Y < 30)).astype(np.uint8)
+    calls[(Y > 39) & (Y < 61) & (X > 79) & (X < 91)] = 255  # the central hole: not measured
+    unmeasured = (15, 70)  # x = 90 um, y = 0 um, outside the necrotic block, among 0s
+    calls[unmeasured] = 255
+    calls[23, 62] = 255  # x = 74 um, y = 16 um: a pixel inside the necrotic block, among 1s
+    out = tmp_path / "out"
+    doc = write_scene.write(make_mesh(tmp_path), make_lobules(tmp_path), out,
+                            cyp2e1=make_readout(tmp_path, readout), necrosis=make_calls(tmp_path, calls, UM))
+    jsonschema.validate(doc, SCHEMA)
+    maps = maps_of(out, doc)
+    assert sorted(maps) == ["cyp2e1", "necrosis", "zonation"]
+    zonation_spec, zonation = maps["zonation"]
+    for name in ("cyp2e1", "necrosis"):
+        spec, array = maps[name]
+        assert spec["units"] == "1" and spec["path"] == f"maps/{name}.zarr"
+        assert array.shape == zonation.shape and array.dtype == np.float32
+        assert spec["um_per_px"] == zonation_spec["um_per_px"] and spec["origin_um"] == zonation_spec["origin_um"]
+    # the crop starts 2 px before x = 0 and y = 0: working pixel (r, c) is crop pixel (r - 13, c - 23)
+    cyp2e1 = maps["cyp2e1"][1][:]
+    assert cyp2e1[25 - 13, 30 - 23] == pytest.approx(0.5)  # x = 10 um, readout 125
+    assert cyp2e1[hole[0] - 13, hole[1] - 23] == pytest.approx(1.0)  # its neighbours are 250
+    assert cyp2e1[25 - 13, 70 - 23] == pytest.approx(1.0)  # x = 90 um, readout 250
+    necrosis = maps["necrosis"][1][:]
+    assert set(np.unique(necrosis)) == {0.0, 1.0}
+    assert necrosis[25 - 13, 65 - 23] == 1.0  # x = 80 um, y = 20 um: call 1
+    assert necrosis[23 - 13, 62 - 23] == 1.0  # not measured, among 1s
+    assert necrosis[unmeasured[0] - 13, unmeasured[1] - 23] == 0.0  # not measured, among 0s
+    assert necrosis[50 - 13, 30 - 23] == 0.0  # x = 10 um, y = 70 um: call 0
+    # the filled share: the map's pixels without a value of their own, in the Zarr attributes of the map
+    crop = (slice(13, 13 + 55), slice(23, 23 + 55))
+    for name, missing in (("cyp2e1", readout == 255), ("necrosis", calls == 255)):
+        provenance = maps[name][1].attrs["provenance"]
+        assert provenance["filled_share"] == pytest.approx(float(missing[crop].mean()))
+        assert provenance["fill"] == "nearest"
+
+
+def test_necrosis_resampled_from_level_grid(tmp_path: Path) -> None:
+    """Calls at a quarter of the working pixel: each working pixel is the majority of its 4 x 4 calls."""
+    fine = UM / 4
+    x = ORIGIN_RC[1] + np.arange(SHAPE[1] * 4) * fine
+    y = ORIGIN_RC[0] + np.arange(SHAPE[0] * 4) * fine
+    X, Y = np.meshgrid(x, y)
+    block = (X >= 20) & (X < 60) & (Y >= 30) & (Y < 70)
+    out = tmp_path / "out"
+    doc = write_scene.write(make_mesh(tmp_path), make_lobules(tmp_path), out,
+                            necrosis=make_calls(tmp_path, block, fine))
+    spec, array = maps_of(out, doc)["necrosis"]
+    necrosis = array[:]
+    xs = spec["origin_um"][0] + np.arange(necrosis.shape[1]) * spec["um_per_px"]
+    ys = spec["origin_um"][1] + np.arange(necrosis.shape[0]) * spec["um_per_px"]
+    XS, YS = np.meshgrid(xs, ys)
+    # the block's edges excepted: one working pixel on either side of them
+    inside = (XS > 20 + UM) & (XS < 60 - UM) & (YS > 30 + UM) & (YS < 70 - UM)
+    outside = (XS < 20 - UM) | (XS > 60 + UM) | (YS < 30 - UM) | (YS > 70 + UM)
+    assert inside.sum() > 200 and outside.sum() > 1000
+    assert (necrosis[inside] == 1.0).all() and (necrosis[outside] == 0.0).all()
+    assert maps_of(out, doc)["necrosis"][1].attrs["provenance"]["filled_share"] == 0.0
+
+
+def test_cell_maps_of_another_slide_rejected(tmp_path: Path) -> None:
+    X, _ = working_xy()
+    readout = make_readout(tmp_path, np.full(X.shape, 125))
+    with np.load(readout) as stored:
+        data = dict(stored)
+    data["reference"] = "mouse_y_he"
+    np.savez_compressed(readout, **data)
+    with pytest.raises(ValueError, match="cyp2e1 map belongs to mouse_y_he, not mouse_x_he"):
+        write_scene.write(make_mesh(tmp_path), make_lobules(tmp_path), tmp_path / "out", cyp2e1=readout)
+
+
+def test_readout_on_another_grid_rejected(tmp_path: Path) -> None:
+    readout = make_readout(tmp_path, np.full((SHAPE[0] // 2, SHAPE[1] // 2), 125))
+    with pytest.raises(ValueError, match="cyp2e1 map .* is not on the working grid"):
+        write_scene.write(make_mesh(tmp_path), make_lobules(tmp_path), tmp_path / "out", cyp2e1=readout)

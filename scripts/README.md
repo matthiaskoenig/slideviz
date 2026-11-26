@@ -10,4 +10,5 @@ The pipeline steps a reported result depends on.
 | `flatten_fields.py`, `cyp2e1_readout.py` | stain flattening fields, then the CYP2E1 readout |
 | `landmarks.py` | hand landmarks for registration error |
 | `mesh_inputs.py` | outline, lumina with their zonation classes, necrosis map and CYP2E1 map of a field or section on one grid, for `mesh/` |
-| `write_scene.py` | scene.json and the zonation map (Zarr) of a mesh, for slidesim |
+| `write_scene.py` | scene.json and the zonation, CYP2E1 and necrosis maps (Zarr) of a mesh, for slidesim |
+| `wall_class_check.py` | portal and central lumen classes on dosed slides: counts by class, lumina at the necrosis |
