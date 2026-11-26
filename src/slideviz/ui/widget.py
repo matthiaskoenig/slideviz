@@ -57,14 +57,16 @@ from slideviz.settings import settings
 SELECT_SQL = "SELECT * FROM slides"
 ORDER_SQL = "ORDER BY species, substance, dose_mg_per_kg, animal_id, stain, scene"
 
-# One row per serial block
+# One row per serial block; a block's slides share these fields, MAX picks the one a slide carries
 BLOCK_SQL = """
-SELECT directory, serial_block, species, substance, dose_mg_per_kg, animal_id
+SELECT directory, serial_block, species, substance, dose_mg_per_kg, animal_id,
+       MAX(case_id) AS case_id, MAX(lobes) AS lobes, MAX(condition) AS condition, MAX(diet) AS diet,
+       MAX(diet_weeks) AS diet_weeks
 FROM slides
 """
 BLOCK_GROUP_SQL = """
 GROUP BY directory, serial_block
-ORDER BY species, substance, dose_mg_per_kg, animal_id
+ORDER BY species, substance, dose_mg_per_kg, condition, diet_weeks, animal_id, serial_block
 """
 
 # the stain that every other one is registered to, so it goes in first and untransformed
@@ -140,11 +142,12 @@ LOBULES_SUFFIX = "_lobules.npz"
 BORDERS_NAME = "lobule borders"
 BORDER_COLOURS = Colormap([[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]], interpolation="zero", name="lobule borders")
 
-# Filter label to the column it restricts
-FILTERS = {"Species": "species", "Stain": "stain", "Dose": "dose_mg_per_kg"}
+# Filter label to the column it restricts; a filter shows only when the listed slides hold a value for it
+FILTERS = {"Species": "species", "Condition": "condition", "Stain": "stain", "Dose": "dose_mg_per_kg",
+           "Lobe": "lobes"}
 
 # The column's type, so a filter value is compared as what the column stores
-FILTER_TYPES = {"species": str, "stain": str, "dose_mg_per_kg": int}
+FILTER_TYPES = {"species": str, "condition": str, "stain": str, "dose_mg_per_kg": int, "lobes": str}
 
 ANY = "All"
 
@@ -177,11 +180,25 @@ def _column(name: str) -> str:
     return name
 
 
+def condition_text(row) -> str:
+    """A block's study condition: the diet and its weeks for a special diet, else the condition, else empty."""
+    if row["diet"] and row["diet"] != "standard":
+        return f"{row['diet']} {row['diet_weeks']} wk" if row["diet_weeks"] is not None else row["diet"]
+    return row["condition"] or ""
+
+
+def block_part(row) -> str:
+    """The block name after the animal, which tells one animal's cases and cutting rounds apart; empty without a case."""
+    return row["serial_block"].removeprefix(f"{row['animal_id']}_") if row["case_id"] else ""
+
+
 def block_title(row) -> str:
-    """A block as species, substance, dose and animal, e.g. mouse apap, 500 mg/kg, m1; rat, mdo26 without the two."""
+    """A block as species, substance, dose, condition, animal, case and lobe, each where the slides carry one."""
     dose = row["dose_mg_per_kg"]
     head = " ".join(part for part in (row["species"], row["substance"]) if part)
-    return ", ".join([head, *([f"{dose} mg/kg"] if dose is not None else []), row["animal_id"]])
+    animal = " ".join(part for part in (row["animal_id"], block_part(row)) if part)
+    return ", ".join(part for part in (head, f"{dose} mg/kg" if dose is not None else "", condition_text(row),
+                                       animal, row["lobes"] or "") if part)
 
 
 def turned(angle: float):
@@ -298,6 +315,7 @@ class SlideList(QWidget):
 
         self.boxes = {}
         filters = QFormLayout()
+        self.filters = filters
         # with several data folders, a box picks one; it lists each folder by its name
         self.folder = None
         if self.directories and len(self.directories) > 1:
@@ -423,6 +441,8 @@ class SlideList(QWidget):
             box.addItems([str(row[0]) for row in values if row[0] is not None])
             box.setCurrentIndex(0)
             box.blockSignals(False)
+            # a filter without values in the listed slides, such as Lobe on the mouse APAP set, stays out of sight
+            self.filters.setRowVisible(box, box.count() > 1)
 
     def _scope(self) -> tuple[list[str], list]:
         """The collection clause: the folder picked, else the listed folders; empty when the widget lists everything."""
@@ -471,6 +491,11 @@ class SlideList(QWidget):
         return sorted(rows, key=lambda r: r["stain"] != REFERENCE_STAIN)
 
     @staticmethod
+    def _block_row(directory: str, block: str):
+        """The block's list row: the fields its slides share."""
+        return query(f"{BLOCK_SQL} WHERE directory = ? AND serial_block = ? {BLOCK_GROUP_SQL}", (directory, block))[0]
+
+    @staticmethod
     def _sidecar(row) -> Slide | None:
         """A slide's full sidecar with its nested fields such as the registration, or None when absent."""
         path = slide_path(row)
@@ -485,10 +510,11 @@ class SlideList(QWidget):
 
     @staticmethod
     def _label(row) -> str:
-        """One list entry per block: species, substance, dose and animal, blank where a slide carries none."""
+        """One list entry per block: species, substance, dose, condition, animal, case and lobe, each where present."""
         dose = row["dose_mg_per_kg"]
-        dose_text = f"{dose:>3} mg/kg" if dose is not None else ""
-        return f"{row['species']:<6} {row['substance'] or ''} {dose_text}  {row['animal_id']}"
+        parts = [row["substance"] or "", f"{dose:>3} mg/kg" if dose is not None else "", condition_text(row),
+                 " ".join(part for part in (row["animal_id"], block_part(row)) if part), row["lobes"] or ""]
+        return f"{row['species']:<6} " + "  ".join(part for part in parts if part)
 
     def _show_info(self) -> None:
         """Fill the info panel with what the sidecars and predictions hold for a block."""
@@ -502,7 +528,9 @@ class SlideList(QWidget):
             self.info.setText("")
             return
 
-        lines = [f"<b>{block_title(slides[0])}</b>"]
+        lines = [f"<b>{block_title(self._block_row(directory, block))}</b>"]
+        grades = {sidecar.grade_lab for sidecar in map(self._sidecar, slides) if sidecar is not None and sidecar.grade_lab}
+        lines.extend(f"lab grade: {grade}" for grade in sorted(grades))
         for row in slides:
             sidecar = self._sidecar(row)
             if sidecar is None:
