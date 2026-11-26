@@ -4,11 +4,12 @@
 
 Pericentral necrosis around a central vein that zonation_layers.py classed portal is the sign of a flipped
 classification. Per animal, from <stem>_cyp2e1_lobules.npz (lumen_class on the H&E working grid) and the call map
-<animal>_necrosis.npz of necrosis_slides.py (call_E, each working pixel by the majority of its calls): the lumina
+<H&E stem>_necrosis.npz of necrosis_slides.py (call_E, each working pixel by the majority of its calls): the lumina
 (connected pieces of lumen_class) by class, portal 1, central 2, other 3; the portal/central ratio; and the lumina
 inside or within --radius-um of a necrotic pixel by class. The classification holds on a dosed slide when at most
-MAX_NEAR_PORTAL_SHARE of the lumina at the necrosis are portal and its portal/central ratio lies within the range
-of the controls (animals of dose 000mg). JSON to stdout, the table to stderr.
+MAX_NEAR_PORTAL_SHARE of the lumina at the necrosis are portal and its portal/central ratio is not above the
+highest of the controls (animals of dose 000mg): a flip raises the ratio, so the check is one-sided. JSON to stdout,
+the table to stderr.
 """
 
 from __future__ import annotations
@@ -68,7 +69,11 @@ def count_lumina(lumen_class: np.ndarray, necrotic: np.ndarray, um: float, radiu
 
 
 def gate(rows: list[dict]) -> dict | None:
-    """The verdict per dosed slide against the controls' range of portal/central ratios; None without controls."""
+    """The verdict per dosed slide against the controls' portal/central ratios; None without controls.
+
+    The ratio is read one-sided: a central vein flipped to portal raises it, so a dosed slide fails above the
+    controls' highest ratio only. ratio_in_range reports the two-sided reading of the spec beside it.
+    """
     controls = [row for row in rows if row["animal"].startswith(CONTROL_DOSE)]
     ratios = [row["portal_central_ratio"] for row in controls if row["portal_central_ratio"] is not None]
     if not ratios:
@@ -80,10 +85,11 @@ def gate(rows: list[dict]) -> dict | None:
             continue
         ratio, share = row["portal_central_ratio"], row["near_portal_share"]
         in_range = ratio is not None and low <= ratio <= high
+        not_above = ratio is not None and ratio <= high
         # no lumen at the necrosis: no sign of a flip
         share_ok = share is None or share <= MAX_NEAR_PORTAL_SHARE
-        dosed.append({"animal": row["animal"], "ratio_in_range": in_range, "near_portal_ok": share_ok,
-                      "holds": in_range and share_ok})
+        dosed.append({"animal": row["animal"], "ratio_in_range": in_range, "ratio_not_above": not_above,
+                      "near_portal_ok": share_ok, "holds": not_above and share_ok})
     return {"controls": [row["animal"] for row in controls], "control_ratio_range": [low, high],
             "max_near_portal_share": MAX_NEAR_PORTAL_SHARE, "dosed": dosed,
             "holds": all(row["holds"] for row in dosed)}
@@ -99,14 +105,15 @@ def one_file(directory: Path, pattern: str) -> Path:
 def check(animal: str, lobules_dir: Path, predictions: Path, radius_um: float) -> dict:
     """The counts of one animal."""
     lobules = one_file(lobules_dir, f"*_{animal}_cyp2e1_lobules.npz")
-    necrosis = predictions / f"{animal}_necrosis.npz"
-    if not necrosis.exists():
-        raise SystemExit(f"the necrosis call map is missing: {necrosis}")
     with np.load(lobules) as stored:
         if "lumen_class" not in stored:
             raise SystemExit(f"{lobules} has no lumen_class; rebuild it with scripts/zonation_layers.py")
         classes, reference = stored["lumen_class"], str(stored["reference"])
         um, origin = float(stored["working_um_per_px"]), tuple(stored["working_origin_um"])
+    # the call map named by its H&E slide, as necrosis_slides.py writes it (the older runs named it by animal)
+    necrosis = predictions / f"{reference}_necrosis.npz"
+    if not necrosis.exists():
+        raise SystemExit(f"the necrosis call map is missing: {necrosis}")
     calls, meta = read_calls(necrosis, CALL_KEY)
     if meta["slide"] != reference:
         raise SystemExit(f"{necrosis.name} belongs to {meta['slide']}, {lobules.name} to {reference}")
@@ -137,7 +144,8 @@ def table(rows: list[dict], verdict: dict | None) -> str:
         low, high = verdict["control_ratio_range"]
         lines.append(f"\ncontrols {', '.join(verdict['controls'])}: portal/central {low:.2f} to {high:.2f}")
         for row in verdict["dosed"]:
-            lines.append(f"{row['animal']}: ratio in range {row['ratio_in_range']}, near portal share at most "
+            lines.append(f"{row['animal']}: ratio not above the controls {row['ratio_not_above']} (in their range "
+                         f"{row['ratio_in_range']}), near portal share at most "
                          f"{verdict['max_near_portal_share']} {row['near_portal_ok']}: "
                          f"{'holds' if row['holds'] else 'does not hold'}")
     return "\n".join(lines)
@@ -149,7 +157,7 @@ def main() -> None:
     parser.add_argument("animals", nargs="+", help="animal names of the prediction files, e.g. 281mg_m1")
     parser.add_argument("--lobules", type=Path, required=True,
                         help="folder of zonation_layers.py <stem>_lobules.npz files (with lumen_class)")
-    parser.add_argument("--predictions", type=Path, help="folder of the <animal>_necrosis.npz call maps "
+    parser.add_argument("--predictions", type=Path, help="folder of the <H&E stem>_necrosis.npz call maps "
                         "(default SLIDEVIZ_DATA/predictions)")
     parser.add_argument("--radius-um", type=float, default=RADIUS_UM, help="lumina this close count as at the necrosis")
     args = parser.parse_args()

@@ -69,7 +69,7 @@ def test_gate_against_controls() -> None:
                 "near_portal_share": near_portal / near if near else None}
 
     rows = [row("000mg_m1", 20, 28, 0, 0), row("000mg_m2", 30, 30, 0, 0), row("281mg_m1", 25, 30, 1, 20),
-            row("500mg_m1", 40, 20, 1, 20), row("375mg_m1", 25, 30, 3, 20)]
+            row("500mg_m1", 40, 20, 1, 20), row("375mg_m1", 25, 30, 3, 20), row("158mg_m1", 10, 30, 1, 20)]
     gate = wall_class_check.gate(rows)
     assert gate["controls"] == ["000mg_m1", "000mg_m2"]
     assert gate["control_ratio_range"] == pytest.approx([20 / 28, 1.0])
@@ -77,5 +77,8 @@ def test_gate_against_controls() -> None:
     assert verdict["281mg_m1"]["holds"] and verdict["281mg_m1"]["ratio_in_range"]
     assert not verdict["500mg_m1"]["ratio_in_range"] and not verdict["500mg_m1"]["holds"]
     assert not verdict["375mg_m1"]["near_portal_ok"] and not verdict["375mg_m1"]["holds"]
+    # below the controls' range: no sign of a flip, which raises the ratio
+    assert not verdict["158mg_m1"]["ratio_in_range"] and verdict["158mg_m1"]["ratio_not_above"]
+    assert verdict["158mg_m1"]["holds"]
     assert not gate["holds"]
     json.dumps(gate)  # plain JSON types only
