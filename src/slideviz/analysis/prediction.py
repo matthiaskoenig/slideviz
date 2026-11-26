@@ -91,12 +91,19 @@ def calls_on_level(
 # the um/px of an H&E pyramid level is the level-0 size times a width ratio, which rounds: levels 1 and 3 of one slide
 # are 4 apart by index but up to 1.5e-4 apart from 4 in um/px; a ratio this close to a whole number is that number
 PYRAMID_RTOL = 1e-3
+# a grid origin lies on a call pixel centre to this many call pixels: an absolute bound, since a relative one grows with
+# the origin's distance from the frame's origin and would round any misaligned origin
+ORIGIN_ATOL_PX = 1e-3
 
 
-def whole_multiple(value: float, unit: float, what: str) -> int:
-    """value / unit as the whole number it is within PYRAMID_RTOL (relative to the ratio), an error otherwise."""
+def whole_multiple(value: float, unit: float, what: str, atol: float | None = None) -> int:
+    """value / unit as the whole number it is, an error otherwise.
+
+    Within atol of that number when given (in units), else within PYRAMID_RTOL relative to the ratio.
+    """
     ratio = value / unit
-    if abs(ratio - round(ratio)) > PYRAMID_RTOL * max(abs(ratio), 1.0):
+    tolerance = atol if atol is not None else PYRAMID_RTOL * max(abs(ratio), 1.0)
+    if abs(ratio - round(ratio)) > tolerance:
         raise ValueError(f"{what}: {value} is not a whole multiple of the call map's {unit} um")
     return round(ratio)
 
@@ -107,13 +114,14 @@ def calls_on_grid(
     """Necrotic and measured masks of a call map over rows x cols of a grid in the H&E frame, as calls_on_level.
 
     The grid's pixel (r, c) is centred at origin_rc_um + (r, c) * um, a call map pixel (i, j) at (origin_level_rc +
-    (i, j)) * um_per_px of its record; the grid's pixel is a whole multiple of the calls', and its origin lies on a
-    call pixel centre, both within PYRAMID_RTOL: the grids are levels of one pyramid. Each grid pixel takes the calls whose centres are nearest to its own, the coarse pixel q
-    centred on fine pixel factor * q of tissue.on_level.
+    (i, j)) * um_per_px of its record. The grid's pixel is a whole multiple of the calls' within PYRAMID_RTOL (the
+    grids are levels of one pyramid), and its origin lies on a call pixel centre within ORIGIN_ATOL_PX. Each grid
+    pixel takes the calls whose centres are nearest to its own, the coarse pixel q centred on fine pixel factor * q
+    of tissue.on_level.
     """
     call_um = float(meta["um_per_px"])
     factor = whole_multiple(um, call_um, "the grid's pixel size")
-    shift = [whole_multiple(o, call_um, "the grid's origin") for o in origin_rc_um]
+    shift = [whole_multiple(o, call_um, "the grid's origin", atol=ORIGIN_ATOL_PX) for o in origin_rc_um]
     start = (shift[0] + rows.start * factor - factor // 2, shift[1] + cols.start * factor - factor // 2)
     shape = (rows.stop - rows.start, cols.stop - cols.start)
     return bin_calls(calls, meta["origin_level_rc"], factor, start, shape)
