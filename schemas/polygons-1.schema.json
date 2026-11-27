@@ -1,0 +1,210 @@
+{
+  "$defs": {
+    "Feature": {
+      "additionalProperties": false,
+      "properties": {
+        "geometry": {
+          "$ref": "#/$defs/Geometry"
+        },
+        "properties": {
+          "$ref": "#/$defs/Properties"
+        },
+        "type": {
+          "const": "Feature",
+          "description": "Always `Feature`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "properties",
+        "geometry"
+      ],
+      "type": "object"
+    },
+    "FeatureKind": {
+      "enum": [
+        "area",
+        "edge"
+      ],
+      "type": "string"
+    },
+    "Geometry": {
+      "description": "GeoJSON geometry; coordinates are `[x, y]` in um. The first ring of a polygon is its outer\nboundary, the others are holes.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "coordinates": {
+              "items": {
+                "items": {
+                  "items": {
+                    "format": "double",
+                    "type": "number"
+                  },
+                  "maxItems": 2,
+                  "minItems": 2,
+                  "type": "array"
+                },
+                "type": "array"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "Polygon",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "coordinates"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "coordinates": {
+              "items": {
+                "items": {
+                  "items": {
+                    "items": {
+                      "format": "double",
+                      "type": "number"
+                    },
+                    "maxItems": 2,
+                    "minItems": 2,
+                    "type": "array"
+                  },
+                  "type": "array"
+                },
+                "type": "array"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "MultiPolygon",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "coordinates"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "coordinates": {
+              "items": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 2,
+                "minItems": 2,
+                "type": "array"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "LineString",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "coordinates"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "coordinates": {
+              "items": {
+                "items": {
+                  "items": {
+                    "format": "double",
+                    "type": "number"
+                  },
+                  "maxItems": 2,
+                  "minItems": 2,
+                  "type": "array"
+                },
+                "type": "array"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "MultiLineString",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "coordinates"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Properties": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/FeatureKind",
+          "description": "`area` (Polygon or MultiPolygon) or `edge` (LineString or MultiLineString)."
+        },
+        "tag": {
+          "description": "Tag name; a tag is either an area tag or an edge tag.",
+          "type": "string"
+        },
+        "value": {
+          "default": 1,
+          "description": "Integer tag value, must be > 0 (default 1).",
+          "format": "int64",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "tag"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`polygons/1`: tagged areas and edges as a GeoJSON FeatureCollection, in the um coordinates of\nthe scene.",
+  "properties": {
+    "features": {
+      "items": {
+        "$ref": "#/$defs/Feature"
+      },
+      "type": "array"
+    },
+    "meta": {
+      "description": "Free metadata, ignored by slidesim."
+    },
+    "type": {
+      "const": "FeatureCollection",
+      "description": "Always `FeatureCollection`.",
+      "type": "string"
+    },
+    "version": {
+      "const": "polygons/1",
+      "description": "Contract version, exactly `polygons/1`.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "type",
+    "version",
+    "features"
+  ],
+  "title": "FeatureCollection",
+  "type": "object"
+}

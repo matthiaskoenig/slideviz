@@ -52,4 +52,5 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "pytest>=9.2.0",
+    "shapely>=2.2.0",  # the mesh/ geometry tests; mesh/ itself runs in its pixi env
 ]

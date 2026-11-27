@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     db: Path = Path(user_cache_dir("slideviz")) / "slides.db"
     # per-slide model output, added as layers when a block that has some is opened
     predictions: Path | None = None
-    # mesh/fields.py meshes per animal, added as layers when its block is opened
+    # the retired gmsh meshes per animal (mesh/fields.py up to 98b30a7), added as layers when its block is opened
     meshes: Path | None = None
     # stain reference from stain_stats.py; slides are matched onto its target when found
     stain_reference: Path | None = None

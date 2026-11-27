@@ -112,8 +112,9 @@ STEP_COLOURS = Colormap(
     name="dab gradient",
 )
 
-# mesh/fields.py output in the mesh directory, per mesh: the corners, triangles and values, with its record (.json)
-# and the build_mesh.py view file (named edges) beside it
+# the output of the retired gmsh meshes in the mesh directory (mesh/fields.py and mesh/build_mesh.py of slideviz up to
+# 98b30a7; slidesim meshes the polygons since), per mesh: the corners, triangles and values, with its record (.json)
+# and the view file (named edges) beside it
 MESH_FIELDS = "_fields.npz"
 MESH_VIEW = "_view.npz"
 
@@ -126,7 +127,7 @@ MESH_CYP2E1 = Colormap(
 MESH_LINE_RGB = (90 / 255, 90 / 255, 90 / 255)  # triangle sides, as in the mesh pictures
 MESH_LINE_PX = 1  # the wireframe width is in screen pixels
 
-# build_mesh.py edge tags: vessel wall, section edge, cut side, necrosis border, coloured as in the mesh pictures
+# the edge tags of those meshes: vessel wall, section edge, cut side, necrosis border, coloured as in the mesh pictures
 MESH_EDGE_RGB = {11: (30, 90, 220), 12: (240, 140, 0), 13: (60, 160, 60), 14: (0, 0, 0)}
 # napari draws a vector's width in data units (um), so the width is reset to this many screen pixels on every zoom
 MESH_EDGE_PX = 2

@@ -1,12 +1,14 @@
-"""Masks to polygons for gmsh: a mesh_inputs.npz field or section as surviving and necrotic areas, outlines in um.
+"""Masks to tagged polygons (polygons/1) for slidesim's mesher: a mesh_inputs.npz field or section as areas and edges, um.
 
 Example, on gpu1:
     cd ~/Projects/slideviz/mesh && ~/.pixi/bin/pixi run --locked python polygons.py \
         --inputs /data/michelle/mesh_281mg_m1_field_2026-10-25/inputs/281mg_m1_mesh_inputs.npz \
         --tolerance-um 1 2 4 8 --out /data/michelle/mesh_281mg_m1_field_2026-10-25/polygons
 
-Writes one GeoJSON per tolerance: the domain (all tissue to mesh, lumina and the outside as holes) and the
-surviving and necrotic areas, simplified together so their shared borders stay shared.
+Writes one polygons/1 GeoJSON per tolerance: the surviving and necrotic areas (variant follow; plain gives one
+"tissue" area), simplified together so their shared borders stay shared, and the edge chains of every boundary segment
+(necrosis_border, field_cut, portal_wall, central_wall, vessel_wall, section_edge, see edges.py). The chains are cut
+from the simplified rings, so they repeat the areas' vertices exactly, as slidesim's mesher needs.
 """
 
 from __future__ import annotations
@@ -20,13 +22,16 @@ from pathlib import Path
 
 import numpy as np
 import shapely
+from edges import edge_chains, frame
 from scipy.ndimage import binary_dilation
 from shapely import box, coverage_simplify, orient_polygons, segmentize, union_all
 from skimage.measure import label, regionprops
+from tags import AREA_TAGS, EDGE_TAGS
 
 NONE, SURVIVING, NECROTIC = 0, 1, 2
 NAMES = {NONE: "none", SURVIVING: "surviving", NECROTIC: "necrotic"}
-OUT_NAME = "{animal}_polygons_{tolerance:g}um.geojson"
+OUT_NAME = "{animal}_polygons{variant}_{tolerance:g}um.geojson"  # variant: "" for follow, "_plain"
+VERSION = "polygons/1"
 FOUR = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], bool)  # pixels touching by an edge, as the polygons join them
 
 
@@ -136,13 +141,23 @@ def pixel_polygons(mask: np.ndarray, origin_um: list[float], um: float) -> list:
     return list(shapely.transform(parts, lambda xy: xy * um + np.array([origin_um[1], origin_um[0]])))
 
 
-def features(polygons: list, kinds: list[int]) -> list[dict]:
-    """GeoJSON features: the domain as one area, then each surviving and necrotic polygon, outer rings anticlockwise."""
-    domain = orient_polygons(union_all(polygons))
-    out = [{"type": "Feature", "properties": {"class": "domain"}, "geometry": shapely.geometry.mapping(domain)}]
-    out += [{"type": "Feature", "properties": {"class": NAMES[k]}, "geometry": shapely.geometry.mapping(orient_polygons(p))}
-            for p, k in zip(polygons, kinds, strict=True)]
+def features(areas: list[tuple[str, object]], chains: dict[str, list]) -> list[dict]:
+    """polygons/1 features: each area (outer rings anticlockwise) with its tag name and value, then the edge chains."""
+    out = [{"type": "Feature", "properties": {"kind": "area", "tag": name, "value": AREA_TAGS[name]},
+            "geometry": shapely.geometry.mapping(polygon)} for name, polygon in areas]
+    for name, lines in chains.items():
+        geometry = ({"type": "LineString", "coordinates": [list(c) for c in lines[0]]} if len(lines) == 1 else
+                    {"type": "MultiLineString", "coordinates": [[list(c) for c in line] for line in lines]})
+        out.append({"type": "Feature", "properties": {"kind": "edge", "tag": name, "value": EDGE_TAGS[name]},
+                    "geometry": geometry})
     return out
+
+
+def tagged_areas(shapes: list, kinds: list[int], variant: str) -> list[tuple[str, object]]:
+    """The areas by tag name: follow keeps surviving and necrotic apart, plain merges them to tissue pieces."""
+    if variant == "follow":
+        return [(NAMES[k], orient_polygons(p)) for p, k in zip(shapes, kinds, strict=True)]
+    return [("tissue", orient_polygons(p)) for p in shapely.get_parts(union_all(shapes))]
 
 
 def main() -> None:
@@ -153,6 +168,8 @@ def main() -> None:
                         help="simplification tolerances; 0 keeps the pixel edges")
     parser.add_argument("--min-piece-um2", type=float, default=100.0,
                         help="tissue pieces under this take the class of the large tissue around them")
+    parser.add_argument("--variant", choices=("follow", "plain"), default="follow",
+                        help="follow: surviving and necrotic areas; plain: one tissue area (no necrosis border)")
     parser.add_argument("--out", type=Path, required=True, help="a new or empty folder")
     args = parser.parse_args()
     if args.out.exists() and any(args.out.iterdir()):
@@ -175,6 +192,9 @@ def main() -> None:
     args.out.mkdir(parents=True, exist_ok=True)
     for tolerance in args.tolerance_um:
         shapes = polygons if tolerance == 0 else list(coverage_simplify(polygons, tolerance))
+        areas = tagged_areas(shapes, kinds, args.variant)
+        chains = edge_chains([p for _, p in areas], frame(source, cls.shape), layers["lumen"], layers["lumen_class"],
+                             source)
         area = sum(p.area for p in shapes)
         necrotic = sum(p.area for p, k in zip(shapes, kinds, strict=True) if k == NECROTIC)
         checks = {
@@ -189,6 +209,7 @@ def main() -> None:
             "coverage_valid": bool(shapely.coverage_is_valid(shapes)),
             "corner_contacts_left": int(sum(w.sum() for w in diagonals(cls))),
             "smallest_um2": round(min(p.area for p in shapes), 1),
+            "edge_chains": {name: len(lines) for name, lines in chains.items()},
         }
         meta = {
             "slide": source["slide"],
@@ -198,6 +219,7 @@ def main() -> None:
             "um_per_px": um,
             "origin_um": origin,
             "tolerance_um": tolerance,
+            "variant": args.variant,
             "min_piece_um2": args.min_piece_um2,
             "changed_pieces": changed,
             "corner_pixels_joined": joined,
@@ -205,8 +227,10 @@ def main() -> None:
             "code": code_version(),
             "written": datetime.now(UTC).isoformat(timespec="seconds"),
         }
-        path = args.out / OUT_NAME.format(animal=source["animal"], tolerance=tolerance)
-        path.write_text(json.dumps({"type": "FeatureCollection", "meta": meta, "features": features(shapes, kinds)}))
+        path = args.out / OUT_NAME.format(animal=source["animal"], tolerance=tolerance,
+                                          variant="" if args.variant == "follow" else "_plain")
+        path.write_text(json.dumps({"type": "FeatureCollection", "version": VERSION, "meta": meta,
+                                    "features": features(areas, chains)}))
         print(f"{path.name}: {json.dumps(checks)}", flush=True)
     moved = {name: sum(c["from"].get(name, 0) for c in changed) for name in ("surviving", "necrotic")}
     print(f"tidy under {args.min_piece_um2:g} um2: {len(changed)} pieces, {sum(c['area_um2'] for c in changed):.0f} um2 "

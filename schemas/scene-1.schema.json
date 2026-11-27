@@ -6,6 +6,27 @@
       ],
       "type": "string"
     },
+    "LobuleSize": {
+      "additionalProperties": false,
+      "description": "Element sizes of the lobule mesh.",
+      "properties": {
+        "interior_um": {
+          "default": 20.0,
+          "description": "Element size in the interior in um (default 20).",
+          "exclusiveMinimum": 0,
+          "format": "double",
+          "type": "number"
+        },
+        "wall_um": {
+          "default": 5.0,
+          "description": "Element size at the vein walls in um (default 5), must be > 0 and <= `interior_um`.",
+          "exclusiveMinimum": 0,
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "type": "object"
+    },
     "MapSpec": {
       "additionalProperties": false,
       "description": "A raster map: one float value per pixel, placed in the scene's um coordinates.",
@@ -57,27 +78,204 @@
       ],
       "type": "object"
     },
-    "MeshFormat": {
-      "enum": [
-        "gmsh"
-      ],
-      "type": "string"
-    },
-    "MeshRef": {
-      "additionalProperties": false,
-      "properties": {
-        "format": {
-          "$ref": "#/$defs/MeshFormat",
-          "description": "Mesh file format."
+    "MeshSource": {
+      "description": "Where the mesh of the scene comes from.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A gmsh `.msh` file; its physical groups are the tags.",
+          "properties": {
+            "format": {
+              "const": "gmsh",
+              "type": "string"
+            },
+            "path": {
+              "description": "Path of the mesh file; relative paths resolve against the directory of the scene\nfile (`Scene::load` stores the absolute path).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "format",
+            "path"
+          ],
+          "type": "object"
         },
-        "path": {
-          "description": "Path of the mesh file; relative paths resolve against the directory of\nthe scene file (`Scene::load` stores the absolute path).",
-          "type": "string"
+        {
+          "additionalProperties": false,
+          "description": "Tagged polygons (`polygons/1`), meshed by slidesim with the given size field.",
+          "properties": {
+            "format": {
+              "const": "polygons",
+              "type": "string"
+            },
+            "path": {
+              "description": "Path of the `polygons/1` file; relative paths resolve against the directory of the\nscene file (`Scene::load` stores the absolute path).",
+              "type": "string"
+            },
+            "size": {
+              "$ref": "#/$defs/SizeField",
+              "description": "Target element size over the domain."
+            }
+          },
+          "required": [
+            "format",
+            "path",
+            "size"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Parametric hexagonal lobules, generated and meshed by slidesim.",
+          "properties": {
+            "area_tag": {
+              "description": "Tag of the tissue area; no default.",
+              "type": "string"
+            },
+            "centre": {
+              "additionalProperties": false,
+              "description": "The central vein; no default for the tag.",
+              "properties": {
+                "radius_um": {
+                  "default": 30.0,
+                  "description": "Radius in um, must be > 0.",
+                  "exclusiveMinimum": 0,
+                  "type": "number"
+                },
+                "tag": {
+                  "description": "Edge tag of the vein wall.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "tag"
+              ],
+              "type": "object"
+            },
+            "corner": {
+              "additionalProperties": false,
+              "description": "The portal veins at the corners; no default for the tag.",
+              "properties": {
+                "radius_um": {
+                  "default": 25.0,
+                  "description": "Radius in um, must be > 0.",
+                  "exclusiveMinimum": 0,
+                  "type": "number"
+                },
+                "tag": {
+                  "description": "Edge tag of the vein wall.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "tag"
+              ],
+              "type": "object"
+            },
+            "format": {
+              "const": "lobules",
+              "type": "string"
+            },
+            "jitter": {
+              "default": 0.0,
+              "description": "Largest displacement of a vein as a fraction of `lobule_radius_um`, `0 <= jitter <= 0.25`.",
+              "format": "double",
+              "maximum": 0.25,
+              "minimum": 0,
+              "type": "number"
+            },
+            "lobule_radius_um": {
+              "default": 300.0,
+              "description": "Circumradius of the hexagonal lobule in um, must be > 0.",
+              "exclusiveMinimum": 0,
+              "format": "double",
+              "type": "number"
+            },
+            "outer_tag": {
+              "description": "Tag of the outer boundary of the domain; no default.",
+              "type": "string"
+            },
+            "rings": {
+              "default": 0,
+              "description": "Rings of neighbouring lobules around the central one (0: a single lobule), at most 4.",
+              "format": "uint32",
+              "maximum": 4,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "seed": {
+              "default": 0,
+              "description": "Seed of the displacements.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "size": {
+              "$ref": "#/$defs/LobuleSize",
+              "default": {
+                "interior_um": 20.0,
+                "wall_um": 5.0
+              }
+            },
+            "zonation": {
+              "$ref": "#/$defs/ZonationSpec",
+              "description": "The zonation raster generated over the domain; no default for the map id."
+            }
+          },
+          "required": [
+            "format",
+            "centre",
+            "corner",
+            "outer_tag",
+            "area_tag",
+            "zonation"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SizeField": {
+      "additionalProperties": false,
+      "description": "Element size as a function of the distance to the nearest edge of the `walls` tags: `min_um`\nup to `dist_min_um`, linear up to `max_um` at `dist_max_um`, `max_um` beyond. Without walls\nthe size is `max_um` everywhere.",
+      "properties": {
+        "dist_max_um": {
+          "description": "Distance in um from which the size is `max_um`.",
+          "exclusiveMinimum": 0,
+          "format": "double",
+          "type": "number"
+        },
+        "dist_min_um": {
+          "description": "Distance in um up to which the size is `min_um`, must be >= 0 and < `dist_max_um`.",
+          "format": "double",
+          "minimum": 0,
+          "type": "number"
+        },
+        "max_um": {
+          "description": "Element size far from the walls in um.",
+          "exclusiveMinimum": 0,
+          "format": "double",
+          "type": "number"
+        },
+        "min_um": {
+          "description": "Element size near the walls in um, must be > 0 and <= `max_um`.",
+          "exclusiveMinimum": 0,
+          "format": "double",
+          "type": "number"
+        },
+        "walls": {
+          "default": [],
+          "description": "Edge tags the distance is measured from.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "required": [
-        "format",
-        "path"
+        "min_um",
+        "max_um",
+        "dist_min_um",
+        "dist_max_um"
       ],
       "type": "object"
     },
@@ -91,6 +289,28 @@
       },
       "required": [
         "length"
+      ],
+      "type": "object"
+    },
+    "ZonationSpec": {
+      "additionalProperties": false,
+      "description": "The zonation map generated for the lobules.",
+      "properties": {
+        "map": {
+          "description": "Map id a study refers to: an ASCII letter, then ASCII letters, digits and `_`; must not\nbe the id of an entry of `maps`.",
+          "pattern": "^[A-Za-z][A-Za-z0-9_]*$",
+          "type": "string"
+        },
+        "um_per_px": {
+          "default": 2.0,
+          "description": "Pixel size in um (default 2), must be > 0.",
+          "exclusiveMinimum": 0,
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "map"
       ],
       "type": "object"
     }
@@ -114,7 +334,7 @@
       "type": "array"
     },
     "mesh": {
-      "$ref": "#/$defs/MeshRef"
+      "$ref": "#/$defs/MeshSource"
     },
     "units": {
       "$ref": "#/$defs/Units"
