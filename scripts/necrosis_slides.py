@@ -8,7 +8,8 @@ The necrosis map is the per-patch mean score smoothed with the guided filter on 
 slideviz.analysis.edge_snap, run in blocks that overlap by twice the window. A pixel is necrotic where its
 score reaches the map's cutoff. Areas count tissue the tiles cover: the outline without lumina
 (necrosis_lumen.slide_lumen on the H&E), levels mapped by their exact factors. The map is stored as call_E and
-area_E, the map before edge snapping as call_D and area_D. With --lumen, a necrosis_lumen.py run, the tile
+area_E, the map before edge snapping as call_D and area_D; the snapped score itself as score_E (0 to SCORE_SCALE for
+0 to 1) in <slide>_necrosis_score.npz. With --lumen, a necrosis_lumen.py run, the tile
 model's and the drawn polygons' areas (lumina out) of its animals are added as area_A_tiles and area_drawn.
 Slides open through their sidecars in --slides. Writes one call-map file per slide, named by the slide, and a
 table.
@@ -40,6 +41,7 @@ from slideviz.data.registration import read_sidecar
 from slideviz.io.reader import open_slide
 
 BLOCK = 4096  # level px per side of one filtering block
+SCORE_SCALE = 250  # stored score for 1.0
 
 
 def snapped(score: np.ndarray, level: object, origin: tuple[int, int], radius: int) -> np.ndarray:
@@ -76,7 +78,8 @@ def one_slide(job: tuple) -> dict:
     measured = (covered & on_level(outline, pyramid_factor(width, outline.shape[1]), *origin, score.shape)
                 & ~on_level(lumen, pyramid_factor(width, lumen.shape[1]), *origin, score.shape))
 
-    calls = {"E": snapped(score, level, origin, radius) >= cutoff, "D": score >= cutoff}
+    snapped_score = snapped(score, level, origin, radius)
+    calls = {"E": snapped_score >= cutoff, "D": score >= cutoff}
     n = max(1, int(measured.sum()))
     area = {code: round(float((call & measured).sum() / n), 4) for code, call in calls.items()}
     maps = {f"call_{code}": np.where(measured, call, CALL_NOT_MEASURED).astype(np.uint8) for code, call in calls.items()}
@@ -86,6 +89,9 @@ def one_slide(job: tuple) -> dict:
               "area_E": area["E"], "area_D": area["D"],
               "map": {"written": meta["written"], "code": meta["code"], "file": path.name}}
     np.savez_compressed(out / f"{slide}_necrosis.npz", **maps, meta=json.dumps(record))
+    stored_score = np.where(measured, np.round(np.clip(snapped_score, 0, 1) * SCORE_SCALE), CALL_NOT_MEASURED)
+    np.savez_compressed(out / f"{slide}_necrosis_score.npz", score_E=stored_score.astype(np.uint8),
+                        meta=json.dumps(record | {"score_scale": SCORE_SCALE}))
     print(f"{slide}: E {area['E']:.1%}, D {area['D']:.1%} of {record['tissue_mm2']} mm2", flush=True)
     return record
 
@@ -135,6 +141,8 @@ def main() -> None:
                                "LUMEN_OPEN_UM": tissue.LUMEN_OPEN_UM, "LUMEN_MIN_UM2": tissue.LUMEN_MIN_UM2}},
         "call_maps": f"<slide>_necrosis.npz: call_E and call_D, uint8 on the map's level from origin_level_rc; "
                      f"1 necrotic, 0 not, {CALL_NOT_MEASURED} not measured",
+        "score_maps": f"<slide>_necrosis_score.npz: score_E, the snapped score on the same grid, uint8 0 to {SCORE_SCALE} "
+                      f"for 0 to 1, {CALL_NOT_MEASURED} not measured; necrotic where it reaches the slide's cutoff",
         "mean_abs_area_error_vs_drawn": {"n": len(drawn), **error},
         "error_caveat": "against polygons that stop short of the necrosis edge and include pooled blood; information",
         "slides": rows,
