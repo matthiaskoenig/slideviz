@@ -34,7 +34,7 @@ from slideviz.analysis.prediction import calls_on_grid, read_calls
 from slideviz.data.registration import sha256
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "mesh"))
-from edges import DIST_MAX, DIST_MIN, REFINED
+from tags import DIST_MAX, DIST_MIN, REFINED
 
 SCHEMA = Path(__file__).resolve().parents[1] / "schemas" / "scene-1.schema.json"
 MARGIN_PX = 2

@@ -12,12 +12,8 @@ from itertools import pairwise
 import numpy as np
 import shapely
 from shapely.geometry import MultiLineString
+from tags import EDGE_TAGS
 
-AREA_TAGS = {"surviving": 1, "necrotic": 2, "tissue": 3}
-EDGE_TAGS = {"vessel_wall": 11, "section_edge": 12, "field_cut": 13, "necrosis_border": 14, "portal_wall": 15,
-             "central_wall": 16}
-REFINED = ("vessel_wall", "portal_wall", "central_wall", "section_edge", "necrosis_border")  # the square's cut sides are artificial
-DIST_MIN, DIST_MAX = 2, 10  # small size up to DIST_MIN x small from a refined edge, large size from DIST_MAX x large
 WALL_CLASSES = {1: "portal_wall", 2: "central_wall"}  # lumen_class values that name a wall; 3 and 0 stay vessel_wall
 CLASS_REACH_UM = 10.0  # lumen class pixels this close to a wall's edge midpoints vote for its class
 EPS_UM = 1e-6
@@ -115,6 +111,10 @@ def edge_chains(areas: list, box: tuple, lumen: np.ndarray, lumen_class: np.ndar
     for polygon in areas:
         for a, b, hole in ring_segments(polygon):
             seen.setdefault((min(a, b), max(a, b)), []).append(hole)
+    for (a, b), holes in seen.items():
+        if len(holes) > 2:
+            raise ValueError(f"the segment {a} - {b} lies on {len(holes)} rings; at most two areas may share a border "
+                             "(overlapping areas or a doubled ring)")
     groups: dict[str, list] = {name: [] for name in EDGE_TAGS}
     walls = []
     for (a, b), holes in seen.items():

@@ -7,10 +7,12 @@ from itertools import pairwise
 from pathlib import Path
 
 import numpy as np
+import pytest
 from shapely.geometry import box
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "mesh"))
 import edges
+from tags import EDGE_TAGS
 
 HOLES = {"portal": (20, 20, 40, 40), "central": (60, 20, 80, 40), "plain": (20, 60, 40, 80)}  # x0, y0, x1, y1
 
@@ -64,9 +66,9 @@ def test_section_edge_where_the_domain_ends_inside_the_field() -> None:
     assert set(chains) == {"section_edge"}
 
 
-def test_wall_classes_match_build_mesh() -> None:
-    """The fixture of test_wall_tags.py: portal, central and unclassified lumen holes; edges.py is where build_mesh
-    takes classify_walls from, so the classes are the ones the gmsh meshes carry."""
+def test_wall_classes_of_the_gmsh_fixture() -> None:
+    """The fixture of test_wall_tags.py: portal, central and unclassified lumen holes. build_mesh and edge_chains share
+    one classify_walls (edges.py), so this checks the expected classes; the gmsh side runs in the pixi env."""
     domain = box(0, 0, 100, 100)
     lumen = np.zeros((100, 100), bool)
     lumen_class = np.zeros((100, 100), np.uint8)
@@ -81,4 +83,11 @@ def test_wall_classes_match_build_mesh() -> None:
     assert on(chains, "portal_wall", HOLES["portal"]) and len(chains["portal_wall"]) == 1
     assert on(chains, "central_wall", HOLES["central"]) and len(chains["central_wall"]) == 1
     assert on(chains, "vessel_wall", HOLES["plain"]) and len(chains["vessel_wall"]) == 1
-    assert set(edges.EDGE_TAGS) >= set(chains)
+    assert set(EDGE_TAGS) >= set(chains)
+
+
+def test_segment_on_three_rings_is_an_error() -> None:
+    lumen = np.zeros((10, 10), bool)
+    meta = {"um_per_px": 1.0, "origin_um": [0.0, 0.0]}
+    with pytest.raises(ValueError, match="at most two areas"):
+        edges.edge_chains([box(0, 0, 5, 5)] * 3, edges.frame(meta, lumen.shape), lumen, np.zeros((10, 10), np.uint8), meta)

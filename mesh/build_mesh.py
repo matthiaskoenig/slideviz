@@ -14,21 +14,12 @@ import numpy as np
 import shapely
 from dolfinx.io import XDMFFile
 from dolfinx.io import gmsh as gmshio
-from edges import (
-    AREA_TAGS,
-    DIST_MAX,
-    DIST_MIN,
-    EDGE_TAGS,
-    REFINED,
-    classify_walls,
-    frame,
-    lumen_beside,
-    on_side,
-)
+from edges import classify_walls, frame, lumen_beside, on_side
 from mpi4py import MPI
 from polygons import code_version, sha256
 from shapely.geometry import shape
 from shapely.geometry.polygon import orient
+from tags import AREA_TAGS, DIST_MAX, DIST_MIN, EDGE_TAGS, REFINED
 
 SAMPLING = 20  # points per edge piece in gmsh's distance field
 

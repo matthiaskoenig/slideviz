@@ -22,10 +22,11 @@ from pathlib import Path
 
 import numpy as np
 import shapely
-from edges import AREA_TAGS, EDGE_TAGS, edge_chains, frame
+from edges import edge_chains, frame
 from scipy.ndimage import binary_dilation
 from shapely import box, coverage_simplify, orient_polygons, segmentize, union_all
 from skimage.measure import label, regionprops
+from tags import AREA_TAGS, EDGE_TAGS
 
 NONE, SURVIVING, NECROTIC = 0, 1, 2
 NAMES = {NONE: "none", SURVIVING: "surviving", NECROTIC: "necrotic"}

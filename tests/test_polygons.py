@@ -16,8 +16,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "mesh"))
 sys.path.insert(0, str(ROOT / "scripts"))
-import edges
 import polygons
+from tags import AREA_TAGS, EDGE_TAGS
 
 SCHEMA = json.loads((ROOT / "schemas" / "polygons-1.schema.json").read_text())
 RESERVED = {"depth", "celltype", "Cell Sets", "Face Sets", "Edge Sets", "Vertex Sets", "marker", "ghost", "vtk",
@@ -77,8 +77,8 @@ def test_polygons_1_is_exact(tmp_path: Path, variant: str, margin: int) -> None:
     jsonschema.validate(doc, SCHEMA)
     assert doc["version"] == "polygons/1"
     props = [f["properties"] for f in doc["features"]]
-    assert {p["tag"] for p in props} <= (set(edges.AREA_TAGS) | set(edges.EDGE_TAGS)) - RESERVED
-    assert all(p["value"] == (edges.AREA_TAGS if p["kind"] == "area" else edges.EDGE_TAGS)[p["tag"]] for p in props)
+    assert {p["tag"] for p in props} <= (set(AREA_TAGS) | set(EDGE_TAGS)) - RESERVED
+    assert all(p["value"] == (AREA_TAGS if p["kind"] == "area" else EDGE_TAGS)[p["tag"]] for p in props)
     area_tags = {p["tag"] for p in props if p["kind"] == "area"}
     assert area_tags == ({"surviving", "necrotic"} if variant == "follow" else {"tissue"})
     edge_tags = {p["tag"] for p in props if p["kind"] == "edge"}
