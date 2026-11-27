@@ -112,7 +112,7 @@ def test_slidesim_accepts_the_polygons(tmp_path: Path, variant: str, margin: int
     np.savez(lobules, position=position, lumen_class=np.zeros((N, N), np.uint8), working_um_per_px=1.0,
              working_origin_um=np.array([0.0, 0.0]), reference="syn")
     out = tmp_path / "scene"
-    write_scene.write(None, lobules, out, polygons=made["path"], size_um="5:20")
+    write_scene.write(made["path"], "5:20", lobules, out)
     result = subprocess.run([str(SLIDESIM), "mesh", str(out / "scene.json"), "--out", str(tmp_path / "mesh")],
                             capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr[-2000:]

@@ -1,4 +1,4 @@
-"""Boundary chains of tagged areas: each boundary segment once, the wall classes of the gmsh mesher's fixture."""
+"""Boundary chains of tagged areas: each boundary segment once, the wall classes of lumen holes."""
 
 from __future__ import annotations
 
@@ -66,9 +66,8 @@ def test_section_edge_where_the_domain_ends_inside_the_field() -> None:
     assert set(chains) == {"section_edge"}
 
 
-def test_wall_classes_of_the_gmsh_fixture() -> None:
-    """The fixture of test_wall_tags.py: portal, central and unclassified lumen holes. build_mesh and edge_chains share
-    one classify_walls (edges.py), so this checks the expected classes; the gmsh side runs in the pixi env."""
+def test_wall_classes_of_lumen_holes() -> None:
+    """Portal, central and unclassified lumen holes: one chain each, named by the lumen classes beside it."""
     domain = box(0, 0, 100, 100)
     lumen = np.zeros((100, 100), bool)
     lumen_class = np.zeros((100, 100), np.uint8)

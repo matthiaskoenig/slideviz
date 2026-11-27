@@ -1,10 +1,9 @@
-"""Write a slidesim scene: scene.json for a mesh and its zonation position, CYP2E1 and necrosis as Zarr maps.
+"""Write a slidesim scene: scene.json for tagged polygons and their zonation position, CYP2E1 and necrosis as Zarr maps.
 
-Reads either the mesh record of mesh/build_mesh.py (--mesh, with its _view.npz and .msh beside it) or the tagged
-polygons of mesh/polygons.py (--polygons with --size-um SMALL:LARGE; slidesim meshes them with that size field),
-and the <stem>_lobules.npz of
-zonation_layers.py. The zonation map is the position (0 periportal, 1 pericentral) cropped to the mesh bounding box
-plus a margin, in the scene's [x, y] um frame (x = column, y = row). Optional maps on the same grid and crop:
+Reads the tagged polygons of mesh/polygons.py (--polygons with --size-um SMALL:LARGE; slidesim meshes them with that
+size field) and the <stem>_lobules.npz of zonation_layers.py. The zonation map is the position (0 periportal,
+1 pericentral) cropped to the bounding box of the polygons plus a margin, in the scene's [x, y] um frame (x = column,
+y = row). Optional maps on the same grid and crop:
 
 - cyp2e1: the position of cyp2e1_readout.py (on the H&E working grid) divided by its 250, the DAB between the low
   (0) and high (1) of its 500 um window;
@@ -12,7 +11,7 @@ plus a margin, in the scene's [x, y] um frame (x = column, y = row). Optional ma
 
 Pixels without a value (outside the section, not tissue, not measured) take the nearest valid one; the share of such
 pixels and the source of each map are in the provenance attribute of its Zarr array (scene/1 has no field for them).
-Runs in the uv env; it needs neither gmsh nor DOLFINx.
+Runs in the uv env.
 """
 
 from __future__ import annotations
@@ -63,19 +62,6 @@ def window(points_um: np.ndarray, um: float, origin_xy: np.ndarray, shape: tuple
     if x0 >= x1 or y0 >= y1:
         raise ValueError("the mesh lies outside the position raster")
     return slice(int(y0), int(y1)), slice(int(x0), int(x1))
-
-
-def mesh_file(record_path: Path, record: dict, suffix: str) -> Path:
-    """The file of a mesh record ending in suffix (".msh", "_view.npz"), beside the record.
-
-    The record's "files" list names it; a record without the list gives its own name without ".json" plus the suffix.
-    Never Path.with_suffix: mesh names have dots (mouse.v2_plain_h2.5-10um), and it would cut them at the first one.
-    """
-    named = [f for f in record.get("files", []) if f.endswith(suffix)]
-    if len(named) > 1:
-        raise ValueError(f"{record_path} lists several {suffix} files: {named}")
-    name = named[0] if named else record_path.name.removesuffix(".json") + suffix
-    return record_path.with_name(name)
 
 
 def map_path(map_id: str) -> str:
@@ -155,45 +141,22 @@ def polygons_points(path: Path) -> tuple[np.ndarray, set[str]]:
     return np.asarray(points, float), edge_tags
 
 
-def write(record_path: Path | None, lobules: Path, out: Path, cyp2e1: Path | None = None,
-          necrosis: Path | None = None, polygons: Path | None = None, size_um: str | None = None) -> dict:
+def write(polygons: Path, size_um: str, lobules: Path, out: Path, cyp2e1: Path | None = None,
+          necrosis: Path | None = None) -> dict:
     """Write out/scene.json and out/maps/<id>.zarr; the scene document, validated against scene/1.
 
-    The mesh is the record of build_mesh.py (record_path) or the polygons/1 file (polygons, with size_um SMALL:LARGE).
-    The size field measures from the refined wall tags the polygons file has: slidesim rejects a wall tag it lacks.
+    The mesh is the polygons/1 file `polygons`, meshed by slidesim with the size field `size_um` (SMALL:LARGE). The size
+    field measures from the refined wall tags the polygons file has: slidesim rejects a wall tag it lacks.
     """
-    if (record_path is None) == (polygons is None):
-        raise ValueError("give either the mesh record (--mesh) or the tagged polygons (--polygons), not both")
-    if polygons is not None:
-        if size_um is None:
-            raise ValueError("--polygons needs --size-um SMALL:LARGE")
-        small, large = parse_size(size_um)
-        if not polygons.exists():
-            raise FileNotFoundError(f"the polygons file is missing: {polygons}; (re)build it with mesh/polygons.py")
-        mesh_path, mesh_inputs = polygons, ((polygons, "polygons file", "mesh/polygons.py"),)
-        points_um, present = polygons_points(polygons)
-    else:
-        if size_um is not None:
-            raise ValueError("--size-um belongs to --polygons")
-        if not record_path.exists():
-            raise FileNotFoundError(f"the mesh record is missing: {record_path}; (re)build it with mesh/build_mesh.py")
-        record = json.loads(record_path.read_text())
-        mesh_path = mesh_file(record_path, record, ".msh")
-        view_path = mesh_file(record_path, record, "_view.npz")
-        mesh_inputs = ((mesh_path, "mesh .msh", "mesh/build_mesh.py"), (view_path, "mesh _view.npz", "mesh/build_mesh.py"))
-    inputs = (*mesh_inputs,
+    small, large = parse_size(size_um)
+    inputs = ((polygons, "polygons file", "mesh/polygons.py"),
               (lobules, "lobules file", "scripts/zonation_layers.py"),
               *(((cyp2e1, "cyp2e1 readout", "scripts/cyp2e1_readout.py"),) if cyp2e1 else ()),
               *(((necrosis, "necrosis call map", "scripts/necrosis_slides.py"),) if necrosis else ()))
     for path, what, builder in inputs:
         if not path.exists():
             raise FileNotFoundError(f"the {what} is missing: {path}; (re)build it with {builder}")
-    if polygons is None:
-        edge_tags = record["tags"]["edges"]
-        if not {"portal_wall", "central_wall"} <= edge_tags.keys():
-            raise ValueError(f"{record_path} has no portal and central walls; rebuild the mesh with build_mesh.py")
-        with np.load(view_path) as view:
-            points_um = view["points_um"][:, :2]
+    points_um, present = polygons_points(polygons)
     with np.load(lobules) as stored:
         position = stored["position"]
         um = float(stored["working_um_per_px"])
@@ -221,11 +184,9 @@ def write(record_path: Path | None, lobules: Path, out: Path, cyp2e1: Path | Non
     for map_id, (values, provenance) in maps.items():
         save_map(out, map_id, values, provenance)
 
-    relative = Path(os.path.relpath(mesh_path, out)).as_posix()
-    mesh = ({"format": "gmsh", "path": relative} if polygons is None else
-            {"format": "polygons", "path": relative,
-             "size": {"min_um": small, "max_um": large, "dist_min_um": DIST_MIN * small,
-                      "dist_max_um": DIST_MAX * large, "walls": [t for t in REFINED if t in present]}})
+    mesh = {"format": "polygons", "path": Path(os.path.relpath(polygons, out)).as_posix(),
+            "size": {"min_um": small, "max_um": large, "dist_min_um": DIST_MIN * small,
+                     "dist_max_um": DIST_MAX * large, "walls": [t for t in REFINED if t in present]}}
     scene = {
         "version": "scene/1",
         "dimension": 2,
@@ -240,20 +201,18 @@ def write(record_path: Path | None, lobules: Path, out: Path, cyp2e1: Path | Non
 
 
 def main() -> None:
-    """Write the scene of one mesh."""
+    """Write the scene of one polygons file."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--mesh", type=Path, help="the .json record of a build_mesh.py mesh")
-    source.add_argument("--polygons", type=Path, help="the polygons/1 GeoJSON of mesh/polygons.py, meshed by slidesim")
-    parser.add_argument("--size-um", metavar="SMALL:LARGE",
-                        help="with --polygons: element size at the walls and far from them, in um")
+    parser.add_argument("--polygons", type=Path, required=True,
+                        help="the polygons/1 GeoJSON of mesh/polygons.py, meshed by slidesim")
+    parser.add_argument("--size-um", metavar="SMALL:LARGE", required=True,
+                        help="element size at the walls and far from them, in um")
     parser.add_argument("--lobules", type=Path, required=True, help="<stem>_lobules.npz of zonation_layers.py")
     parser.add_argument("--cyp2e1", type=Path, help="<stem>_cyp2e1_readout.npz of cyp2e1_readout.py, for a cyp2e1 map")
     parser.add_argument("--necrosis", type=Path, help="call map of necrosis_slides.py, for a necrosis map")
     parser.add_argument("--out", type=Path, required=True, help="the scene folder")
     args = parser.parse_args()
-    scene = write(args.mesh, args.lobules, args.out, cyp2e1=args.cyp2e1, necrosis=args.necrosis,
-                  polygons=args.polygons, size_um=args.size_um)
+    scene = write(args.polygons, args.size_um, args.lobules, args.out, cyp2e1=args.cyp2e1, necrosis=args.necrosis)
     for spec in scene["maps"]:
         array = zarr.open_array(args.out / spec["path"], mode="r")
         filled = array.attrs["provenance"]["filled_share"]

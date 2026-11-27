@@ -1,4 +1,4 @@
-"""The scene writer on a synthetic mesh view: schema, map frame and the nearest-neighbour fill (numpy only)."""
+"""The scene writer on synthetic tagged polygons: schema, map frame and the nearest-neighbour fill (numpy only)."""
 
 from __future__ import annotations
 
@@ -22,33 +22,26 @@ SHAPE = (90, 110)  # the working grid of make_lobules
 HE = "mouse_x_he"
 
 
-def square(points: list, x0: float, y0: float, x1: float, y1: float, tag: int, edges: list, tags: list) -> None:
-    corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
-    base = len(points)
-    points.extend(corners)
-    for i in range(4):
-        edges.append((base + i, base + (i + 1) % 4))
-        tags.append(tag)
+def ring(x0: float, y0: float, x1: float, y1: float) -> list:
+    return [[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]]
 
 
-def make_mesh(tmp_path: Path, stem: str = "m", listed: bool = True) -> Path:
-    """A 100 um square with a portal hole at x 10-20 and a central hole at x 80-90, and its record <stem>.json, which
-    lists its files (or not: listed False)."""
-    points: list = [(0, 0), (SIZE, 0), (SIZE, SIZE), (0, SIZE)]
-    edges: list = []
-    tags: list = []
-    square(points, 10, 40, 20, 60, 15, edges, tags)
-    square(points, 80, 40, 90, 60, 16, edges, tags)
-    mesh = tmp_path / "mesh"
-    mesh.mkdir()
-    np.savez_compressed(mesh / f"{stem}_view.npz", points_um=np.array(points, float), triangles=np.array([[0, 1, 2]]),
-                        edges=np.array(edges), edge_tag=np.array(tags))
-    (mesh / f"{stem}.msh").write_text("$MeshFormat\n")
-    record = {"tags": {"areas": {"tissue": 1}, "edges": {"vessel_wall": 11, "portal_wall": 15, "central_wall": 16}}}
-    if listed:
-        record["files"] = [f"{stem}{s}" for s in (".xdmf", ".h5", ".msh", "_view.npz")]
-    (mesh / f"{stem}.json").write_text(json.dumps(record))
-    return mesh / f"{stem}.json"
+PORTAL, CENTRAL = ring(10, 40, 20, 60), ring(80, 40, 90, 60)
+
+
+def make_field(tmp_path: Path) -> Path:
+    """A polygons/1 file: a 100 um square with a portal hole at x 10-20 and a central hole at x 80-90."""
+    def edge(tag: str, value: int, coordinates: list) -> dict:
+        return {"type": "Feature", "properties": {"kind": "edge", "tag": tag, "value": value},
+                "geometry": {"type": "LineString", "coordinates": coordinates}}
+
+    features = [{"type": "Feature", "properties": {"kind": "area", "tag": "surviving", "value": 1},
+                 "geometry": {"type": "Polygon", "coordinates": [ring(0, 0, SIZE, SIZE), PORTAL, CENTRAL]}},
+                edge("field_cut", 13, ring(0, 0, SIZE, SIZE)), edge("portal_wall", 15, PORTAL),
+                edge("central_wall", 16, CENTRAL)]
+    path = tmp_path / "m_field.geojson"
+    path.write_text(json.dumps({"type": "FeatureCollection", "version": "polygons/1", "features": features}))
+    return path
 
 
 def make_lobules(tmp_path: Path) -> Path:
@@ -70,7 +63,7 @@ def make_lobules(tmp_path: Path) -> Path:
 @pytest.fixture
 def scene(tmp_path: Path) -> tuple[Path, dict]:
     out = tmp_path / "out"
-    write_scene.write(make_mesh(tmp_path), make_lobules(tmp_path), out)
+    write_scene.write(make_field(tmp_path), "5:20", make_lobules(tmp_path), out)
     return out, json.loads((out / "scene.json").read_text())
 
 
@@ -84,17 +77,18 @@ def sample(array: np.ndarray, spec: dict, x: float, y: float) -> float:
     return float((1 - ty) * ((1 - tx) * a[0, 0] + tx * a[0, 1]) + ty * ((1 - tx) * a[1, 0] + tx * a[1, 1]))
 
 
-def edge_midpoints(tmp_path: Path, tag: int) -> np.ndarray:
-    with np.load(tmp_path / "mesh" / "m_view.npz") as view:
-        p = view["points_um"][view["edges"][view["edge_tag"] == tag]]
-    return p.mean(axis=1)
+def edge_midpoints(chain: list) -> np.ndarray:
+    p = np.asarray(chain, float)
+    return (p[1:] + p[:-1]) / 2
 
 
 def test_scene_valid(scene: tuple[Path, dict]) -> None:
     out, doc = scene
     jsonschema.validate(doc, SCHEMA)
     assert doc["version"] == "scene/1" and doc["dimension"] == 2
-    assert doc["mesh"] == {"format": "gmsh", "path": "../mesh/m.msh"}
+    assert doc["mesh"] == {"format": "polygons", "path": "../m_field.geojson",
+                           "size": {"min_um": 5.0, "max_um": 20.0, "dist_min_um": 10.0, "dist_max_um": 200.0,
+                                    "walls": ["portal_wall", "central_wall"]}}
     (spec,) = doc["maps"]
     assert spec["id"] == "zonation" and spec["path"] == "maps/zonation.zarr" and spec["um_per_px"] == UM
     array = zarr.open_array(out / spec["path"], mode="r")
@@ -103,12 +97,12 @@ def test_scene_valid(scene: tuple[Path, dict]) -> None:
     assert spec["origin_um"] == [-4.0, -4.0]  # [x, y], 2 px before x = 0 and y = 0
 
 
-def test_frame_matches_walls(tmp_path: Path, scene: tuple[Path, dict]) -> None:
+def test_frame_matches_walls(scene: tuple[Path, dict]) -> None:
     out, doc = scene
     (spec,) = doc["maps"]
     array = zarr.open_array(out / spec["path"], mode="r")[:]
-    portal = [sample(array, spec, *m) for m in edge_midpoints(tmp_path, 15)]
-    central = [sample(array, spec, *m) for m in edge_midpoints(tmp_path, 16)]
+    portal = [sample(array, spec, *m) for m in edge_midpoints(PORTAL)]
+    central = [sample(array, spec, *m) for m in edge_midpoints(CENTRAL)]
     assert max(portal) < 0.3 and min(central) > 0.7
 
 
@@ -126,28 +120,14 @@ def test_window_without_section_fails(tmp_path: Path) -> None:
     data["position"][:] = np.nan
     np.savez_compressed(lobules, **data)
     with pytest.raises(ValueError, match="no position"):
-        write_scene.write(make_mesh(tmp_path), lobules, tmp_path / "out")
+        write_scene.write(make_field(tmp_path), "5:20", lobules, tmp_path / "out")
 
 
 def test_missing_input_named(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="lobules file is missing.*zonation_layers.py"):
-        write_scene.write(make_mesh(tmp_path), tmp_path / "none_lobules.npz", tmp_path / "out")
-
-
-@pytest.mark.parametrize("listed", [True, False])
-def test_dotted_stem(tmp_path: Path, listed: bool) -> None:
-    """A mesh name with dots (a dotted slide stem, a decimal size): the .msh and _view.npz beside its record."""
-    stem = "mouse.v2_plain_h2.5-10um"
-    doc = write_scene.write(make_mesh(tmp_path, stem, listed), make_lobules(tmp_path), tmp_path / "out")
-    assert doc["mesh"]["path"] == f"../mesh/{stem}.msh"
-    assert doc["maps"][0]["origin_um"] == [-4.0, -4.0]  # the view of this mesh was read
-
-
-def test_missing_view_named(tmp_path: Path) -> None:
-    record = make_mesh(tmp_path, "mouse.v2_plain_h5-20um")
-    (record.parent / "mouse.v2_plain_h5-20um_view.npz").unlink()
-    with pytest.raises(FileNotFoundError, match=r"_view.npz is missing: .*mouse\.v2_plain_h5-20um_view\.npz"):
-        write_scene.write(record, make_lobules(tmp_path), tmp_path / "out")
+        write_scene.write(make_field(tmp_path), "5:20", tmp_path / "none_lobules.npz", tmp_path / "out")
+    with pytest.raises(FileNotFoundError, match="polygons file is missing.*mesh/polygons.py"):
+        write_scene.write(tmp_path / "none.geojson", "5:20", make_lobules(tmp_path), tmp_path / "out")
 
 
 def working_xy() -> tuple[np.ndarray, np.ndarray]:
@@ -189,7 +169,7 @@ def test_cell_maps_share_the_zonation_grid(tmp_path: Path) -> None:
     calls[unmeasured] = 255
     calls[23, 62] = 255  # x = 74 um, y = 16 um: a pixel inside the necrotic block, among 1s
     out = tmp_path / "out"
-    doc = write_scene.write(make_mesh(tmp_path), make_lobules(tmp_path), out,
+    doc = write_scene.write(make_field(tmp_path), "5:20", make_lobules(tmp_path), out,
                             cyp2e1=make_readout(tmp_path, readout), necrosis=make_calls(tmp_path, calls, UM))
     jsonschema.validate(doc, SCHEMA)
     maps = maps_of(out, doc)
@@ -227,7 +207,7 @@ def test_necrosis_resampled_from_level_grid(tmp_path: Path) -> None:
     X, Y = np.meshgrid(x, y)
     block = (X >= 20) & (X < 60) & (Y >= 30) & (Y < 70)
     out = tmp_path / "out"
-    doc = write_scene.write(make_mesh(tmp_path), make_lobules(tmp_path), out,
+    doc = write_scene.write(make_field(tmp_path), "5:20", make_lobules(tmp_path), out,
                             necrosis=make_calls(tmp_path, block, fine))
     spec, array = maps_of(out, doc)["necrosis"]
     necrosis = array[:]
@@ -250,13 +230,13 @@ def test_cell_maps_of_another_slide_rejected(tmp_path: Path) -> None:
     data["reference"] = "mouse_y_he"
     np.savez_compressed(readout, **data)
     with pytest.raises(ValueError, match="cyp2e1 map belongs to mouse_y_he, not mouse_x_he"):
-        write_scene.write(make_mesh(tmp_path), make_lobules(tmp_path), tmp_path / "out", cyp2e1=readout)
+        write_scene.write(make_field(tmp_path), "5:20", make_lobules(tmp_path), tmp_path / "out", cyp2e1=readout)
 
 
 def test_readout_on_another_grid_rejected(tmp_path: Path) -> None:
     readout = make_readout(tmp_path, np.full((SHAPE[0] // 2, SHAPE[1] // 2), 125))
     with pytest.raises(ValueError, match="cyp2e1 map .* is not on the working grid"):
-        write_scene.write(make_mesh(tmp_path), make_lobules(tmp_path), tmp_path / "out", cyp2e1=readout)
+        write_scene.write(make_field(tmp_path), "5:20", make_lobules(tmp_path), tmp_path / "out", cyp2e1=readout)
 
 
 def make_polygons(tmp_path: Path, tags: tuple[str, ...]) -> Path:
@@ -274,7 +254,7 @@ def make_polygons(tmp_path: Path, tags: tuple[str, ...]) -> Path:
 def test_polygons_scene_validates(tmp_path: Path) -> None:
     tags = ("vessel_wall", "portal_wall", "central_wall", "section_edge", "necrosis_border", "field_cut")
     out = tmp_path / "out"
-    doc = write_scene.write(None, make_lobules(tmp_path), out, polygons=make_polygons(tmp_path, tags), size_um="5:20")
+    doc = write_scene.write(make_polygons(tmp_path, tags), "5:20", make_lobules(tmp_path), out)
     jsonschema.validate(doc, SCHEMA)
     jsonschema.validate(json.loads((tmp_path / "m_polygons_1um.geojson").read_text()),
                         json.loads((Path(__file__).resolve().parents[1] / "schemas" / "polygons-1.schema.json").read_text()))
@@ -286,15 +266,19 @@ def test_polygons_scene_validates(tmp_path: Path) -> None:
 
 
 def test_polygons_scene_walls_are_those_present(tmp_path: Path) -> None:
-    doc = write_scene.write(None, make_lobules(tmp_path), tmp_path / "out",
-                            polygons=make_polygons(tmp_path, ("portal_wall", "field_cut")), size_um="2.5:10")
+    doc = write_scene.write(make_polygons(tmp_path, ("portal_wall", "field_cut")), "2.5:10", make_lobules(tmp_path),
+                            tmp_path / "out")
     assert doc["mesh"]["size"]["walls"] == ["portal_wall"] and doc["mesh"]["size"]["dist_min_um"] == 5.0
 
 
-@pytest.mark.parametrize("kwargs", [{"size_um": "5:20"}, {"polygons": True}, {"polygons": True, "size_um": "20:5"},
-                                    {"polygons": True, "size_um": "5"}])
-def test_polygons_scene_arguments_rejected(tmp_path: Path, kwargs: dict) -> None:
-    polygons = make_polygons(tmp_path, ("portal_wall",)) if kwargs.get("polygons") else None
-    with pytest.raises(ValueError):
-        write_scene.write(None, make_lobules(tmp_path), tmp_path / "out", polygons=polygons,
-                          size_um=kwargs.get("size_um"))
+@pytest.mark.parametrize("size_um", ["20:5", "5", "0:5", "a:b"])
+def test_polygons_scene_size_rejected(tmp_path: Path, size_um: str) -> None:
+    with pytest.raises(ValueError, match="--size-um"):
+        write_scene.write(make_polygons(tmp_path, ("portal_wall",)), size_um, make_lobules(tmp_path), tmp_path / "out")
+
+
+def test_old_polygons_rejected(tmp_path: Path) -> None:
+    path = make_polygons(tmp_path, ("portal_wall",))
+    path.write_text(path.read_text().replace("polygons/1", "polygons/0"))
+    with pytest.raises(ValueError, match="is not polygons/1"):
+        write_scene.write(path, "5:20", make_lobules(tmp_path), tmp_path / "out")

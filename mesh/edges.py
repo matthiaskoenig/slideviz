@@ -1,4 +1,4 @@
-"""Tagged boundary chains of areas, without gmsh: the edge features of a polygons/1 file and their wall classes.
+"""Tagged boundary chains of areas: the edge features of a polygons/1 file and their wall classes.
 
 The areas' rings are the only source of coordinates. Each ring segment is classified (between two areas, on the
 square's sides, around a vessel, the section's edge) and the segments of one tag are joined to chains, so a chain

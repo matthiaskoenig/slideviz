@@ -1,4 +1,4 @@
-"""Tag names and values and the size field constants shared by the mesh scripts; no dependencies (no shapely, gmsh)."""
+"""Tag names and values and the size field constants shared by the mesh scripts; no dependencies (no shapely)."""
 
 AREA_TAGS = {"surviving": 1, "necrotic": 2, "tissue": 3}
 EDGE_TAGS = {"vessel_wall": 11, "section_edge": 12, "field_cut": 13, "necrosis_border": 14, "portal_wall": 15,
