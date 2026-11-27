@@ -257,3 +257,44 @@ def test_readout_on_another_grid_rejected(tmp_path: Path) -> None:
     readout = make_readout(tmp_path, np.full((SHAPE[0] // 2, SHAPE[1] // 2), 125))
     with pytest.raises(ValueError, match="cyp2e1 map .* is not on the working grid"):
         write_scene.write(make_mesh(tmp_path), make_lobules(tmp_path), tmp_path / "out", cyp2e1=readout)
+
+
+def make_polygons(tmp_path: Path, tags: tuple[str, ...]) -> Path:
+    """A polygons/1 file over the 100 um square with a line feature per edge tag (geometry is not checked here)."""
+    square = [[0, 0], [SIZE, 0], [SIZE, SIZE], [0, SIZE], [0, 0]]
+    features = [{"type": "Feature", "properties": {"kind": "area", "tag": "surviving", "value": 1},
+                 "geometry": {"type": "Polygon", "coordinates": [square]}}]
+    features += [{"type": "Feature", "properties": {"kind": "edge", "tag": tag, "value": 11 + i},
+                  "geometry": {"type": "LineString", "coordinates": [[0, 0], [SIZE, 0]]}} for i, tag in enumerate(tags)]
+    path = tmp_path / "m_polygons_1um.geojson"
+    path.write_text(json.dumps({"type": "FeatureCollection", "version": "polygons/1", "features": features}))
+    return path
+
+
+def test_polygons_scene_validates(tmp_path: Path) -> None:
+    tags = ("vessel_wall", "portal_wall", "central_wall", "section_edge", "necrosis_border", "field_cut")
+    out = tmp_path / "out"
+    doc = write_scene.write(None, make_lobules(tmp_path), out, polygons=make_polygons(tmp_path, tags), size_um="5:20")
+    jsonschema.validate(doc, SCHEMA)
+    jsonschema.validate(json.loads((tmp_path / "m_polygons_1um.geojson").read_text()),
+                        json.loads((Path(__file__).resolve().parents[1] / "schemas" / "polygons-1.schema.json").read_text()))
+    assert doc["mesh"] == {"format": "polygons", "path": "../m_polygons_1um.geojson",
+                           "size": {"min_um": 5.0, "max_um": 20.0, "dist_min_um": 10.0, "dist_max_um": 200.0,
+                                    "walls": ["vessel_wall", "portal_wall", "central_wall", "section_edge",
+                                              "necrosis_border"]}}
+    assert doc["maps"][0]["origin_um"] == [-4.0, -4.0]  # the window follows the polygons' bounding box
+
+
+def test_polygons_scene_walls_are_those_present(tmp_path: Path) -> None:
+    doc = write_scene.write(None, make_lobules(tmp_path), tmp_path / "out",
+                            polygons=make_polygons(tmp_path, ("portal_wall", "field_cut")), size_um="2.5:10")
+    assert doc["mesh"]["size"]["walls"] == ["portal_wall"] and doc["mesh"]["size"]["dist_min_um"] == 5.0
+
+
+@pytest.mark.parametrize("kwargs", [{"size_um": "5:20"}, {"polygons": True}, {"polygons": True, "size_um": "20:5"},
+                                    {"polygons": True, "size_um": "5"}])
+def test_polygons_scene_arguments_rejected(tmp_path: Path, kwargs: dict) -> None:
+    polygons = make_polygons(tmp_path, ("portal_wall",)) if kwargs.get("polygons") else None
+    with pytest.raises(ValueError):
+        write_scene.write(None, make_lobules(tmp_path), tmp_path / "out", polygons=polygons,
+                          size_um=kwargs.get("size_um"))
