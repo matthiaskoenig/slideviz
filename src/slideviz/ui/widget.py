@@ -137,6 +137,15 @@ MESH_EDGES = "slideviz_mesh_edges"  # metadata key of a mesh's named edge layer
 # a flat view needs no depth test; with one, layers on the same plane can hide each other's lines
 MESH_BLENDING = "translucent_no_depth"
 
+# spt_viewer_layers.py output beside the predictions, per H&E slide: the SPT simulated necrosis, one mask per dose
+# rule, on the CYP2E1 readout's grid; the run's record holds each slide's simulated share per rule
+SIMULATED_SUFFIX = "_simulated_necrosis.npz"
+SIMULATED_RECORDS = "simulated_necrosis*.json"
+SIMULATED_NAME = "simulated necrosis"
+SIMULATED_RGB = (230 / 255, 159 / 255, 0.0)  # Okabe-Ito orange, the simulation's colour in the SPT report
+SIMULATED_LOOK = CALL_LOOK | {"colormap": CALL_LOOK["colormap"] | {
+    "colors": [[0.0, 0.0, 0.0, 0.0], [*SIMULATED_RGB, 1.0]], "name": SIMULATED_NAME}}
+
 # scripts/zonation_layers.py output beside the predictions, per DAB slide: the CYP2E1 landscape and its lobule borders
 LOBULES_SUFFIX = "_lobules.npz"
 BORDERS_NAME = "lobule borders"
@@ -290,6 +299,22 @@ def lobule_borders(path: Path, animal: str, sha256: str | None) -> Image:
                  blending=MESH_BLENDING)
 
 
+def simulated_layers(path: Path, animal: str, reference: str) -> list[Image]:
+    """The stored simulated necrosis of one H&E slide as one hidden see-through layer per dose rule."""
+    import numpy as np
+
+    with np.load(path) as stored:
+        if str(stored["reference"]) != reference:
+            raise ValueError(f"drawn on {stored['reference']}, not on {reference}")
+        shape = tuple(int(v) for v in stored["shape"])
+        um = float(stored["um_per_px"])
+        labels = json.loads(str(stored["labels"]))
+        masks = {key: np.unpackbits(stored[key], count=shape[0] * shape[1]).reshape(shape) for key in labels}
+    # a pyramid level's pixel q is centred on level-0 pixel factor * q, where napari puts it with no shift
+    return [Image(mask, name=layer_name(animal, f"{SIMULATED_NAME}, {labels[key]}"), scale=(um, um), units="um",
+                  visible=False, **SIMULATED_LOOK) for key, mask in masks.items()]
+
+
 @thread_worker
 def placed_maps(maps: list[tuple[Path, list[tuple[int, int]], float, str]]):
     """Each necrosis map on its H&E slide's pyramid level it is shown on, off the UI thread, with its layer name."""
@@ -309,6 +334,7 @@ class SlideList(QWidget):
         self._stain: dict[str, tuple] = {}
         self._readout: dict[str, dict] = {}
         self._necrosis_areas: dict[str, dict] = {}
+        self._simulated: dict[str, dict] = {}
         self._map_worker = None  # the necrosis map being placed on the H&E pyramid
         # level shapes of the block's reference slide, the grid a non-rigid layer is drawn on
         self._reference_shapes: list[tuple[int, int]] = []
@@ -546,6 +572,7 @@ class SlideList(QWidget):
                 lines.extend(details)
 
         lines.extend(self._necrosis_lines(directory, animal_name(block, slides[0]["substance"]), slides))
+        lines.extend(self._simulated_lines(directory, slides))
         lines.extend(self._readout_lines(directory, slides))
         self.info.setText("<br>".join(lines))
 
@@ -607,6 +634,35 @@ class SlideList(QWidget):
                         if key:
                             areas.setdefault(key, row | {"written": written})
         return self._necrosis_areas[data]
+
+    def _simulated_lines(self, directory: str, slides: list) -> list[str]:
+        """Info lines with each H&E slide's simulated necrotic share per dose rule, from the newest run record."""
+        record = self._simulated_record(directory)
+        lines = []
+        for row in slides:
+            shares = record.get("slides", {}).get(slide_stem(row))
+            if row["stain"] != REFERENCE_STAIN or not shares:
+                continue
+            lines.append(f"<br><b>Simulated necrosis</b> (SPT, {record['written'][:10]})")
+            lines.extend(f"{record['rules'][key]['label']}: {share:.0f}%" for key, share in shares.items())
+        return lines
+
+    def _simulated_record(self, data: str) -> dict:
+        """The newest simulated necrosis run record beside a data folder, read once and kept."""
+        if data not in self._simulated:
+            newest: dict = {}
+            directory = settings.predictions_dir(Path(data))
+            paths = sorted(directory.glob(SIMULATED_RECORDS)) if directory is not None and directory.is_dir() else []
+            for path in paths:
+                try:
+                    record = json.loads(path.read_text())
+                except (OSError, ValueError) as exc:
+                    log.warning("unreadable simulated necrosis record %s: %s", path, exc)
+                    continue
+                if record.get("written", "") > newest.get("written", ""):
+                    newest = record
+            self._simulated[data] = newest
+        return self._simulated[data]
 
     def _readout_lines(self, directory: str, slides: list) -> list[str]:
         """Info lines with the CYP2E1-positive share of each DAB slide in the block."""
@@ -836,6 +892,24 @@ class SlideList(QWidget):
                 visible=False,
             )
 
+    def _load_simulated(self, slides: list) -> None:
+        """Add each H&E slide's stored simulated necrosis, one hidden layer per dose rule, on that slide's grid."""
+        directory = settings.predictions_dir(Path(slides[0]["directory"]))
+        if directory is None or not directory.is_dir():
+            return
+        for row in slides:
+            path = directory / f"{slide_stem(row)}{SIMULATED_SUFFIX}"
+            if row["stain"] != REFERENCE_STAIN or not path.exists():
+                continue
+            try:
+                layers = simulated_layers(path, animal_name(row["serial_block"], row["substance"]), slide_stem(row))
+            except (OSError, ValueError, KeyError) as exc:
+                log.exception("could not load simulated necrosis %s", path)
+                self.status.setText(f"{path.name}: {type(exc).__name__}: {exc}")
+                continue
+            for layer in layers:
+                self.viewer.add_layer(layer)
+
     def _load_lobules(self, slides: list) -> None:
         """Add the stored lobule borders of each DAB slide, hidden, on its H&E partner's grid."""
         directory = settings.predictions_dir(Path(slides[0]["directory"]))
@@ -936,6 +1010,7 @@ class SlideList(QWidget):
             # CYP2E1 first, so the see-through necrosis lies on top and their overlap mixes
             self._load_readouts(slides)
             self._load_lobules(slides)
+            self._load_simulated(slides)
             self._load_meshes(animal, directory)
             self._load_necrosis(animal, state["he"])
             log.info("opened %s", block_title(slides[0]))
